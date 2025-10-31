@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -43,7 +43,7 @@ extension SerializationVersion: CustomStringConvertible {
         case .V1:
             return ".V1"
         default:
-            return "SerializationVerions(rawValue: \(self.rawValue))"
+            return "SerializationVersion(rawValue: \(self.rawValue))"
         }
     }
 }
@@ -161,12 +161,18 @@ extension TransparencyByteBuffer {
 // } Extension;
 
 enum TransparencyExtension {
+    case releaseType(TransparencyExtensionType, TransparencyByteBuffer)
+    case insertionTimeMs(TransparencyExtensionType, TransparencyByteBuffer)
     case unknownExtension(TransparencyExtensionType, TransparencyByteBuffer)
 
     var type: TransparencyExtensionType {
         switch self {
+        case .releaseType(let type, _):
+            type
+        case .insertionTimeMs(let type, _):
+            type
         case .unknownExtension(let type, _):
-            return type
+            type
         }
     }
 }
@@ -179,6 +185,10 @@ extension TransparencyByteBuffer {
         var written = self.writeTransparencyExtensionType(ext.type)
         written += self.writeVariableLengthVector(lengthFieldType: UInt16.self) { buffer in
             switch ext {
+            case .releaseType(_, let extensionData):
+                return buffer.writeImmutableBuffer(extensionData)
+            case .insertionTimeMs(_, let extensionData):
+                return buffer.writeImmutableBuffer(extensionData)
             case .unknownExtension(_, let extensionData):
                 return buffer.writeImmutableBuffer(extensionData)
             }
@@ -192,7 +202,11 @@ extension TransparencyByteBuffer {
         }
 
         return try self.readVariableLengthVector(lengthFieldType: UInt16.self) { extensionData in
-            switch type {
+            switch type.rawValue {
+            case 1:
+                return .releaseType(type, extensionData.readSlice(length: extensionData.readableBytes)!)
+            case 2:
+                return .insertionTimeMs(type, extensionData.readSlice(length: extensionData.readableBytes)!)
             default:
                 // We ignore unknown extensions
                 return .unknownExtension(type, extensionData.readSlice(length: extensionData.readableBytes)!)
@@ -293,4 +307,40 @@ extension ATLeafData: Hashable {
             (lhs.expiryMs == rhs.expiryMs) &&
             (lhs.extensions.sorted(by: { $0.type.rawValue < $1.type.rawValue }) == rhs.extensions.sorted(by: { $0.type.rawValue < $1.type.rawValue }))
     }
+}
+
+extension ATLeafData {
+    var releaseType: ATReleaseType {
+        for ext in self.extensions {
+            switch ext {
+            case .releaseType(_, var buffer):
+                if let type = buffer.readInteger(as: UInt8.self),
+                   let releaseType = ATReleaseType(rawValue: type) {
+                    return releaseType
+                }
+            default:
+                continue
+            }
+        }
+
+        return .production
+    }
+
+    var insertionTime: UInt64? {
+        for ext in self.extensions {
+            switch ext {
+            case .insertionTimeMs(_, var buffer):
+                return buffer.readInteger(as: UInt64.self)
+            default:
+                continue
+            }
+        }
+
+        return nil
+    }
+}
+
+enum ATReleaseType: UInt8 {
+    case production = 0
+    case seed = 1
 }

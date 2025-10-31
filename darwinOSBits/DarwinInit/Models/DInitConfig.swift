@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -35,6 +35,7 @@ struct DInitConfig {
     var networkConfig: [DInitNetworkConfig]?
     var networkUplinkMTU: Int?
     var tailspinConfig: DInitTailSpinConfig?
+    var featureFlagsConfig: [DInitFeatureFlags]?
 
     var logText: String?
     
@@ -87,6 +88,17 @@ struct DInitConfig {
 	}
     
     var bandwidthLimit: UInt64?
+    
+    func parseConfigSecurityPolicy() throws -> ConfigSecurityPolicy? {
+        guard let configSecurityPolicy else {
+            return nil
+        }
+        if let result = ConfigSecurityPolicy(rawValue: configSecurityPolicy) {
+            return result
+        } else {
+            throw ValidationError("Unknown config security policy: \(configSecurityPolicy)")
+        }
+    }
 }
 
 extension DInitConfig {
@@ -130,6 +142,7 @@ extension DInitConfig {
         case networkConfig = "network"
         case networkUplinkMTU = "network-uplink-mtu"
         case tailspinConfig = "tailspin"
+        case featureFlagsConfig = "feature_flags"
 
         case logText = "logtext"
         
@@ -237,6 +250,8 @@ extension DInitConfig: Decodable {
         
         bandwidthLimit = try container.decodeIfPresent(UInt64.self, forKey: .bandwidthLimit)
 
+        featureFlagsConfig = try container.decodeIfPresent([DInitFeatureFlags].self, forKey: .featureFlagsConfig)
+
 		lockCryptexes = try container.decodeIfPresent(Bool.self, forKey: .lockCryptexes)
     }
 }
@@ -259,7 +274,8 @@ extension DInitConfig: Encodable {
         try container.encodeIfPresent(networkUplinkMTU, forKey: .networkUplinkMTU)
         try container.encodeIfPresent(tailspinConfig, forKey: .tailspinConfig)
         try container.encodeIfPresent(logText, forKey: .logText)
-        
+        try container.encodeIfPresent(featureFlagsConfig, forKey: .featureFlagsConfig)
+
         try container.encodeIfPresent(legacyComputerName, forKey: .legacyComputerName)
         try container.encodeIfPresent(legacyHostName, forKey: .legacyHostName)
         try container.encodeIfPresent(legacyFQDN, forKey: .legacyFQDN)

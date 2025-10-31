@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -88,7 +88,7 @@ public final class CloudRemoteDiagnosticsClient: Sendable {
                 xpc_remote_connection_send_message_with_reply(self.connection, message, nil, callback)
             }
         } onCancel: { [connection = self.connection] in
-            logger.info("Task cancelled, cancelling rxpc connection.")
+            logger.notice("Task cancelled, cancelling rxpc connection.")
             xpc_remote_connection_cancel(connection)
         }
     }
@@ -309,9 +309,17 @@ public final class CloudRemoteDiagnosticsClient: Sendable {
     }
 }
 
-private func extractJsonReply(message: xpc_object_t ) -> String? {
+private func checkXPCDictionary(message: xpc_object_t) -> Bool {
     guard xpc_get_type(message) == XPC_TYPE_DICTIONARY else {
-        logger.error("Received unexpected message type. Not an XPC Dictionary");
+        let msgType = String(cString: xpc_type_get_name(xpc_get_type(message)))
+        logger.error("Received unexpected message type \(msgType). Message is \(String(describing: message)) Not an XPC Dictionary")
+        return false
+    }
+    return true
+}
+
+private func extractJsonReply(message: xpc_object_t ) -> String? {
+    guard checkXPCDictionary(message: message) else {
         return nil
     }
     guard let reply = xpc_dictionary_get_string(message, "reply") else {
@@ -321,8 +329,7 @@ private func extractJsonReply(message: xpc_object_t ) -> String? {
 }
 
 private func extractXpcObjectReply(message: xpc_object_t ) -> xpc_object_t? {
-    guard xpc_get_type(message) == XPC_TYPE_DICTIONARY else {
-        logger.error("Received unexpected message type. Not an XPC Dictionary");
+    guard checkXPCDictionary(message: message) else {
         return nil
     }
 

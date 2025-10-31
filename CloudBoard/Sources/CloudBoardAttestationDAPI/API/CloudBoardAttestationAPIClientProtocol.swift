@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,11 +14,12 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
+internal import CloudBoardAsyncXPC
 import CryptoKit
 import Foundation
 import Security
 
-public protocol CloudBoardAttestationAPIClientProtocol: CloudBoardAttestationAPIClientToServerProtocol {
+package protocol CloudBoardAttestationAPIClientProtocol: CloudBoardAttestationAPIClientToServerProtocol {
     func set(delegate: CloudBoardAttestationAPIClientDelegateProtocol) async
     func connect() async
 }
@@ -37,8 +38,9 @@ public struct AttestedKeySet: Codable, Sendable, Equatable {
 }
 
 public enum AttestedKeyType: Codable, Sendable, Equatable {
+    // using the SEP and keychain properly
     case keychain(persistentKeyReference: Data)
-    /// Supported temporarily while we don't yet have vSEP support in VMs
+    // for testing when the SEP isn't viable
     case direct(privateKey: Data)
 }
 
@@ -50,15 +52,30 @@ public struct AttestedKey: Codable, Sendable, Equatable {
     public var attestationBundle: Data
     /// Date after which CloudBoard will reject incoming requests wrapped to this key
     public var expiry: Date
-    /// Date after which ROPES should stop publishing the attestation and should fetch a new attestated key set from
-    /// CloudBoard
-    public var publicationExpiry: Date
+    /// The sha-256 digest of the release section of the attestation bundle
+    public var releaseDigest: String
+    /// Is the attestation valid to be used even if it is no longer published to the client
+    /// and is still cached by the client
+    public var availableOnNodeOnly: Bool
+    /// The sha-256 digest of the releases of worker nodes which the trusted proxy node with this key can forward
+    /// requests to
+    /// This is empty for a compute node
+    public var proxiedReleaseDigests: [String]
 
-    public init(key: AttestedKeyType, attestationBundle: Data, expiry: Date, publicationExpiry: Date) {
+    public init(
+        key: AttestedKeyType,
+        attestationBundle: Data,
+        expiry: Date,
+        releaseDigest: String,
+        availableOnNodeOnly: Bool,
+        proxiedReleaseDigests: [String] = []
+    ) {
         self.key = key
         self.attestationBundle = attestationBundle
         self.expiry = expiry
-        self.publicationExpiry = publicationExpiry
+        self.releaseDigest = releaseDigest
+        self.availableOnNodeOnly = availableOnNodeOnly
+        self.proxiedReleaseDigests = proxiedReleaseDigests
     }
 }
 
@@ -73,14 +90,26 @@ public struct AttestationSet: Codable, Sendable, Equatable {
         public var attestationBundle: Data
         /// Date after which CloudBoard will reject incoming requests wrapped to this key
         public var expiry: Date
-        /// Date after which ROPES should stop publishing the attestation and should fetch a new attested key set from
-        /// CloudBoard
-        public var publicationExpiry: Date
+        /// The sha-256 digest of the release section of the attestation bundle
+        public var releaseDigest: String
+        /// If true, the attestation key id should not be sent to ROPES
+        /// The key id is still valid to be used till it's expiry
+        public var availableOnNodeOnly: Bool
+        /// The sha-256 digest of the releases of nodes which the node with this key can proxy requests to
+        public var proxiedReleaseDigests: [String]
 
-        public init(attestationBundle: Data, expiry: Date, publicationExpiry: Date) {
+        public init(
+            attestationBundle: Data,
+            expiry: Date,
+            releaseDigest: String,
+            availableOnNodeOnly: Bool,
+            proxiedReleaseDigests: [String] = []
+        ) {
             self.attestationBundle = attestationBundle
             self.expiry = expiry
-            self.publicationExpiry = publicationExpiry
+            self.releaseDigest = releaseDigest
+            self.availableOnNodeOnly = availableOnNodeOnly
+            self.proxiedReleaseDigests = proxiedReleaseDigests
         }
     }
 
@@ -110,15 +139,77 @@ extension AttestationSet.Attestation {
         self = .init(
             attestationBundle: key.attestationBundle,
             expiry: key.expiry,
-            publicationExpiry: key.publicationExpiry
+            releaseDigest: key.releaseDigest,
+            availableOnNodeOnly: key.availableOnNodeOnly,
+            proxiedReleaseDigests: key.proxiedReleaseDigests
         )
     }
 }
 
-public protocol CloudBoardAttestationAPIClientToServerProtocol: Actor {
+/// Represents the results of validating an attestation for a worker successfully
+/// Many useful pieces of information are available at this point and exposed here
+///
+/// This hides _almost_ all the actual ``CloudAttestation`` API so that test use cases
+/// (using InMemoryKeys) can function correctly without most code needing to know
+/// about them.
+package struct ValidatedWorker: ByteBufferCodable, Sendable {
+    /// The key should not be used after this date
+    public var expiration: Date
+
+    /// The public key which can be used to establish a secure communication channel with
+    public var publicKey: Curve25519.KeyAgreement.PublicKey
+
+    /// The SHA256 digest of the release this attestation is for
+    public var releaseDigest: String
+
+    public init(
+        expiration: Date,
+        publicKey: Curve25519.KeyAgreement.PublicKey,
+        releaseDigest: String
+    ) {
+        self.expiration = expiration
+        self.publicKey = publicKey
+        self.releaseDigest = releaseDigest
+    }
+
+    func encode(to buffer: inout ByteBuffer) throws {
+        try self.expiration.encode(to: &buffer)
+        try PublicKeyEnvelope(self.publicKey).encode(to: &buffer)
+        try self.releaseDigest.encode(to: &buffer)
+    }
+
+    init(from buffer: inout ByteBuffer) throws {
+        self.expiration = try .init(from: &buffer)
+        self.publicKey = try PublicKeyEnvelope(from: &buffer).key
+        self.releaseDigest = try .init(from: &buffer)
+    }
+}
+
+/// API used by a job helper to validate a worker's attestation
+/// Done as a separate protocol to simplify mocking
+package protocol CloudBoardAttestationWorkerValidationProtocol: Sendable {
+    func validateWorkerAttestation(
+        // The id of the relevant key the parent request is operating under
+        // This defines which releases are valid implicitly
+        proxyAttestationKeyID: Data,
+        // The raw attestation bundle to validate and parse
+        rawWorkerAttestationBundle: Data
+    ) async throws -> ValidatedWorker
+}
+
+package protocol CloudBoardAttestationAttestationLookupProtocol: Actor {
     func requestAttestedKeySet() async throws -> AttestedKeySet
     func requestAttestationSet() async throws -> AttestationSet
 }
+
+package protocol CloudBoardAttestationAttestationRevocationProtocol: Actor {
+    func forceRevocation(keyIDs: [Data]) async throws
+}
+
+package protocol CloudBoardAttestationAPIClientToServerProtocol:
+    CloudBoardAttestationAttestationLookupProtocol,
+    CloudBoardAttestationWorkerValidationProtocol,
+    CloudBoardAttestationAttestationRevocationProtocol {}
 
 public protocol CloudBoardAttestationAPIClientDelegateProtocol: AnyObject, Sendable,
 CloudBoardAttestationAPIServerToClientProtocol {
@@ -139,7 +230,7 @@ extension AttestedKey: CustomStringConvertible {
         """
         key ID \(self.keyID.base64EncodedString()), \
         expiry \(self.expiry), \
-        publication expiry \(self.publicationExpiry)
+        proxied releases \(String(describing: self.proxiedReleaseDigests))
         """
     }
 }
@@ -165,8 +256,7 @@ extension AttestationSet.Attestation: CustomStringConvertible {
     public var description: String {
         """
         key ID \(self.keyID.base64EncodedString()), \
-        expiry \(self.expiry), \
-        publication expiry \(self.publicationExpiry)
+        expiry \(self.expiry)
         """
     }
 }

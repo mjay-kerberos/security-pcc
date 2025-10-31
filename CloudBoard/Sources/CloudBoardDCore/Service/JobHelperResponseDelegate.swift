@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,6 +14,7 @@
 
 // Copyright © 2024 Apple. All rights reserved.
 
+import CloudBoardCommon
 import CloudBoardJobHelperAPI
 import Foundation
 import os
@@ -22,16 +23,35 @@ import os
 enum JobHelperInvokeWorkloadResponse: Sendable {
     case responseChunk(ResponseChunk)
     case failureReport(FailureReason)
+    case findWorker(FindWorkerQuery)
+    case workerError(UUID)
+}
+
+// cb_jobhelper response to be returned as a response in the InvokeProxyDialBack gRPC call
+enum JobHelperInvokeProxyDialBackResponse {
+    case decryptionKey(keyID: Data, Data)
+    case workerRequestMessage(Data, isFinal: Bool)
+    case workerRequestEOF
+}
+
+protocol JobHelperResponseDelegateProtocol: CloudBoardJobHelperAPIClientDelegateProtocol {
+    func registerWorker(
+        uuid: UUID,
+        responseContinuation: AsyncStream<JobHelperInvokeProxyDialBackResponse>.Continuation
+    )
 }
 
 // Delegate to handle messages from cb_jobhelper
-actor JobHelperResponseDelegate: CloudBoardJobHelperAPIClientDelegateProtocol {
+final class JobHelperResponseDelegate: JobHelperResponseDelegateProtocol {
     public static let logger: Logger = .init(
         subsystem: "com.apple.cloudos.cloudboard",
         category: "JobHelperResponseDelegate"
     )
 
     private let invokeWorkloadResponseContinuation: AsyncStream<JobHelperInvokeWorkloadResponse>.Continuation
+    typealias ProxyDialbackResponseContinuation = AsyncStream<JobHelperInvokeProxyDialBackResponse>.Continuation
+    private let workerContinuations: OSAllocatedUnfairLock<[UUID: ProxyDialbackResponseContinuation]> =
+        .init(initialState: [:])
 
     init(invokeWorkloadResponseContinuation: AsyncStream<JobHelperInvokeWorkloadResponse>.Continuation) {
         self.invokeWorkloadResponseContinuation = invokeWorkloadResponseContinuation
@@ -40,17 +60,77 @@ actor JobHelperResponseDelegate: CloudBoardJobHelperAPIClientDelegateProtocol {
     func cloudBoardJobHelperAPIClientSurpriseDisconnect() {
         Self.logger.info("surprise disconnect of job helper client")
         self.invokeWorkloadResponseContinuation.finish()
+        self.workerContinuations.withLock {
+            for workerContinuation in $0.values {
+                workerContinuation.finish()
+            }
+            $0.removeAll()
+        }
     }
 
-    func sendWorkloadResponse(_ response: JobHelperToCloudBoardDaemonMessage) {
+    func handleWorkloadResponse(_ response: JobHelperToCloudBoardDaemonMessage) {
         switch response {
         case .responseChunk(let responseChunk):
             self.invokeWorkloadResponseContinuation.yield(.responseChunk(responseChunk))
-            if responseChunk.isFinal {
-                self.invokeWorkloadResponseContinuation.finish()
-            }
         case .failureReport(let failureReason):
             self.invokeWorkloadResponseContinuation.yield(.failureReport(failureReason))
+        case .findWorker(let query):
+            self.invokeWorkloadResponseContinuation.yield(.findWorker(query))
+        case .workerDecryptionKey(let uuid, let keyID, let encapsulatedKey):
+            guard let workerContinuation = self.workerContinuations.withLock({ $0[uuid] }) else {
+                Self.logger.fault(
+                    "Received decryption key message for unknown worker ID: \(uuid, privacy: .public). Ignoring."
+                )
+                return
+            }
+            workerContinuation.yield(.decryptionKey(keyID: keyID, encapsulatedKey))
+        case .workerRequestMessage(let uuid, let data, let isFinal):
+            guard let workerContinuation = self.workerContinuations.withLock({ $0[uuid] }) else {
+                // This can happen due to a race condition in PCCClient which doesn't affect correctness in any way.
+                Self.logger.notice(
+                    "Received worker message for unknown worker ID: \(uuid, privacy: .public). Ignoring."
+                )
+                return
+            }
+            workerContinuation.yield(.workerRequestMessage(data, isFinal: isFinal))
+        case .workerRequestEOF(let uuid):
+            // We are not expecting any further messages to be sent to the worker
+            if let workerContinuation = self.workerContinuations.withLock({ $0.removeValue(forKey: uuid) }) {
+                workerContinuation.yield(.workerRequestEOF)
+                workerContinuation.finish()
+            } else {
+                // This can happen due to a race condition in PCCClient which doesn't affect correctness in any way.
+                Self.logger.notice(
+                    "Received worker message for unknown worker ID: \(uuid, privacy: .public). Ignoring."
+                )
+                return
+            }
+        case .workerError(let uuid):
+            // If a continuation exists for the worker where an error occured
+            // we indicate that there would be no further messages
+            if let workerContinuation = self.workerContinuations.withLock({ $0.removeValue(forKey: uuid) }) {
+                workerContinuation.yield(.workerRequestEOF)
+                workerContinuation.finish()
+            }
+
+            self.invokeWorkloadResponseContinuation.yield(.workerError(uuid))
+        case .jobHelperEOF:
+            self.invokeWorkloadResponseContinuation.finish()
+        }
+    }
+
+    func registerWorker(
+        uuid: UUID,
+        responseContinuation: ProxyDialbackResponseContinuation
+    ) {
+        self.workerContinuations.withLock { workerContinuations in
+            guard workerContinuations[uuid] == nil else {
+                Self.logger.fault(
+                    "Received worker registration for \(uuid, privacy: .public) already registered. Ignoring."
+                )
+                return
+            }
+            workerContinuations[uuid] = responseContinuation
         }
     }
 }
@@ -58,7 +138,7 @@ actor JobHelperResponseDelegate: CloudBoardJobHelperAPIClientDelegateProtocol {
 struct JobHelperResponseDelegateProvider: CloudBoardJobHelperResponseDelegateProvider {
     func makeDelegate(
         invokeWorkloadResponseContinuation: AsyncStream<JobHelperInvokeWorkloadResponse>.Continuation
-    ) -> CloudBoardJobHelperAPIClientDelegateProtocol {
+    ) -> JobHelperResponseDelegateProtocol {
         return JobHelperResponseDelegate(invokeWorkloadResponseContinuation: invokeWorkloadResponseContinuation)
     }
 }

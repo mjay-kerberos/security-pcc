@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,56 +14,47 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+package import CloudBoardAsyncXPC
 import Foundation
+import os
 
-public actor CloudBoardJobHelperAPIXPCClient {
+package actor CloudBoardJobHelperAPIXPCClient: CloudBoardJobHelperAPIClientProtocol,
+CloudBoardJobHelperAPIServerToClientHandlerProtocol {
+    public static let logger: os.Logger = .init(
+        subsystem: "com.apple.cloudos.cloudboard",
+        category: "CloudBoardJobHelperAPIXPCClient"
+    )
+
     private var connection: CloudBoardAsyncXPCConnection?
-    private weak var delegate: CloudBoardJobHelperAPIServerToClientProtocol?
+    private let description: StaticString
+    private let delegate: OSAllocatedUnfairLock<CloudBoardJobHelperAPIClientDelegateProtocol?> =
+        .init(initialState: nil)
 
-    internal init(connection: CloudBoardAsyncXPCConnection) async {
-        await self.connection = connection.handleConnectionInvalidated { _ in
-            await self.surpriseDisconnect()
-        }
-    }
-}
-
-extension CloudBoardJobHelperAPIXPCClient {
-    public static func localConnection() async -> CloudBoardJobHelperAPIXPCClient {
-        await self.init(connection: .connect(to: kCloudBoardJobHelperAPIXPCLocalServiceName))
-    }
-
-    public static func localConnection(_ uuid: UUID) async
-    -> CloudBoardJobHelperAPIXPCClient {
-        await self.init(
-            connection: .connect(
-                to: kCloudBoardJobHelperAPIXPCLocalServiceName,
-                withUUID: uuid
-            )
-        )
-    }
-}
-
-extension CloudBoardJobHelperAPIXPCClient {
-    private func surpriseDisconnect() async {
-        if self.connection != nil {
-            self.connection = nil
+    internal init(
+        connection: CloudBoardAsyncXPCConnection,
+        description: StaticString
+    ) async {
+        self.description = description
+        await self.connection = connection.handleConnectionInvalidated { [weak self] _ in
+            guard let self else { return }
+            // Will be delivered to the connection’s event handler if the named service could not be
+            // found in the XPC service namespace. The connection is useless and should be disposed of.
+            Self.logger.info("\(self.description, privacy: .public): connection invalidated")
+            await self.disconnect()
+        }.handleConnectionInterrupted { [weak self] _ in
+            guard let self else { return }
+            // Will be delivered to the connection’s event handler if the remote service exited.
+            // In general, sending a new message will cause the service to be launched on-demand, but that's
+            // not how JobHelper works and we have no way of recovering. The async XPC layer invalidates
+            // any connection that is interrupted so nothing further needs to be done in this case.
+            Self.logger.info("\(self.description, privacy: .public): connection interrupted")
         }
     }
 
-    public func disconnect() async {
-        if let connection = self.connection {
-            self.connection = nil
-            await connection.handleConnectionInvalidated(handler: nil)
-            await connection.cancel()
-        }
-    }
-}
-
-extension CloudBoardJobHelperAPIXPCClient: CloudBoardJobHelperAPIClientToServerProtocol {
     public func invokeWorkloadRequest(_ request: CloudBoardDaemonToJobHelperMessage) async throws {
-        try await self.connection?
-            .send(CloudBoardJobHelperAPIXPCClientToServerMessages.InvokeWorkload(message: request))
+        try await self.getConnection()?.send(
+            CloudBoardJobHelperAPIXPCClientToServerMessages.InvokeWorkload(message: request)
+        )
     }
 
     public func teardown() async throws {
@@ -75,21 +66,69 @@ extension CloudBoardJobHelperAPIXPCClient: CloudBoardJobHelperAPIClientToServerP
         try await self.connection?
             .send(CloudBoardJobHelperAPIXPCClientToServerMessages.Abandon())
     }
-}
 
-extension CloudBoardJobHelperAPIXPCClient: CloudBoardJobHelperAPIClientProtocol {
     public func set(delegate: CloudBoardJobHelperAPIClientDelegateProtocol) async {
-        self.delegate = delegate
+        self.delegate.withLock { $0 = delegate }
     }
 
     public func connect() async {
-        await self.connection?.activate(buildMessageHandlerStore: self.configureHandlers)
+        await self.getConnection()?.activate(buildMessageHandlerStore: self.configureHandlers)
+    }
+
+    /// Handles the inbound (from CBJobHelper) response.
+    ///
+    /// This is nonisolated to avoid context switching, which in turn may cause XPC message reordering,
+    /// on the response handling path.
+    package nonisolated func handleWorkloadResponse(_ response: JobHelperToCloudBoardDaemonMessage) {
+        guard let delegate = self.delegate.withLock({ $0 }) else {
+            Self.logger.warning("No delegate set when handling workload response")
+            return
+        }
+        delegate.handleWorkloadResponse(response)
     }
 
     internal func configureHandlers(_ handlers: inout CloudBoardAsyncXPCConnection.MessageHandlerStore) {
-        handlers.register(CloudBoardJobHelperAPIXPCServerToClientMessages.WorkloadResponse.self) { response in
-            try await self.delegate?.sendWorkloadResponse(response.message)
-            return ExplicitSuccess()
+        handlers.register(JobHelperToCloudBoardDaemonMessage.self) { [weak self] message in
+            guard let self else { return }
+            self.handleWorkloadResponse(message)
         }
+    }
+
+    private func getConnection(action: StaticString = #function) -> CloudBoardAsyncXPCConnection? {
+        if self.connection == nil {
+            Self.logger.warning(
+                "\(self.description, privacy: .public) has no connection to perform \(action, privacy: .public)"
+            )
+        }
+        return self.connection
+    }
+
+    public func disconnect() async {
+        Self.logger.info("\(self.description, privacy: .public) disconnect")
+        if let connection = self.connection {
+            self.connection = nil
+            await connection.handleConnectionInvalidated(handler: nil)
+            await connection.handleConnectionInterrupted(handler: nil)
+            await connection.cancel()
+        }
+        // no more connection - no more delegat as there won't be any responses anymore
+        self.delegate.withLock { $0 = nil }
+    }
+}
+
+/// Makes real clients that assume considerable launchd supporting logic and plumbing
+package final class CloudBoardJobHelperAPIXPCClientFactory: CloudBoardJobHelperAPIClientFactoryProtocol {
+    public init() {}
+
+    package func localConnection(
+        _ uuid: UUID
+    ) async -> any CloudBoardJobHelperAPIClientProtocol {
+        await CloudBoardJobHelperAPIXPCClient(
+            connection: .connect(
+                to: kCloudBoardJobHelperAPIXPCLocalServiceName,
+                withUUID: uuid
+            ),
+            description: "local connection to jobhelper with specific UUID"
+        )
     }
 }

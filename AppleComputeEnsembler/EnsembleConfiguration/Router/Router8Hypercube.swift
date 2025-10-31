@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -25,7 +25,7 @@ import OSLog
 private let logger = Logger(subsystem: kEnsemblerPrefix, category: "Router8Hypercube")
 
 final class Router8Hypercube: Router {
-	internal struct NodeState {
+	internal struct NodeState: Equatable {
 		/// Node rank
 		internal let node: Int
 		/// If the node is in the current node's chassis.
@@ -34,21 +34,35 @@ final class Router8Hypercube: Router {
 		internal var txEstablished: Bool
 		/// RX established from this node (to current node)
 		internal var rxEstablished: Bool
+		/// If the node is in the current node's partition.
+		internal let inPartition: Bool
 	}
 
 	internal var _configuration: RouterConfiguration
 	internal var ensembleFailed: Bool
 	internal var expectedTxConnections: Int
 	internal var expectedRxConnections: Int
+	internal var expectedNetworkConnections: Int
 	internal var transferMap: [Int: CIOTransferState]
 	#if false
 	internal var routeMap: [Int: String]
 	#endif
 	internal var cioMap: [Int: Int]
 
-	internal var ensembleNodes: [NodeState]
+	internal var ensembleNodes: [Int: NodeState]
 	internal var partnerNode: Int?
 	internal var forwardedPartnerToChassis: Bool
+
+	internal var myPartition: Int = 0
+	internal var partitionPartners: [Int: NodeState] = .init()
+
+	private func getParitionForNode(_ node: Int) -> Int {
+		node / 8
+	}
+
+	private func isPartitionPartner(_ node: Int) -> Bool {
+		return (self.nodeRank % 8) == (node % 8)
+	}
 
 	var configuration: RouterConfiguration {
 		self._configuration
@@ -59,7 +73,7 @@ final class Router8Hypercube: Router {
 	}
 
 	var allInnerChassisDiscovered: Bool {
-		let inChassisDiscoveredNodes = self.ensembleNodes.filter {
+		let inChassisDiscoveredNodes = self.ensembleNodes.values.filter {
 			$0.inChassis && $0.rxEstablished && $0.txEstablished
 		}
 
@@ -71,9 +85,14 @@ final class Router8Hypercube: Router {
 			return false
 		}
 
-		return self.ensembleNodes[partnerNode].rxEstablished && self.ensembleNodes[partnerNode]
-			.txEstablished
+		guard let partnerInfo = self.ensembleNodes[partnerNode] else {
+			return false
+		}
+
+		return partnerInfo.rxEstablished && partnerInfo.txEstablished
 	}
+
+	let nodePerPartition = 8
 
 	required init(configuration: RouterConfiguration) throws {
 		self._configuration = configuration
@@ -88,15 +107,30 @@ final class Router8Hypercube: Router {
 		self.ensembleNodes = .init()
 		self.partnerNode = nil
 		self.forwardedPartnerToChassis = false
+		let partitionCount = configuration.ensemble.nodes.count / self.nodePerPartition
+		self.expectedNetworkConnections = partitionCount - 1
 
-		guard configuration.ensemble.nodes.count == 8 else {
+		// we use this router config for ensemble size 8,16,32
+		guard configuration.ensemble.nodes.count == 8 ||
+			configuration.ensemble.nodes.count == 16 ||
+			configuration.ensemble.nodes.count == 32
+		else {
 			throw """
 			Invalid number of nodes in ensemble configuration: \(
 				configuration.ensemble.nodes
 					.count
-			). Expected 8."
+			). Expected node count in multiple of 8."
 			"""
 		}
+		self.myPartition = self.nodeRank / 8
+
+		logger.info("""
+		    Router8Hypercube: totalParitions:\(partitionCount, privacy: .public), 
+		    myPartition:\(self.myPartition, privacy: .public),
+		    expectedRxConnections:\(self.expectedRxConnections, privacy: .public),
+		    expectedTxConnections:\(self.expectedTxConnections, privacy: .public),
+		    expectedNetworkConnections:\(self.expectedNetworkConnections, privacy: .public)
+		""")
 
 		self.transferMap[self.nodeRank] = .init(
 			outputChannels: [],
@@ -104,30 +138,51 @@ final class Router8Hypercube: Router {
 		)
 
 		for node in configuration.ensemble.nodes.values {
-			self.ensembleNodes.append(.init(
-				node: node.rank,
-				inChassis: node.chassisID == configuration.node.chassisID,
-				txEstablished: node.rank == self.nodeRank,
-				rxEstablished: node.rank == self.nodeRank
-			))
-		}
-		// Sort `ensembleNodes` so that it can be indexed by rank.
-		self.ensembleNodes = self.ensembleNodes.sorted { left, right in
-			return left.node < right.node
+			if self.getParitionForNode(node.rank) == self.myPartition {
+				self.ensembleNodes[node.rank] = .init(
+					node: node.rank,
+					inChassis: node.chassisID == configuration.node.chassisID,
+					txEstablished: node.rank == self.nodeRank,
+					rxEstablished: node.rank == self.nodeRank,
+					inPartition: true
+				)
+			} else {
+				if self.isPartitionPartner(node.rank) {
+					self.partitionPartners[node.rank] = .init(
+						node: node.rank,
+						inChassis: false,
+						txEstablished: false,
+						rxEstablished: false,
+						inPartition: false
+					)
+
+					guard let hostName = node.hostName else {
+						logger.error("No hostname for partner node: \(node.rank, privacy: .public)")
+						self.configuration.delegate.ensembleFailed(failMsg: "No hostname for partner node: \(node.rank)")
+						return
+					}
+
+					self.configuration.delegate.addPeer(hostName: hostName, nodeRank: node.rank)
+				}
+			}
 		}
 	}
 
 	func channelChange(
 		channelIndex: Int,
 		node: Int,
-		chassis _: String,
+		chassis: String,
 		connected: Bool
 	) {
+		logger
+			.info(
+				"channelChange(channelIndex: \(channelIndex, privacy: .public), node: \(node, privacy: .public), chassis: \(chassis, privacy: .public), connected: \(connected, privacy: .public))"
+			)
 		if !connected {
 			if let _ = cioMap[channelIndex] {
 				self.cioMap.removeValue(forKey: channelIndex)
 				self.ensembleFailed = true
-				self.configuration.delegate.ensembleFailed()
+				self.configuration.delegate.ensembleFailed(failMsg: "channelChange: channelIndex=\(channelIndex), node=\(node), chassis=\(chassis) dis-connected")
 			}
 			return
 		}
@@ -143,18 +198,23 @@ final class Router8Hypercube: Router {
 			do {
 				try disableChannel(channelIndex)
 			} catch {
-				logger.error("Failed to disable channel: \(error)")
+				logger.error("Failed to disable channel: \(error, privacy: .public)")
 			}
 			self.ensembleFailed = true
-			self.configuration.delegate.ensembleFailed()
+            self.configuration.delegate.ensembleFailed(failMsg: "Failed to disable channel")
 			return
 		}
 
 		// And to the cio map
 		self.cioMap[channelIndex] = node
 
+		guard let nodeInfo = self.ensembleNodes[node] else {
+			logger.error("Channel change on unknown node: \(node, privacy: .public)")
+			return
+		}
+
 		// Found our partner node
-		if !self.ensembleNodes[node].inChassis {
+		if !nodeInfo.inChassis {
 			self.partnerNode = node
 		}
 
@@ -165,18 +225,25 @@ final class Router8Hypercube: Router {
 				cioChannelIndex: channelIndex
 			)
 		} catch {
-			logger.error("Failed to establish connection to node: \(node)")
+			logger.error("Failed to establish connection to node: \(node, privacy: .public)")
 			self.ensembleFailed = true
 
-			self.configuration.delegate.ensembleFailed()
+			self.configuration.delegate.ensembleFailed(failMsg: "Failed to establish connection to node: \(node)")
 			return
 		}
+	}
+
+	public func isPartitionEnsembleReady() -> Bool {
+		!self.ensembleFailed &&
+			self.expectedRxConnections == 0 &&
+			self.expectedTxConnections == 0
 	}
 
 	func isEnsembleReady() -> Bool {
 		!self.ensembleFailed &&
 			self.expectedRxConnections == 0 &&
-			self.expectedTxConnections == 0
+			self.expectedTxConnections == 0 &&
+			self.expectedNetworkConnections == 0
 	}
 
 	func connectionChange(
@@ -185,9 +252,13 @@ final class Router8Hypercube: Router {
 		node: Int,
 		connected: Bool
 	) {
+		logger
+			.info(
+				"connectionChange(direction: \(direction, privacy: .public), channelIndex: \(channelIndex, privacy: .public), node: \(node, privacy: .public), connected: \(connected, privacy: .public))"
+			)
 		if !connected {
 			self.ensembleFailed = true
-			self.configuration.delegate.ensembleFailed()
+			self.configuration.delegate.ensembleFailed(failMsg: "connectionChange: channelIndex:\(channelIndex), node:\(node) disconnected")
 			return
 		}
 
@@ -196,7 +267,7 @@ final class Router8Hypercube: Router {
 		}
 
 		if direction == .rx {
-			self.ensembleNodes[node].rxEstablished = true
+			self.ensembleNodes[node]?.rxEstablished = true
 			self.expectedRxConnections -= 1
 			self.transferMap[node]?.inputChannel = channelIndex
 		} else {
@@ -204,10 +275,10 @@ final class Router8Hypercube: Router {
 			self.transferMap[node]?.outputChannels.append(channelIndex)
 
 			guard let receiver = cioMap[channelIndex] else {
-				logger.error("No CIO receiver for CIO\(channelIndex)")
+				logger.error("No CIO receiver for CIO\(channelIndex, privacy: .public)")
 
 				self.ensembleFailed = true
-				self.configuration.delegate.ensembleFailed()
+				self.configuration.delegate.ensembleFailed(failMsg: "No CIO receiver for CIO\(channelIndex)")
 				return
 			}
 
@@ -215,22 +286,38 @@ final class Router8Hypercube: Router {
 				do {
 					try sendForwardMessage(source: node, receiver: receiver)
 				} catch {
-					logger.error("Failed to send forward message: \(error)")
+					logger.error("Failed to send forward message: \(error, privacy: .public)")
 
 					self.ensembleFailed = true
-					self.configuration.delegate.ensembleFailed()
+                    self.configuration.delegate.ensembleFailed(failMsg: "Failed to send forward message: \(error)")
 					return
 				}
 			} else {
-				self.ensembleNodes[receiver].txEstablished = true
+				self.ensembleNodes[receiver]?.txEstablished = true
 				#if false
 				self.routeMap[receiver] = "\(self.nodeRank)->\(receiver)"
 				#endif
 			}
 		}
 
+		logger.info("""
+		    connectionChange:
+		    expectedRxConnections:\(self.expectedRxConnections),
+		    expectedTxConnections:\(self.expectedTxConnections),
+		    expectedNetworkConnections:\(self.expectedNetworkConnections)
+		""")
+
 		if self.isEnsembleReady() {
+			logger.info("We have the ensemble activated!.")
 			self.configuration.delegate.ensembleReady()
+			return
+		}
+
+		if self.isPartitionEnsembleReady() {
+			logger
+				.info(
+					"We have the partition ensemble activated, waiting for peer network connection to happen before marking the ensemble activated."
+				)
 			return
 		}
 
@@ -244,7 +331,7 @@ final class Router8Hypercube: Router {
 
 		// Inner chassis and partner node discovered, forward the partner
 		// node to all the inner chassis nodes
-		let innerChassisNodes = self.ensembleNodes
+		let innerChassisNodes = self.ensembleNodes.values
 			.filter { $0.inChassis && $0.node != self.nodeRank }
 		guard let partnerNode = self.partnerNode else {
 			fatalError("""
@@ -271,11 +358,11 @@ final class Router8Hypercube: Router {
 			} catch {
 				logger.warning("""
 				Failed to forward \(partnerNode)'s data to
-				\(innerChassisNode.node) on CIO\(nodeCIOChannel)
+				\(innerChassisNode.node, privacy: .public) on CIO\(nodeCIOChannel, privacy: .public)
 				""")
 				self.ensembleFailed = true
 
-				self.configuration.delegate.ensembleFailed()
+				self.configuration.delegate.ensembleFailed(failMsg: "Failed to forward \(partnerNode)'s data to \(innerChassisNode.node) on CIO\(nodeCIOChannel)")
 				return
 			}
 		}
@@ -297,7 +384,29 @@ final class Router8Hypercube: Router {
 
 		self.routeMap[forward.receiver] = routeToForwarder + "->\(forward.receiver)"
 		#endif
-		self.ensembleNodes[forward.receiver].txEstablished = true
+		self.ensembleNodes[forward.receiver]?.txEstablished = true
+	}
+
+	func networkConnectionChange(
+		node: Int,
+		connected: Bool
+	) {
+		logger.info("networkConnectionChange: from node \(node, privacy: .public), connected status is \(connected, privacy: .public)")
+		guard self.partitionPartners.keys.contains(where: { $0 == node }) else {
+			logger.error("Network Connection to an unexpected node: \(node, privacy: .public). I am node \(self.nodeRank, privacy: .public).")
+			return
+		}
+
+		self.partitionPartners[node]?.rxEstablished = connected
+		self.partitionPartners[node]?.txEstablished = connected
+
+		if connected {
+			self.expectedNetworkConnections -= 1
+		}
+
+		if self.isEnsembleReady() {
+			self.configuration.delegate.ensembleReady()
+		}
 	}
 
 	func getCIOTransferMap() -> [Int: CIOTransferState] {

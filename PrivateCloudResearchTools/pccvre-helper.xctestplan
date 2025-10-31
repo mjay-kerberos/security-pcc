@@ -1,0 +1,30 @@
+{
+  "configurations" : [
+    {
+      "id" : "DE240C29-2194-4470-8EDC-67538FFC3F1B",
+      "name" : "Test Scheme Action",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "codeCoverage" : false,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:PrivateCloudResearchTools.xcodeproj",
+      "identifier" : "C0F0437B2CE69B4200FA52A8",
+      "name" : "pccvre-helper"
+    }
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:PrivateCloudResearchTools.xcodeproj",
+        "identifier" : "C0F043982CE6C1B200FA52A8",
+        "name" : "Tests"
+      }
+    }
+  ],
+  "version" : 1
+}

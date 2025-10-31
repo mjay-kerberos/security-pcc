@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -21,7 +21,7 @@ import ArgumentParserInternal
 
 struct Validate: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Validate a darwin-init configuration against a configuration security policy: customer or carry",
+        abstract: "Validate a darwin-init configuration against a configuration security policy: customer, customerProxy or carry",
         discussion: """
             Takes the file name of a json file, parses it, and validates it against the \
             configuration security policy specified in the config. All validation errors will be printed.

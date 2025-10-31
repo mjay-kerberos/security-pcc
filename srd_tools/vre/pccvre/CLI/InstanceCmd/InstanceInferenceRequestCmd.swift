@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -19,18 +19,8 @@ import ArgumentParserInternal
 import Foundation
 
 extension CLI.InstanceCmd {
-    struct InstanceInferenceRequestCmd: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(
-            commandName: "inference-request",
-            abstract: "Execute an LLM inference request in a VRE instance."
-        )
-
-        @OptionGroup var globalOptions: CLI.globalOptions
-        @OptionGroup var instanceOptions: CLI.InstanceCmd.options
-
-        @Option(name: [.customLong("name"), .customShort("N")], help: "VRE name.",
-                transform: { try CLI.validateVREName($0) })
-        var vreName: String
+    struct InferenceRequestOptions: ParsableArguments {
+      
 
         @Option(name: [.customLong("tools"), .customShort("T")],
                 help: "Path to PrivateCloudTools dmg file.",
@@ -52,184 +42,74 @@ extension CLI.InstanceCmd {
                 Takes effect only when com.apple.tie.internalRequestOptionsAllowed = true.
                 """, visibility: .hidden))
         var maxTokens: Int = 100
+    }
+    
+    struct InstanceInferenceRequestCmd: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "inference-request",
+            abstract: "Execute an LLM inference request in a VRE instance."
+        )
+
+        @Option(name: [.customLong("name"), .customShort("N")], help: "VRE name.",
+                transform: { try CLI.validateVREName($0) })
+        var vreName: String
+        
+        @OptionGroup var globalOptions: CLI.globalOptions
+        @OptionGroup var inferenceOptions: CLI.InstanceCmd.InferenceRequestOptions
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
             CLI.logger.log("make inference request to VRE \(vreName, privacy: .public)")
 
-            Main.printHardwareRecommendationWarningIfApplicable()
+            let vre = try VRE.Instance(name: vreName)
 
-            guard VRE.exists(vreName) else {
-                throw CLIError("VRE '\(vreName)' not found.")
-            }
-
-            let vre = try VRE(
-                name: vreName,
-                vrevmPath: instanceOptions.vrevmPath
-            )
-
-            var toolsDir: URL
-            var unmountCallback: (() -> Void)?
-
-            if let toolsDMGPath {
-                // caller-provided image: mount and use in place (don't unpack)
-                CLI.logger.log("caller-provided tools DMG: \(toolsDMGPath, privacy: .public)")
-                (toolsDir, unmountCallback) = try CLI.mountPCHostTools(vre: vre, dmgFile: toolsDMGPath)
-            } else {
-                toolsDir = try CLI.unpackPCTools(vre: vre)
-            }
-
+            let (toolsDir, unmountCallback) = try CLI.setupPCHostTools(vre, toolsDMGPath: inferenceOptions.toolsDMGPath)
             defer {
+                // if provided a DMG path to use for the diag call, don't copy it in, but unmount it once finished
                 if let unmountCallback {
                     unmountCallback()
                 }
             }
 
-            guard vre.vm.isRunning else {
+            if PCCVREHelper.configuredOrInToolsDir(toolsDir).supports(feature: .instanceInferenceRequestV1) {
+                fputs(
+                    """
+                    Warning:
+                    The PCC release of the instance might be incompatible with this command.
+                    Please use `pccvre instance invoke inference-request` instead.
+                    
+                    """, stderr
+                )
+            }
+
+            guard vre.isRunning else {
                 throw CLIError("VRE \(vreName) is not running")
             }
 
-            guard let vreIP = try vre.status().ipaddr else {
+            guard let vreIP = vre.status().ipaddr else {
                 throw CLIError("unable to determine IP address of VRE \(vreName)")
             }
 
-            if !skipHealthCheck {
-                guard let vreRSDname = try vre.status().rsdname else {
-                    throw CLIError("unable to determine RSD name of VRE \(vreName): may not be ready")
-                }
-
-                guard let cbAvailable = try? cloudboardAvailable(toolsDir: toolsDir, rsdName: vreRSDname),
+            if !inferenceOptions.skipHealthCheck {
+                guard let cbAvailable = try? CLI.checkCloudboardAvailable(vre, toolsDir: toolsDir),
                       cbAvailable
                 else {
                     throw CLIError("inference service not (yet) available")
                 }
             }
 
-            let tiePayload = try tiePayload()
-
+            print("Executing inference:")
             do {
-                try performInference(
+                try CLI.performInferenceRequest(
                     toolsDir: toolsDir,
                     hostname: vreIP,
-                    tiePayload: tiePayload
+                    prompt: inferenceOptions.prompt,
+                    maxTokens: inferenceOptions.maxTokens
                 )
             } catch {
                 throw CLIError("inference call failed: \(error)")
             }
 
             CLI.logger.log("inference call completed without error")
-        }
-
-        // cloudboardAvailable returns true if cloud-board-health (from cloudremotediagctl indicates "healthy"),
-        //  false otherwise -- error thrown if unable to complete call or parse result
-        private func cloudboardAvailable(
-            toolsDir: URL,
-            rsdName: String
-        ) throws -> Bool {
-            let envvars = [
-                "DYLD_FRAMEWORK_PATH": "\(toolsDir.path)/System/Library/PrivateFrameworks/"
-            ]
-
-            let diagCMD = "cloudremotediagctl"
-            let diagCLI = "\(toolsDir.path)/usr/local/bin/\(diagCMD)"
-            guard FileManager.isRegularFile(diagCLI) else {
-                throw CLIError("unable to find diag tool")
-            }
-
-            let commandLine = [diagCLI, "--device=\(rsdName)", "get-cloud-board-health"]
-            let logMsg = "cloudremotediagctl call: [env: \(envvars)] \(commandLine.joined(separator: " "))"
-            CLI.logger.log("\(logMsg, privacy: .public)")
-
-            let (exitCode, stdOutput, stdError) = try ExecCommand(commandLine, envvars: envvars).run(
-                outputMode: .capture,
-                queue: DispatchQueue(label: "\(applicationName).ExecCommand")
-            )
-
-            guard exitCode == 0 else {
-                if !stdError.isEmpty {
-                    CLI.logger.error("cloudremotediagctl error: \(stdError, privacy: .public)")
-                }
-
-                throw CLIError("cloudremotediagctl returned exitCode=\(exitCode)")
-            }
-
-            CLI.logger.log("cloudremotediagctl result: \(stdOutput, privacy: .public)")
-
-            // expecting result: {"CloudBoardHealthState":"healthy"} or {..: "unhealthy"}
-            guard let statusData = stdOutput.data(using: .utf8),
-                  let cbStateJSON = try? JSONSerialization.jsonObject(with: statusData,
-                                                                      options: []) as? [String: String],
-                  let cbState = cbStateJSON["CloudBoardHealthState"]
-            else {
-                throw CLIError("cloudremotediagctl: couldn't parse json result")
-            }
-
-            return cbState == "healthy"
-        }
-
-        private func tiePayload() throws -> String {
-            guard let escapedPrompt = try String(data: JSONEncoder().encode(prompt), encoding: .utf8) else {
-                throw CLIError("Unable to escape the prompt for JSON")
-            }
-
-            return #"""
-            {
-                "prompt_template": {
-                    "prompt_template_v1": {
-                        "prompt_template_id": "com.apple.gm.instruct.genericChat",
-                        "prompt_template_variable_bindings": [
-                            {
-                                "name": "userPrompt",
-                                "value": \#(escapedPrompt)
-                            }
-                        ]
-                    }
-                },
-                "model_config": {
-                    "model_name": "com.apple.fm.language.research.base",
-                    "model_adaptor_name": "com.apple.fm.language.research.adapter",
-                    "tokenizer_name": "com.apple.fm.language.research.tokenizer",
-                    "options": {
-                        "max_tokens": \#(maxTokens)
-                    }
-                }
-            }
-            """#
-        }
-
-        private func performInference(
-            toolsDir: URL,
-            hostname: String,
-            tiePayload: String
-        ) throws {
-            let envvars = [
-                "DYLD_FRAMEWORK_PATH": "\(toolsDir.path)/System/Library/PrivateFrameworks/"
-            ]
-
-            let tieCMD = "tie-vre-cli"
-            let tieCLI = "\(toolsDir.path)/usr/local/bin/\(tieCMD)"
-            guard FileManager.isRegularFile(tieCLI) else {
-                throw CLIError("Unable to find inference tool (\(tieCMD))")
-            }
-
-            let commandLine = [
-                tieCLI,
-                "--hostname=\(hostname)",
-                "--payload",
-                tiePayload
-            ]
-            let logMsg = "TIE CLI call: [env: \(envvars)] \(commandLine.joined(separator: " "))"
-            CLI.logger.log("\(logMsg, privacy: .public)")
-
-            print("Executing inference:")
-            let (exitCode, _, _) = try ExecCommand(commandLine, envvars: envvars).run(
-                outputMode: .terminal,
-                queue: DispatchQueue(label: "\(applicationName).ExecCommand")
-            )
-
-            guard exitCode == 0 else {
-                throw CLIError("exitCode=\(exitCode)")
-            }
         }
     }
 }

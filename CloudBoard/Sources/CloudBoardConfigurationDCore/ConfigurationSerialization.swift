@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -20,7 +20,7 @@ import Foundation
 /// The format of the configuration package coming from the upstream configuration service, as JSON.
 struct SerializableNodeConfigurationPackage {
     /// The domain keys and values.
-    let domains: [String: [String: Any]]
+    let domains: [String: [String: Sendable]]
 }
 
 extension SerializableNodeConfigurationPackage {
@@ -61,7 +61,7 @@ extension SerializableNodeConfigurationPackage {
         guard let domainsUncheckedValue = topLevel[Keys.domains.rawValue] else {
             throw DecodingError.missingKey(Keys.domains.rawValue)
         }
-        guard let domains = domainsUncheckedValue as? [String: [String: Any]] else {
+        guard let domains = domainsUncheckedValue as? [String: [String: Sendable]] else {
             throw DecodingError.invalidValueForKey(Keys.domains.rawValue)
         }
         self.init(domains: domains)

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -107,7 +107,11 @@ package final class CloudMetricsHealthServer: Sendable {
                 return
             }
             let healthCopy = healthState
-            Self.logger.log("Updating health status: \(healthCopy, privacy: .public) -> \(state, privacy: .public)")
+            Self.logger.log("""
+                Updating health status. \
+                old_status=\(healthCopy, privacy: .public) \
+                new_status=\(state, privacy: .public)
+                """)
             healthState = state
         }
     }

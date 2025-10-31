@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -27,6 +27,9 @@ public struct DarwinInitPolicy: AttestationPolicy {
     /// The security policies that are allowed.
     public let allowedSecurityPolicies: [DarwinInit.SecureConfigSecurityPolicy]
 
+    /// The security policies that are restricted.
+    public let restrictedSecurityPolicies: [DarwinInit.SecureConfigSecurityPolicy]
+
     /// Creates a policy that expects the exact provided `config-security-policy` in darwin-init.
     /// - Parameter securityPolicy: The security policy to use.
     public init(securityPolicy: DarwinInit.SecureConfigSecurityPolicy) {
@@ -37,6 +40,14 @@ public struct DarwinInitPolicy: AttestationPolicy {
     /// - Parameter securityPolicies: The security policies to use.
     public init(securityPolicies: some Sequence<DarwinInit.SecureConfigSecurityPolicy>) {
         self.allowedSecurityPolicies = Array(securityPolicies)
+        self.restrictedSecurityPolicies = []
+    }
+
+    /// Creates a policy that restricts any of the provided `config-security-policy` in darwin-init.
+    /// - Parameter restrictedSecurityPolicies: The security policies to restrict.
+    public init(restrictedSecurityPolicies: some Sequence<DarwinInit.SecureConfigSecurityPolicy>) {
+        self.allowedSecurityPolicies = [.none]
+        self.restrictedSecurityPolicies = Array(restrictedSecurityPolicies)
     }
 
     /// Performs the policy check.
@@ -44,7 +55,9 @@ public struct DarwinInitPolicy: AttestationPolicy {
     ///   - bundle: The attestation bundle.
     ///   - context: The context to use for the policy check.
     public func evaluate(bundle: AttestationBundle, context: inout AttestationPolicyContext) async throws {
-        Self.logger.log("Evaluating DarwinInit against allowed policies: \(self.allowedSecurityPolicies, privacy: .public)")
+        Self.logger.log(
+            "Evaluating DarwinInit against allowed policies \(self.allowedSecurityPolicies, privacy: .public) and restricted policies \(self.restrictedSecurityPolicies, privacy: .public)"
+        )
 
         var failOpen = false
         if self.allowedSecurityPolicies.contains(.none) {
@@ -61,28 +74,29 @@ public struct DarwinInitPolicy: AttestationPolicy {
             throw Error.missingSecureConfigs
         }
 
-        let darwinInits = secureConfigs.filter { config in
-            config.name == "darwin-init" && config.mimeType == "application/json"
-        }
-
-        guard let darwinInitConfig = darwinInits.first else {
+        let parsed: DarwinInit
+        do {
+            parsed = try secureConfigs.darwinInit
+        } catch DarwinInit.Error.missingDarwinInit {
             Self.logger.error("Attestation contains secure config, but none of them are darwin-init")
             if failOpen {
                 return
             }
             throw Error.missingDarwinInit
-        }
-
-        // differentiate missing from too many
-        guard darwinInits.count == 1 else {
+        } catch DarwinInit.Error.tooManyDarwinInit {
             Self.logger.error("Attestation contains too many darwin-init secure configs")
             if failOpen {
                 return
             }
             throw Error.tooManyDarwinInit
+        } catch {
+            throw error
         }
 
-        let parsed = try DarwinInit(from: darwinInitConfig)
+        if self.restrictedSecurityPolicies.contains(parsed.securityPolicy) {
+            Self.logger.error("Darwin-Init security policy \(parsed.securityPolicy.rawValue, privacy: .public) is restricted")
+            throw Error.restricted(securityPolicy: parsed.securityPolicy, restricted: self.restrictedSecurityPolicies)
+        }
 
         guard self.allowedSecurityPolicies.contains(parsed.securityPolicy) else {
             Self.logger.error(
@@ -125,5 +139,6 @@ extension DarwinInitPolicy {
         case missingDarwinInit
         case tooManyDarwinInit
         case untrusted(securityPolicy: DarwinInit.SecureConfigSecurityPolicy, allowed: [DarwinInit.SecureConfigSecurityPolicy])
+        case restricted(securityPolicy: DarwinInit.SecureConfigSecurityPolicy, restricted: [DarwinInit.SecureConfigSecurityPolicy])
     }
 }

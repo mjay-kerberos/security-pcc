@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -38,12 +38,12 @@ internal final class CloudMetricsRecorderHandler: RecorderHandler, Sendable {
     internal func record(_ value: Int64) {
         let recorder = self.recorder
         let epoch = Date().timeIntervalSince1970
-        metricUpdateContinuation.yield(.recordInteger(.init(recorder, value: value, epoch: epoch)))
+        metricUpdateContinuation.yieldAndLogOnFailure(.recordInteger(.init(recorder, value: value, epoch: epoch)))
     }
 
     internal func record(_ value: Double) {
         let recorder = self.recorder
         let epoch = Date().timeIntervalSince1970
-        metricUpdateContinuation.yield(.recordDouble(.init(recorder, value: value, epoch: epoch)))
+        metricUpdateContinuation.yieldAndLogOnFailure(.recordDouble(.init(recorder, value: value, epoch: epoch)))
     }
 }

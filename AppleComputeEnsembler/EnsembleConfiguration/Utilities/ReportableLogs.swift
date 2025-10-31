@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -26,14 +26,16 @@ public protocol ReportableString {
 	var publicDescription: String { get }
 }
 
-enum EnsembleError: Error, ReportableString {
+public enum EnsembleError: Error, ReportableString {
 	case internalError(error: String)
 	case illegalStateTransition
+	case sendError(error: String)
 
-	var publicDescription: String {
+	public var publicDescription: String {
 		switch self {
-		case .internalError: return ".internalError"
+		case .internalError(let error): return ".internalError \(error)"
 		case .illegalStateTransition: return ".illegalStateTransition"
+		case .sendError: return ".sendError"
 		}
 	}
 }
@@ -50,6 +52,7 @@ enum InitializationError: Error, ReportableString {
 	case cannotFindLeader
 	case invalidOperation
 	case keyDerivationError(String)
+	case invalidRankChassisdIDConfiguration
 
 	var publicDescription: String {
 		switch self {
@@ -64,6 +67,7 @@ enum InitializationError: Error, ReportableString {
 		case .cannotFindLeader: return ".cannotFindLeader"
 		case .invalidOperation: return ".invalidOperation"
 		case .keyDerivationError: return ".keyDerivationError"
+		case .invalidRankChassisdIDConfiguration: return ".invalidRankChassisdIDConfiguration"
 		}
 	}
 }

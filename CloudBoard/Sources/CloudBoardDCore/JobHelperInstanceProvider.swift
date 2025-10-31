@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,7 +14,6 @@
 
 //  Copyright © 2024 Apple Inc. All rights reserved.
 
-import AppServerSupport.OSLaunchdJob
 import CloudBoardCommon
 import CloudBoardJobHelperAPI
 import CloudBoardMetrics
@@ -31,7 +30,7 @@ private let log: Logger = .init(
 // they are used and we get a real delegate for handling responses from associated
 // JobHelperInstance instances. Instances of this are never expected to be invoked.
 actor PrewarmedJobHelperResponseDelegate: CloudBoardJobHelperAPIClientDelegateProtocol {
-    var metrics: MetricsSystem
+    let metrics: MetricsSystem
 
     init(metrics: MetricsSystem) {
         self.metrics = metrics
@@ -41,7 +40,7 @@ actor PrewarmedJobHelperResponseDelegate: CloudBoardJobHelperAPIClientDelegatePr
         log.error("surprise disconnect of prewarmed JobHelperInstance")
     }
 
-    func sendWorkloadResponse(_: JobHelperToCloudBoardDaemonMessage) {
+    nonisolated func handleWorkloadResponse(_: JobHelperToCloudBoardDaemonMessage) {
         self.metrics
             .emit(Metrics.JobHelperInstanceProvider.PlaceholderDelegateWorkloadResponseInvoked(action: .increment))
         log.error("sendWorkloadResponse unexpectedly called on PrewarmedJobHelperResponseDelegate")
@@ -53,9 +52,9 @@ enum JobHelperInstanceInstanceQueueError: Error {
     case terminateCalledMultipleTimes
 }
 
-actor JobHelperInstanceInstanceQueue {
-    private var readyFielders: Deque<JobHelperInstance> = Deque()
-    private var waiters: [CheckedContinuation<JobHelperInstance, Error>] = []
+actor JobHelperInstanceQueue {
+    private var readyJobHelperInstances: Deque<JobHelperInstance> = Deque()
+    private var waiters: [Promise<JobHelperInstance, Error>] = []
     private var terminated: Bool = false
     private var prewarmedPoolSize: Int
     private let metrics: MetricsSystem
@@ -65,7 +64,7 @@ actor JobHelperInstanceInstanceQueue {
         self.metrics = metrics
     }
 
-    private func enqueue(_ fielder: JobHelperInstance, _ operation: (JobHelperInstance) -> Void) throws {
+    private func enqueue(_ instance: JobHelperInstance, _ operation: (JobHelperInstance) -> Void) throws {
         guard !self.terminated else {
             throw JobHelperInstanceInstanceQueueError.usedAfterTerminateCalled
         }
@@ -75,18 +74,18 @@ actor JobHelperInstanceInstanceQueue {
                 action: .increment,
                 prewarmedPoolSize: self.prewarmedPoolSize
             ))
-            waiter.resume(returning: fielder)
+            waiter.succeed(with: instance)
         } else {
-            operation(fielder)
+            operation(instance)
         }
     }
 
-    func push(_ fielder: JobHelperInstance) throws {
-        try self.enqueue(fielder) { self.readyFielders.append($0) }
+    func push(_ instance: JobHelperInstance) throws {
+        try self.enqueue(instance) { self.readyJobHelperInstances.append($0) }
     }
 
-    func pushFirst(_ fielder: JobHelperInstance) throws {
-        try self.enqueue(fielder) { self.readyFielders.insert($0, at: 0) }
+    func pushFirst(_ instance: JobHelperInstance) throws {
+        try self.enqueue(instance) { self.readyJobHelperInstances.insert($0, at: 0) }
     }
 
     func popFirst() async throws -> JobHelperInstance {
@@ -94,21 +93,31 @@ actor JobHelperInstanceInstanceQueue {
             throw JobHelperInstanceInstanceQueueError.usedAfterTerminateCalled
         }
 
-        if let element = self.readyFielders.popFirst() {
-            return element
+        if let readyInstance = self.readyJobHelperInstances.popFirst() {
+            return readyInstance
         }
 
-        return try await withCheckedThrowingContinuation {
-            self.waiters.append($0)
+        let waiterPromise = Promise<JobHelperInstance, Error>()
+        let result: Result<JobHelperInstance, Error>
+        do {
+            self.waiters.append(waiterPromise)
+            result = try await Future(waiterPromise).resultWithCancellation
+        } catch {
+            // Can only fail on cancellation while waiting for the promise in which case the promise has not yet been
+            // fulfilled and we need to fulfil it here
+            waiterPromise.fail(with: CancellationError())
+            self.waiters.removeAll(where: { $0 === waiterPromise })
+            throw CancellationError()
         }
+        return try result.get()
     }
 
-    func remove(_ fielder: JobHelperInstance) -> Bool {
-        guard let index = self.readyFielders.firstIndex(where: { $0 == fielder }) else {
+    func remove(_ instance: JobHelperInstance) -> Bool {
+        guard let index = self.readyJobHelperInstances.firstIndex(where: { $0 == instance }) else {
             return false
         }
 
-        self.readyFielders.remove(at: index)
+        self.readyJobHelperInstances.remove(at: index)
         return true
     }
 
@@ -120,13 +129,11 @@ actor JobHelperInstanceInstanceQueue {
         let waiters = self.waiters
         self.waiters = []
         for waiter in waiters {
-            waiter.resume(throwing: error)
+            waiter.fail(with: error)
         }
 
-        defer {
-            self.readyFielders = []
-        }
-        return self.readyFielders
+        defer { self.readyJobHelperInstances = [] }
+        return self.readyJobHelperInstances
     }
 }
 
@@ -142,6 +149,8 @@ enum JobHelperInstanceProviderError: Error {
 final class JobHelperInstanceProvider: Sendable {
     private let metrics: MetricsSystem
     private let tracer: any Tracer
+    private let launchdJobFinder: any LaunchdJobFinderProtocol
+    private let jobHelperXPCClientFactory: any CloudBoardJobHelperAPIClientFactoryProtocol
 
     private let jobHelperInstanceGetRetryCount: Int = 3
     private let prewarmedPoolSize: Int
@@ -155,7 +164,7 @@ final class JobHelperInstanceProvider: Sendable {
         return self.maxProcessCount == 0
     }
 
-    private let prewarmedQueue: JobHelperInstanceInstanceQueue
+    private let prewarmedQueue: JobHelperInstanceQueue
     private let refillStream: AsyncStream<ContinuousTimeMeasurement>
     private let refillContinuation: AsyncStream<ContinuousTimeMeasurement>.Continuation
 
@@ -185,7 +194,14 @@ final class JobHelperInstanceProvider: Sendable {
         }
     }
 
-    init(prewarmedPoolSize: Int, maxProcessCount: Int, metrics: MetricsSystem, tracer: any Tracer) throws {
+    init(
+        prewarmedPoolSize: Int,
+        maxProcessCount: Int,
+        metrics: MetricsSystem,
+        tracer: any Tracer,
+        launchdJobFinder: any LaunchdJobFinderProtocol,
+        jobHelperXPCClientFactory: any CloudBoardJobHelperAPIClientFactoryProtocol
+    ) throws {
         log.log(
             "Initializing JobHelperInstanceProvider with prewarmedPoolSize: \(prewarmedPoolSize, privacy: .public), maxProcessCount: \(maxProcessCount, privacy: .public)"
         )
@@ -211,22 +227,24 @@ final class JobHelperInstanceProvider: Sendable {
         }
         self.maxProcessCount = maxProcessCount
 
-        self.prewarmedQueue = JobHelperInstanceInstanceQueue(
+        self.prewarmedQueue = JobHelperInstanceQueue(
             prewarmedPoolSize: self.prewarmedPoolSize,
             metrics: metrics
         )
         (self.refillStream, self.refillContinuation) = AsyncStream<ContinuousTimeMeasurement>.makeStream()
         self.metrics = metrics
         self.tracer = tracer
+        self.launchdJobFinder = launchdJobFinder
+        self.jobHelperXPCClientFactory = jobHelperXPCClientFactory
     }
 
     /// Run  the provided `JobHelperInstance` until it terminates and handler teardown triggers.
     /// Completes on `JobHelperInstance` finishing (the underlying process terminating).
     ///
-    /// This is non-throwing because we don't want errors managing/running a specific fielder to
+    /// This is non-throwing because we don't want errors managing/running a specific job helper instance to
     /// be propagated outside of the management context of that specific instance.
     ///
-    /// - Parameter jobHelperInstance: the request fielder to run
+    /// - Parameter jobHelperInstance: the jobhelper instance to run
     private func runJobHelperInstance(_ jobHelperInstance: JobHelperInstance) async {
         await withTaskGroup(of: Void.self) { instanceTaskGroup in
             instanceTaskGroup.addTask {
@@ -240,9 +258,9 @@ final class JobHelperInstanceProvider: Sendable {
                     """)
                 }
 
-                // Check to see if the request fielder is still on the prewarmed queue,
+                // Check to see if the jobhelper instance is still on the prewarmed queue,
                 // if it is, remove it and complete the promise as we are responsible for it.
-                // If it's not, the current holder of the request fielder is responsible
+                // If it's not, the current holder of the jobhelper instance is responsible
                 // for completing the promise.
                 if await self.prewarmedQueue.remove(jobHelperInstance) {
                     self.metrics.emit(Metrics.JobHelperInstanceProvider.PrewarmedInstancesDiedTotal(action: .increment))
@@ -264,16 +282,14 @@ final class JobHelperInstanceProvider: Sendable {
     }
 
     func run() async throws {
-        let managedJobs = LaunchdJobHelper.fetchManagedLaunchdJobs(
-            type: CloudBoardJobType.cbJobHelper,
-            state: OSLaunchdJobState.neverRan,
-            skippingInstances: true,
-            logger: CloudBoardJobHelperXPCClientProvider.log
+        let definitions = try self.launchdJobFinder.getJobDefinitions(
+            type: CloudBoardJobType.cbJobHelper
         )
-        guard managedJobs.count == 1 else {
-            log.error("unexpected cb_jobhelper managed jobs count \(managedJobs.count, privacy: .public)")
+        guard definitions.count == 1 else {
+            log.error("unexpected cb_jobhelper managed jobs count \(definitions.count, privacy: .public)")
             throw JobHelperInstanceError.tooManyManagedJobs
         }
+        let definition = definitions[0]
         log.log("discovered cb_jobhelper launchd job")
 
         self.state.withLock { state in
@@ -284,13 +300,14 @@ final class JobHelperInstanceProvider: Sendable {
         }
 
         // We don't want the child tasks to throw here since each is responsible for handling
-        // the errors in creating and managing its associated fielder instance.
+        // the errors in creating and managing its associated jobhelper instance.
         await withDiscardingTaskGroup { group in
             // Each time we receive a signal on this stream, create one new JobHelperInstance
             for await processRequestedAt in self.refillStream {
                 let initiatedAt = ContinuousTimeMeasurement.start()
                 let jobHelperInstance = JobHelperInstance(
-                    managedJobs[0],
+                    definition,
+                    jobHelperXPCClientFactory: self.jobHelperXPCClientFactory,
                     delegate: PrewarmedJobHelperResponseDelegate(metrics: self.metrics),
                     metrics: self.metrics,
                     tracer: self.tracer
@@ -299,7 +316,7 @@ final class JobHelperInstanceProvider: Sendable {
                 log.info("\(jobHelperInstance.logMetadata(), privacy: .public) created JobHelperInstance")
                 group.addTask {
                     await self.runJobHelperInstance(jobHelperInstance)
-                    // getting here means the managed request fielder has terminated
+                    // getting here means the jobhelper instance has terminated
                     self.state.withLock { state in
                         state.totalRunningCount -= 1
                     }
@@ -307,8 +324,8 @@ final class JobHelperInstanceProvider: Sendable {
                 }
 
                 group.addTask {
-                    // prewarm the request fielder - races with `runJobHelperInstance`, but that is handled by the
-                    // request fielder's state machine
+                    // prewarm the jobhelper instance - races with `runJobHelperInstance`, but that is handled by the
+                    // jobhelper instance's state machine
                     do {
                         try await jobHelperInstance.warmup()
 
@@ -447,10 +464,10 @@ final class JobHelperInstanceProvider: Sendable {
             } catch {
                 log.error("""
                 \(jobHelperInstance.logMetadata(), privacy: .public) dequeueJobHelperInstance failed \
-                to use dequeued fielder: \
+                to use dequeued instance: \
                 \(String(unredacted: error), privacy: .public)
                 """)
-                // Ensure the request fielder is torn down
+                // Ensure the jobhelper instance is torn down
                 await jobHelperInstance.triggerTeardown()
             }
         }
@@ -468,7 +485,7 @@ final class JobHelperInstanceProvider: Sendable {
     // within the body). There's no great way to defend against violation of this contract.
     private func returnJobHelperInstance(_ jobHelperInstance: JobHelperInstance) async {
         let instanceUsed = await jobHelperInstance.condition != .waiting
-        // If the instance was used or prewarming is disabled, return the request fielder
+        // If the instance was used or prewarming is disabled, return the jobhelper instance
         if instanceUsed || self.prewarmingDisabled {
             await jobHelperInstance.triggerTeardown()
             return
@@ -558,13 +575,13 @@ final class JobHelperInstanceProvider: Sendable {
             for _ in 0 ..< count {
                 group.addTask {
                     do {
-                        let fielder = try await self.dequeueJobHelperInstance(
+                        let jobHelperInstance = try await self.dequeueJobHelperInstance(
                             delegate: nil
                         )
-                        let id = fielder.id
+                        let id = jobHelperInstance.id
                         log.info("Disposing stale JobHelperInstance jobID=\(id, privacy: .public)")
-                        try await fielder.abandon()
-                        await fielder.triggerTeardown()
+                        try await jobHelperInstance.abandon()
+                        await jobHelperInstance.triggerTeardown()
                     } catch {
                         log.error("""
                         Failed to dispose of stale JobHelperInstance: \

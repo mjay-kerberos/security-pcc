@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -21,7 +21,7 @@ import Foundation
 import os
 import Security
 
-enum TokenGrantingTokenValidationError: Error {
+enum TokenGrantingTokenValidationError: ReportableError {
     case tgtSigningKeysUnavailable
     case tgtSigningKeysExpiredOrFutureValidityDate
     case tgtSigningKeysTokenKeyIDMismatch
@@ -33,11 +33,42 @@ enum TokenGrantingTokenValidationError: Error {
     case invalidOTT(Error)
     case invalidOTTSignature(Error)
     case mismatchingOTTNonce
+
+    var publicDescription: String {
+        let errorType = switch self {
+        case .tgtSigningKeysUnavailable: "tgtSigningKeysUnavailable"
+        case .tgtSigningKeysExpiredOrFutureValidityDate: "tgtSigningKeysExpiredOrFutureValidityDate"
+        case .tgtSigningKeysTokenKeyIDMismatch: "tgtSigningKeysTokenKeyIDMismatch"
+        case .invalidTGT(let error): "invalidTGT(\(String(reportable: error)))"
+        case .invalidTGTSignature: "invalidTGTSignature"
+        case .ottSigningKeysUnavailable: "ottSigningKeysUnavailable"
+        case .ottSigningKeysExpiredOrFutureValidityDate: "ottSigningKeysExpiredOrFutureValidityDate"
+        case .ottSigningKeysTokenKeyIDMismatch: "ottSigningKeysTokenKeyIDMismatch"
+        case .invalidOTT(let error): "invalidOTT(\(String(reportable: error)))"
+        case .invalidOTTSignature: "invalidOTTSignature"
+        case .mismatchingOTTNonce: "mismatchingOTTNonce"
+        }
+        return "tokenGrantingTokenValidation.\(errorType)"
+    }
+}
+
+protocol TokenGrantingTokenValidatorProtocol: Sendable {
+    func setSigningKeys(_ signingKeys: AuthTokenKeySet)
+    func validateTokenGrantingToken(_ tgtData: Data, ott ottData: Data, ottSalt: Data) throws
+    /// This function exists for testing purposes only and allows us to validate the propagation of auth tokens across
+    /// PCC nodes in integration tests
+    func notifyOfUnvalidatedTokenGrantingToken(_ tgtData: Data, ottSalt: Data)
+}
+
+extension TokenGrantingTokenValidatorProtocol {
+    func notifyOfUnvalidatedTokenGrantingToken(_: Data, ottSalt _: Data) {
+        // Empty default implementation as only needed for testing purposes
+    }
 }
 
 /// Validator for token granting tokens which verifies that TGTs are valid Private Access Tokens, are signed correctly,
 /// and are related to the one-time token redeemed by ROPES for the current request.
-final class TokenGrantingTokenValidator {
+final class TokenGrantingTokenValidator: TokenGrantingTokenValidatorProtocol {
     private enum TokenType {
         case ott
         case tgt

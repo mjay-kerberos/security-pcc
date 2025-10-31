@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -41,8 +41,6 @@ extension CLI.ReleaseCmd {
         var jsonOutput: Bool = false
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
-
             let logEnvironment = swlogOptions.environment
             CLI.logger.log("release list")
             if logEnvironment != .production {
@@ -52,7 +50,6 @@ extension CLI.ReleaseCmd {
             var swlog = try await SWReleases(
                 environment: logEnvironment,
                 altKtInitEndpoint: swlogOptions.ktInitEndpoint,
-                tlsInsecure: swlogOptions.tlsInsecure,
                 traceLog: swlogOptions.traceLog
             )
 
@@ -74,7 +71,7 @@ extension CLI.ReleaseCmd {
             if jsonOutput {
                 print(asJSONString(releaseInfo))
             } else {
-                print("\(String(format: "%8d", releaseInfo.index)): \(releaseInfo.dataHash)\(releaseInfo.statusDescription)")
+                print("\(String(format: "%8d", releaseInfo.index)): \(releaseInfo.label)\(releaseInfo.statusDescription)\n\t\(releaseInfo.dataHash)")
 
                 print()
                 print(releaseInfo.printableString())

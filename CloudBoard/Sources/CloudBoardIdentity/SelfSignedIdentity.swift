@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -26,9 +26,9 @@ enum SelfSignedIdentityError: Error {
 
 public struct SelfSignedIdentity {
     #if os(iOS)
-    private static let commonNameOID = kSecOidCommonName
+    private static let commonNameOID = String(kSecOidCommonName)
     #elseif os(macOS)
-    private static let commonNameOID = kSecOIDCommonName
+    private static let commonNameOID = String(kSecOIDCommonName)
     #else
     #error("only iOS and macOS are supported")
     #endif
@@ -76,7 +76,7 @@ public struct SelfSignedIdentity {
         let publicKey = SecKeyCopyPublicKey(privateKey)
 
         let subject = [
-            [[Self.commonNameOID, self.commonName as CFString] as CFArray] as CFArray,
+            [[Self.commonNameOID as CFString, self.commonName as CFString] as CFArray] as CFArray,
         ] as CFArray
 
         let parameters = [

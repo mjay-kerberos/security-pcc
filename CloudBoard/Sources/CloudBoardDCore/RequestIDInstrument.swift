@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -12,10 +12,15 @@
 // EA1937
 // 10/02/2024
 
+import Foundation
 import Instrumentation
+import NIOHPACK
+import os
 import ServiceContextModule
 
 let rpcIDHeaderName = "apple-rpc-uuid"
+
+private var instrumentLogger: Logger = .init(subsystem: "com.apple.cloudos.cloudboard", category: "RequestIDInstrument")
 
 public protocol RequestIDInstrument: Instrument {}
 
@@ -26,7 +31,14 @@ extension RequestIDInstrument {
         using extractor: Extract
     ) where Carrier == Extract.Carrier, Extract: Instrumentation.Extractor {
         if let value = extractor.extract(key: rpcIDHeaderName, from: carrier) {
-            serviceContext[RPCID.self] = value
+            if let uuid = UUID(uuidString: value) {
+                serviceContext.rpcID = uuid
+            } else {
+                instrumentLogger.info("Could not extract rpcID from \(value, privacy: .public)")
+            }
+        } else {
+            instrumentLogger.info("Could not find rpcID in \(String(describing: Carrier.self), privacy: .public)")
+            serviceContext.rpcID = UUID()
         }
     }
 
@@ -35,14 +47,12 @@ extension RequestIDInstrument {
         into carrier: inout Carrier,
         using injector: Inject
     ) where Carrier == Inject.Carrier, Inject: Instrumentation.Injector {
-        if let value = serviceContext[RPCID.self] {
-            injector.inject(value, forKey: rpcIDHeaderName, into: &carrier)
-        }
+        injector.inject(serviceContext.rpcID.uuidString, forKey: rpcIDHeaderName, into: &carrier)
     }
 }
 
 struct RPCID: ServiceContextKey {
-    typealias Value = String
+    typealias Value = UUID
 
     static var nameOverride: String? { "rpcID" }
 }
@@ -54,13 +64,25 @@ struct RequestIDKey: ServiceContextKey {
 }
 
 extension ServiceContext {
-    public var rpcID: String? {
-        get { self[RPCID.self] }
+    public var rpcID: UUID {
+        get { self[RPCID.self] ?? .zero }
         set { self[RPCID.self] = newValue }
     }
 
     public var requestID: String? {
         get { self[RequestIDKey.self] }
         set { self[RequestIDKey.self] = newValue }
+    }
+}
+
+struct HPACKHeadersExtractor: Extractor {
+    func extract(key: String, from headers: HPACKHeaders) -> String? {
+        headers.first(where: { $0.0 == key })?.1
+    }
+}
+
+struct HPACKHeadersInjector: Injector {
+    func inject(_ value: String, forKey key: String, into headers: inout HPACKHeaders) {
+        headers.add(name: key, value: value)
     }
 }

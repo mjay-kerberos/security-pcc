@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -50,7 +50,7 @@ public enum ConfigurationPackageResponse {
 }
 
 /// An interface for a service that can fetch configuration packages.
-public protocol ServiceProtocol {
+public protocol ServiceProtocol: Sendable {
     /// Fetches the desired configuration package for the given project, environment, and release.
     ///
     /// If a `currentRevisionIdentifier` is provided, and it matches the desired version, returns `.alreadyUpToDate`.

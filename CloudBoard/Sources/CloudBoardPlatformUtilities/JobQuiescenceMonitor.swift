@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -24,9 +24,15 @@ public actor JobQuiescenceMonitor: Sendable {
         category: "JobQuiescenceMonitor"
     )
 
+    enum QuiescenceState {
+        case notStarted
+        case inProgress
+        case complete
+    }
+
     private let queue: DispatchQueue
     private let lifecycleManager: LifecycleManager
-    private var quiescenceInProgress: Bool = false
+    private var quiescenceState: QuiescenceState = .notStarted
     private var task: JQTask? = nil
 
     public init(lifecycleManager: LifecycleManager) {
@@ -35,10 +41,10 @@ public actor JobQuiescenceMonitor: Sendable {
     }
 
     private func quiesce(conn: JQXPCConnection) {
-        if !self.quiescenceInProgress {
+        if case .notStarted = self.quiescenceState {
             Self.logger.log("Received quiesce notification")
 
-            self.quiescenceInProgress = true
+            self.quiescenceState = .inProgress
 
             let task = JQTask(conn: conn, description: JQTaskDescriptor(name: "CloudBoardDraining"))
             do {
@@ -50,6 +56,11 @@ public actor JobQuiescenceMonitor: Sendable {
                 task.end()
             }
             self.task = task
+        } else {
+            Self.logger
+                .log(
+                    "Quiesce signal ignored since quiescence state: \(String(describing: self.quiescenceState), privacy: .public)"
+                )
         }
     }
 
@@ -69,9 +80,10 @@ public actor JobQuiescenceMonitor: Sendable {
         }
     }
 
+    /// Mark Quiesce as completed. Any further notifications from jobquiescence will be ignored
     public func quiesceCompleted() {
-        self.quiescenceInProgress = false
-        if let task = self.task {
+        self.quiescenceState = .complete
+        if let task {
             Self.logger.log("Quiesce marked as complete")
             task.end()
             self.task = nil

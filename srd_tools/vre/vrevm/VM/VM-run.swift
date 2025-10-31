@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -52,7 +52,8 @@ extension VM {
                 consoleLog = try VMBundle.Logs(
                     topdir: bundle.logsPath,
                     folder: "console",
-                    includeTimestamp: true).file(name: "device")
+                    includeTimestamp: true
+                ).file(name: "device")
                 let consoleLogOutFH = try FileHandle(forWritingTo: consoleLog!)
 
                 consoleOutput.fileHandleForReading.readabilityHandler = {
@@ -94,6 +95,16 @@ extension VM {
                         VM.logger.log("\(gdbMsg, privacy: .public)")
                         print(gdbMsg)
                     }
+
+                    for coprocessor in vzVM._coprocessors {
+                        if let sep = coprocessor as? _VZSEPCoprocessor {
+                            if let sepGdbStub = sep.debugStub as? _VZGDBDebugStub {
+                                let sepGdbMsg = "SEP GDB stub available at localhost:\(sepGdbStub.port)"
+                                VM.logger.log("\(sepGdbMsg, privacy: .public)")
+                                print(sepGdbMsg)
+                            }
+                        }
+                    }
                 }
 
                 if let consoleLog {
@@ -122,17 +133,17 @@ extension VM {
             return
         }
 
-        let darwinInit: DarwinInit
+        let darwinInit: DarwinInitConfig
         do {
-            darwinInit = try DarwinInit(fromFile: bundle.darwinInitPath.path)
-            VM.logger.debug("darwin-init: \(darwinInit.json(), privacy: .public)")
+            darwinInit = try DarwinInitConfig(fromFile: bundle.darwinInitPath.path)
+            VM.logger.debug("darwin-init: \(darwinInit.config, privacy: .public)")
         } catch {
             throw VMError("failed to load darwin-init: \(error)")
         }
 
         do {
             let nvram = try VM.NVRAM(auxStorageURL: bundle.auxiliaryStoragePath)
-            try nvram.set("darwin-init", value: darwinInit.encode())
+            try nvram.set("darwin-init", value: darwinInit.base64().data(using: .utf8))
         } catch {
             throw VMError("load darwin-init into nvram: \(error)")
         }

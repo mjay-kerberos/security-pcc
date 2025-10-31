@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -38,19 +38,19 @@ internal final class CloudMetricsCounterHandler: CounterHandler, Sendable {
     internal func increment(by amount: Int64) {
         let counter = self.counter
         let epoch = Date().timeIntervalSince1970
-        metricUpdateContinuation.yield(.incrementCounter(.init(counter, by: amount, epoch: epoch)))
+        metricUpdateContinuation.yieldAndLogOnFailure(.incrementCounter(.init(counter, by: amount, epoch: epoch)))
     }
 
     internal func reset() {
         let counter = self.counter
         let epoch = Date().timeIntervalSince1970
-        metricUpdateContinuation.yield(.resetCounter(.init(counter, epoch: epoch)))
+        metricUpdateContinuation.yieldAndLogOnFailure(.resetCounter(.init(counter, epoch: epoch)))
     }
 
     internal func reset(value: Int64) {
         let counter = self.counter
         let epoch = Date().timeIntervalSince1970
-        metricUpdateContinuation.yield(.resetCounterWithIntValue(.init(counter, value: value, epoch: epoch)) )
+        metricUpdateContinuation.yieldAndLogOnFailure(.resetCounterWithIntValue(.init(counter, value: value, epoch: epoch)))
     }
 }
 
@@ -60,12 +60,12 @@ extension CloudMetricsCounterHandler: FloatingPointCounterHandler {
     internal func increment(by amount: Double) {
         let counter = self.counter
         let epoch = Date().timeIntervalSince1970
-        metricUpdateContinuation.yield(.incrementFloatingPointCounter(.init(counter, by: amount, epoch: epoch)))
+        metricUpdateContinuation.yieldAndLogOnFailure(.incrementFloatingPointCounter(.init(counter, by: amount, epoch: epoch)))
     }
 
     internal func reset(value: Double) {
         let counter = self.counter
         let epoch = Date().timeIntervalSince1970
-        metricUpdateContinuation.yield(.resetCounterWithDoubleValue(.init(counter, value: value, epoch: epoch)))
+        metricUpdateContinuation.yieldAndLogOnFailure(.resetCounterWithDoubleValue(.init(counter, value: value, epoch: epoch)))
     }
 }

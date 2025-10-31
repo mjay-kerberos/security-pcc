@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,10 +14,12 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-private import CloudBoardCommon
+internal import CloudBoardCommon
 import CloudBoardJobAPI
 import Foundation
 import os
+internal import Synchronization
+import CryptoKit
 import XPCPrivate
 
 private enum WarmupState {
@@ -43,13 +45,48 @@ enum JobHelperMessengerError: Error {
     case parametersReceivedTwice
     case waitForParametersCalledAfterEndJob
     case provideOutputCalledAfterEndJob
+    case endOfResponseCalledAfterEndJob
     case endJobCalledMoreThanOnce
     case tornDownBeforeParametersReceived
+    case pccRequestCalledAfterEndJob
+    case unknownPCCWorkerID
+    case workerFoundResultReceivedTwice
+    case workerFoundResultNotReceived
 }
 
-typealias JobHelperInputContinuation = AsyncStream<Data>.Continuation
-typealias JobHelperTeardownContinuation = AsyncStream<Void>.Continuation
-actor JobHelperMessenger {
+protocol JobHelperMessengerProtocol: Sendable {
+    // General
+    func provideOutput(_ data: Data) async throws
+    func waitForWarmupComplete() async throws
+    func waitForParameters() async throws -> ParametersData
+    func warmup(details: WarmupDetails) async throws
+    func receiveParameters(parametersData: ParametersData) async throws
+    func provideInput(_ data: Data?, isFinal: Bool) async throws
+    func teardown() async
+    func cancel() async
+
+    // Proxy
+    func findWorker(query: FindWorkerQuery, requestSummary: FindWorkerRequestSummaryProvisioner) async throws
+        -> (PCCWorkerInfo, AsyncStream<WorkerResponseMessage>)
+    func sendWorkerRequestMessage(workerID: UUID, _ data: Data) async throws
+    func sendWorkerEOF(workerID: UUID, isError: Bool) async throws
+    func receiveWorkerFoundEvent(workerID: UUID, releaseDigest: String) async throws
+    func receiveWorkerMessage(workerID: UUID, _ response: WorkerResponseMessage) async throws
+    func receiveWorkerEOF(workerID: UUID) async throws
+    func finalizeRequestExecutionLog() async throws
+
+    // Key derivation
+    func distributeEnsembleKey(info: String, distributionType: EnsembleKeyDistributionType) async throws -> UUID
+    func distributeSealedEnsembleKey(
+        info: String,
+        distributionType: EnsembleKeyDistributionType
+    ) async throws -> EnsembleKeyInfo
+}
+
+actor JobHelperMessenger: JobHelperMessengerProtocol {
+    typealias JobHelperInputContinuation = AsyncStream<Data>.Continuation
+    typealias JobHelperTeardownContinuation = AsyncStream<Void>.Continuation
+
     private static let log = Logger(
         subsystem: "com.apple.cloudos.cloudboard",
         category: "JobHelperMessenger"
@@ -68,6 +105,8 @@ actor JobHelperMessenger {
         Promise<ParametersData, JobHelperMessengerError> = Promise()
 
     private let server: CloudBoardJobAPIServerProtocol
+
+    private var pccWorkerRequests: [UUID: PCCWorkerResponseSession] = [:]
 
     init(
         server: CloudBoardJobAPIServerProtocol,
@@ -106,7 +145,7 @@ actor JobHelperMessenger {
         guard self.endCalled == false else {
             throw JobHelperMessengerError.provideOutputCalledAfterEndJob
         }
-        try await self.server.provideResponseChunk(data)
+        await self.server.provideResponseChunk(data)
     }
 
     func waitForWarmupComplete() async throws {
@@ -142,20 +181,32 @@ actor JobHelperMessenger {
         }
         Self.log.log("Waiting for parameters")
         defer { Self.log.log("Parameters received") }
-        return try await Future(self.parametersPromise).resultWithCancellation.get()
+        return try await Future(self.parametersPromise).valueWithCancellation
     }
 
     func buildMetrics() -> CloudAppMetrics {
         return CloudAppMetrics(self.metricsBuilder, buildTime: .now)
     }
 
+    func endOfResponse() async throws {
+        guard self.endCalled == false else {
+            throw JobHelperMessengerError.endOfResponseCalledAfterEndJob
+        }
+        await self.server.endOfResponse()
+    }
+
+    func internalError() async {
+        await self.server.internalError()
+    }
+
     func endJob() async throws {
+        Self.log.log("endJob called")
         guard self.endCalled == false else {
             throw JobHelperMessengerError.endJobCalledMoreThanOnce
         }
         self.endCalled = true
 
-        try await self.server.endJob()
+        await self.server.endJob()
     }
 }
 
@@ -175,7 +226,7 @@ extension JobHelperMessenger: CloudBoardJobAPIClientToServerProtocol {
         }
 
         self.metricsBuilder.receivedJobHelperMetricDelivery(
-            initialMetrics: details.initialMetrics
+            initialMetrics: details
         )
 
         do {
@@ -239,15 +290,207 @@ extension JobHelperMessenger: CloudBoardJobAPIClientToServerProtocol {
         }
     }
 
-    func helperInvocation(invocationID _: UUID) async throws {
-        fatalError("Unimplemented")
+    func findWorker(
+        query: FindWorkerQuery,
+        requestSummary: FindWorkerRequestSummaryProvisioner
+    ) async throws
+    -> (PCCWorkerInfo, AsyncStream<WorkerResponseMessage>) {
+        guard self.endCalled == false else {
+            throw JobHelperMessengerError.pccRequestCalledAfterEndJob
+        }
+
+        let (responseStream, responseContinuation) = AsyncStream<WorkerResponseMessage>.makeStream()
+        let workerSession = PCCWorkerResponseSession(responseStreamContinuation: responseContinuation)
+        self.pccWorkerRequests[query.workerID] = workerSession
+        do {
+            try await self.server.findWorker(
+                workerID: query.workerID,
+                serviceName: query.serviceName,
+                routingParameters: query.routingParameters,
+                responseBypass: query.responseBypass,
+                forwardRequestChunks: query.forwardRequestChunks,
+                isFinal: query.isFinal,
+                spanID: requestSummary.requestSummary.spanID ?? ""
+            )
+        } catch {
+            try workerSession.onWorkerNotFound(error)
+            await requestSummary.populate(error: error)
+            await requestSummary.log(to: self.log)
+            throw error
+        }
+        // Wait until we have found a worker
+        let workerInfo = try await workerSession.waitForWorkerFound()
+        return (workerInfo, responseStream)
     }
 
-    func receiveHelperMessage(invocationID _: UUID, data _: Data) async throws {
-        fatalError("Unimplemented")
+    func sendWorkerRequestMessage(workerID: UUID, _ data: Data) async throws {
+        guard self.endCalled == false else {
+            throw JobHelperMessengerError.pccRequestCalledAfterEndJob
+        }
+
+        guard self.pccWorkerRequests[workerID] != nil else {
+            self.log.error("Received worker request for an unknown worker ID: \(workerID, privacy: .public)")
+            throw JobHelperMessengerError.unknownPCCWorkerID
+        }
+
+        await self.server.sendWorkerRequestMessage(workerID: workerID, data)
     }
 
-    func receiveHelperEOF(invocationID _: UUID) async throws {
-        fatalError("Unimplemented")
+    func sendWorkerEOF(workerID: UUID, isError: Bool) async throws {
+        guard self.endCalled == false else {
+            throw JobHelperMessengerError.pccRequestCalledAfterEndJob
+        }
+
+        guard self.pccWorkerRequests[workerID] != nil else {
+            self.log.error("Received worker request for an unknown worker ID: \(workerID, privacy: .public)")
+            throw JobHelperMessengerError.unknownPCCWorkerID
+        }
+
+        await self.server.sendWorkerEOF(workerID: workerID, isError: isError)
+    }
+
+    func receiveWorkerFoundEvent(workerID: UUID, releaseDigest: String) async throws {
+        guard self.endCalled == false else {
+            throw JobHelperMessengerError.pccRequestCalledAfterEndJob
+        }
+
+        guard let session = self.pccWorkerRequests[workerID] else {
+            self.log.error("Received worker found message for an unknown worker ID: \(workerID, privacy: .public)")
+            throw JobHelperMessengerError.unknownPCCWorkerID
+        }
+
+        try session.onWorkerFound(PCCWorkerInfo(releaseDigest: releaseDigest))
+    }
+
+    func receiveWorkerMessage(workerID: UUID, _ response: WorkerResponseMessage) async throws {
+        self.log.info("Received worker message for worker ID: \(workerID, privacy: .public)")
+        guard let workerSession = self.pccWorkerRequests[workerID] else {
+            self.log.error("Received worker response for an unknown worker ID: \(workerID, privacy: .public)")
+            throw JobHelperMessengerError.unknownPCCWorkerID
+        }
+        workerSession.responseStreamContinuation.yield(response)
+    }
+
+    func receiveWorkerResponseSummary(workerID: UUID, succeeded: Bool) async throws {
+        self.log.info("Received worker response summary for worker ID: \(workerID, privacy: .public)")
+        guard let workerSession = self.pccWorkerRequests[workerID] else {
+            self.log.error(
+                "Received worker response summary for an unknown invocation ID: \(workerID, privacy: .public)"
+            )
+            throw JobHelperMessengerError.unknownPCCWorkerID
+        }
+        workerSession.responseStreamContinuation.yield(.result(succeeded ? .ok : .failure))
+    }
+
+    func receiveWorkerEOF(workerID: UUID) async throws {
+        self.log.info("Received worker EOF for worker ID: \(workerID, privacy: .public)")
+        guard let workerSession = self.pccWorkerRequests[workerID] else {
+            self.log.error("Received worker response for an unknown worker ID: \(workerID, privacy: .public)")
+            throw JobHelperMessengerError.unknownPCCWorkerID
+        }
+        workerSession.finish()
+    }
+
+    func finalizeRequestExecutionLog() async throws {
+        self.log.info("Received request to finalize Request Execution Log")
+        await self.server.finalizeRequestExecutionLog()
+    }
+
+    func distributeEnsembleKey(
+        info: String,
+        distributionType: EnsembleKeyDistributionType
+    ) async throws -> UUID {
+        self.log.info("Received request to distribute ensemble key")
+        return try await self.server.distributeEnsembleKey(info: info, distributionType: .init(distributionType))
+    }
+
+    func distributeSealedEnsembleKey(
+        info: String,
+        distributionType: EnsembleKeyDistributionType
+    ) async throws -> EnsembleKeyInfo {
+        self.log.info("Received request to distribute encrypted ensemble key")
+        let keyInfo = try await self.server.distributeSealedEnsembleKey(
+            info: info,
+            distributionType: .init(distributionType)
+        )
+        return .init(keyID: keyInfo.keyID, keyEncryptionKey: SymmetricKey(data: keyInfo.keyEncryptionKey))
+    }
+}
+
+final class PCCWorkerResponseSession: Sendable {
+    enum PCCWorkerFindingState {
+        case finding(Promise<PCCWorkerInfo, Error>)
+        case found(PCCWorkerInfo)
+        case notFound(Error)
+    }
+
+    let responseStreamContinuation: AsyncStream<WorkerResponseMessage>.Continuation
+    let workerFindingState: Mutex<PCCWorkerFindingState>
+
+    init(responseStreamContinuation: AsyncStream<WorkerResponseMessage>.Continuation) {
+        self.responseStreamContinuation = responseStreamContinuation
+        self.workerFindingState = .init(.finding(Promise()))
+    }
+
+    func waitForWorkerFound() async throws -> PCCWorkerInfo {
+        let state = self.workerFindingState.withLock { $0 }
+        switch state {
+        case .finding(let promise):
+            return try await Future(promise).valueWithCancellation
+        case .found(let workerInfo):
+            return workerInfo
+        case .notFound(let error):
+            throw error
+        }
+    }
+
+    func onWorkerFound(_ workerInfo: PCCWorkerInfo) throws {
+        try self.workerFindingState.withLock {
+            switch $0 {
+            case .finding(let promise):
+                promise.succeed(with: workerInfo)
+                $0 = .found(workerInfo)
+            case .found, .notFound:
+                throw JobHelperMessengerError.workerFoundResultReceivedTwice
+            }
+        }
+    }
+
+    func onWorkerNotFound(_ error: Error) throws {
+        try self.workerFindingState.withLock {
+            switch $0 {
+            case .finding(let promise):
+                promise.fail(with: error)
+                $0 = .notFound(error)
+            case .found, .notFound:
+                throw JobHelperMessengerError.workerFoundResultReceivedTwice
+            }
+        }
+    }
+
+    func finish() {
+        self.responseStreamContinuation.finish()
+        self.workerFindingState.withLock {
+            switch $0 {
+            case .finding(let promise):
+                promise.fail(with: JobHelperMessengerError.workerFoundResultNotReceived)
+                $0 = .notFound(JobHelperMessengerError.workerFoundResultNotReceived)
+            case .found, .notFound:
+                ()
+            }
+        }
+    }
+
+    deinit {
+        self.finish()
+    }
+}
+
+extension CloudBoardJobAPIEnsembleKeyDistributionType {
+    init(_ distributionType: EnsembleKeyDistributionType) {
+        self = switch distributionType {
+        case .local: .local
+        case .distributed: .distributed
+        }
     }
 }

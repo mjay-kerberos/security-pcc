@@ -1,0 +1,165 @@
+// Copyright © 2025 Apple Inc. All Rights Reserved.
+
+// APPLE INC.
+// PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
+// PLEASE READ THE FOLLOWING PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT (“AGREEMENT”) CAREFULLY BEFORE DOWNLOADING OR USING THE APPLE SOFTWARE ACCOMPANYING THIS AGREEMENT(AS DEFINED BELOW). BY DOWNLOADING OR USING THE APPLE SOFTWARE, YOU ARE AGREEING TO BE BOUND BY THE TERMS OF THIS AGREEMENT. IF YOU DO NOT AGREE TO THE TERMS OF THIS AGREEMENT, DO NOT DOWNLOAD OR USE THE APPLE SOFTWARE. THESE TERMS AND CONDITIONS CONSTITUTE A LEGAL AGREEMENT BETWEEN YOU AND APPLE.
+// IMPORTANT NOTE: BY DOWNLOADING OR USING THE APPLE SOFTWARE, YOU ARE AGREEING ON YOUR OWN BEHALF AND/OR ON BEHALF OF YOUR COMPANY OR ORGANIZATION TO THE TERMS OF THIS AGREEMENT.
+// 1. As used in this Agreement, the term “Apple Software” collectively means and includes all of the Apple Private Cloud Compute materials provided by Apple here, including but not limited to the Apple Private Cloud Compute software, tools, data, files, frameworks, libraries, documentation, logs and other Apple-created materials. In consideration for your agreement to abide by the following terms, conditioned upon your compliance with these terms and subject to these terms, Apple grants you, for a period of ninety (90) days from the date you download the Apple Software, a limited, non-exclusive, non-sublicensable license under Apple’s copyrights in the Apple Software to download, install, compile and run the Apple Software internally within your organization only on a single Apple-branded computer you own or control, for the sole purpose of verifying the security and privacy characteristics of Apple Private Cloud Compute. This Agreement does not allow the Apple Software to exist on more than one Apple-branded computer at a time, and you may not distribute or make the Apple Software available over a network where it could be used by multiple devices at the same time. You may not, directly or indirectly, redistribute the Apple Software or any portions thereof. The Apple Software is only licensed and intended for use as expressly stated above and may not be used for other purposes or in other contexts without Apple's prior written permission. Except as expressly stated in this notice, no other rights or licenses, express or implied, are granted by Apple herein.
+// 2. The Apple Software is provided by Apple on an "AS IS" basis. APPLE MAKES NO WARRANTIES, EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION THE IMPLIED WARRANTIES OF NON-INFRINGEMENT, MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE, REGARDING THE APPLE SOFTWARE OR ITS USE AND OPERATION ALONE OR IN COMBINATION WITH YOUR PRODUCTS, SYSTEMS, OR SERVICES. APPLE DOES NOT WARRANT THAT THE APPLE SOFTWARE WILL MEET YOUR REQUIREMENTS, THAT THE OPERATION OF THE APPLE SOFTWARE WILL BE UNINTERRUPTED OR ERROR-FREE, THAT DEFECTS IN THE APPLE SOFTWARE WILL BE CORRECTED, OR THAT THE APPLE SOFTWARE WILL BE COMPATIBLE WITH FUTURE APPLE PRODUCTS, SOFTWARE OR SERVICES. NO ORAL OR WRITTEN INFORMATION OR ADVICE GIVEN BY APPLE OR AN APPLE AUTHORIZED REPRESENTATIVE WILL CREATE A WARRANTY.
+// 3. IN NO EVENT SHALL APPLE BE LIABLE FOR ANY DIRECT, SPECIAL, INDIRECT, INCIDENTAL OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) ARISING IN ANY WAY OUT OF THE USE, REPRODUCTION, COMPILATION OR OPERATION OF THE APPLE SOFTWARE, HOWEVER CAUSED AND WHETHER UNDER THEORY OF CONTRACT, TORT (INCLUDING NEGLIGENCE), STRICT LIABILITY OR OTHERWISE, EVEN IF APPLE HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// 4. This Agreement is effective until terminated. Your rights under this Agreement will terminate automatically without notice from Apple if you fail to comply with any term(s) of this Agreement. Upon termination, you agree to cease all use of the Apple Software and destroy all copies, full or partial, of the Apple Software. This Agreement constitutes the entire understanding of the parties with respect to the subject matter contained herein, and supersedes all prior negotiations, representations, or understandings, written or oral. This Agreement will be governed and construed in accordance with the laws of the State of California, without regard to its choice of law rules.
+// You may report security issues about Apple products to product-security@apple.com, as described here: https://www.apple.com/support/security/. Non-security bugs and enhancement requests can be made via https://bugreport.apple.com as described here: https://developer.apple.com/bug-reporting/
+// EA1937
+// 10/02/2024
+
+//  Copyright © 2024 Apple, Inc. All rights reserved.
+//
+
+import Foundation
+import Network
+
+/// ``VREInstanceConfiguration`` represents on-disk state for instances.
+///
+/// FIXME: This ought to be nested under `VRE.Instance` but that necessitates dragging the universe
+/// into the test target. Better to factor everything into a library first and link that from the tests.
+struct VREInstanceConfiguration {
+    // ReleaseAsset is a list of "assets" from the metadata payload of a
+    //  SW Release Transparency Log entry -- can be a useful reference to look up by
+    //  asset "type" (ASSET_TYPE_XX) for operations such as adding ssh support, which
+    //  requires adding the ASSET_TYPE_DEBUG_SHELL cryptex.
+    //
+    //  Other cryptexes provided outside of a SW Release are not stored here
+    struct ReleaseAsset: Codable {
+        let type: String
+        let file: String
+        let variant: String
+
+        init(
+            type: String,
+            file: String,
+            variant: String
+        ) {
+            self.type = type
+            self.file = file
+            self.variant = variant
+        }
+    }
+
+    let name: String
+    let releaseID: String
+    let httpService: HTTPServer.Configuration?
+    var releaseAssets: [ReleaseAsset] // expected to come from release metadata
+
+    init(
+        name: String,
+        releaseID: String,
+        httpService: HTTPServer.Configuration?,
+        releaseAssets: [ReleaseAsset]? = nil
+    ) {
+        self.name = name
+        self.releaseID = releaseID
+        self.httpService = httpService
+        self.releaseAssets = releaseAssets ?? []
+
+        let selfjson = asJSONString(self)
+        VRE.logger.debug("config instance: \(selfjson, privacy: .public)")
+    }
+
+    init(contentsOf url: URL) throws {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw VREError("load instance \(url.absoluteString): \(error)")
+        }
+
+        let decoder = PropertyListDecoder()
+        do {
+            self = try decoder.decode(VREInstanceConfiguration.self, from: data)
+        } catch {
+            throw VREError("parse instance: \(error)")
+        }
+
+        let selfjson = asJSONString(self)
+        VRE.logger.debug("config instance from \(url.path, privacy: .public): \(selfjson, privacy: .public)")
+    }
+
+    // write saves instance configuration as a plist file
+    func write(to: URL) throws {
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .xml
+
+        do {
+            let data = try encoder.encode(self)
+            try data.write(to: to, options: .atomic)
+        } catch {
+            throw VREError("save instance \(to.absoluteString): \(error)")
+        }
+
+        let configjson = asJSONString(self)
+        VRE.logger.log("wrote config \(to.path, privacy: .public): \(configjson, privacy: .public)")
+    }
+}
+
+// MARK: - Coding
+
+// Instances of the VRE config are written out to disk, so the encoding schema
+// has been written out explicitly.
+//
+// Care must be taken when adding and especially when removing fields from the
+// VRE configuration that older installs can still read the configuration
+// files as written.
+extension VREInstanceConfiguration: Codable {
+    // HTTPServiceDef is the format of the original pccvre http service
+    // parameters.
+    private struct HTTPServiceDef: Codable {
+        let enabled: Bool
+        var address: String?
+        var port: UInt16?
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case releaseID
+        case httpService
+        case releaseAssets
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: Self.CodingKeys.self)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.releaseID = try container.decode(String.self, forKey: .releaseID)
+        let httpServiceDef = try container.decode(HTTPServiceDef.self, forKey: .httpService)
+        self.httpService = if httpServiceDef.enabled {
+            if
+                let rawServerAddress = httpServiceDef.address,
+                let address = NWEndpoint.Host(ipAddress: rawServerAddress)
+            {
+                .network(HTTPServer.Configuration.Network(host: address, port: httpServiceDef.port))
+            } else {
+                .virtual(HTTPServer.Configuration.Virtual(mode: .nat, port: httpServiceDef.port))
+            }
+        } else {
+            nil
+        }
+        self.releaseAssets = try container.decode([ReleaseAsset].self, forKey: .releaseAssets)
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: Self.CodingKeys.self)
+        try container.encode(self.name, forKey: .name)
+        try container.encode(self.releaseID, forKey: .releaseID)
+        let serviceDef = if let config = self.httpService {
+            switch config {
+            case .network(let network):
+                HTTPServiceDef(enabled: true, address: String(describing: network.host), port: network.port)
+            case .virtual(let virtual):
+                HTTPServiceDef(enabled: true, address: nil, port: virtual.port)
+            }
+        } else {
+            HTTPServiceDef(enabled: false)
+        }
+        try container.encode(serviceDef, forKey: .httpService)
+        try container.encode(self.releaseAssets, forKey: .releaseAssets)
+    }
+}

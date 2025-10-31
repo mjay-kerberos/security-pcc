@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -26,11 +26,10 @@ extension CLI.InstanceCmd {
         )
 
         @OptionGroup var globalOptions: CLI.globalOptions
-        @OptionGroup var instanceOptions: CLI.InstanceCmd.options
 
         @Option(name: [.customLong("name"), .customShort("N")], help: "VRE name.",
                 transform: { try CLI.validateVREName($0) })
-        var vreName: String
+        var vreNames: [String]
 
         @Flag(name: [.customLong("quiet")],
               help: ArgumentHelp("Suppress VRE console output on stdout (still runs foreground).",
@@ -38,25 +37,37 @@ extension CLI.InstanceCmd {
         var quietMode: Bool = false
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
-            CLI.logger.log("start VRE \(vreName, privacy: .public)")
+            CLI.logger.log("start VRE \(vreNames, privacy: .public)")
 
-            Main.printHardwareRecommendationWarningIfApplicable()
+            try CLI.validateRequiredMemoryToStart(instanceNames: vreNames)
 
-            guard VRE.exists(vreName) else {
-                throw CLIError("VRE '\(vreName)' not found")
+            try await withThrowingTaskGroup { group in
+                for vreName in vreNames {
+                    let vre = try VRE.Instance(name: vreName)
+                    if vre.isRunning {
+                        throw CLIError("VRE '\(vreName)' is running")
+                    }
+
+
+                    group.addTask {
+                        CLI.logger.log("start VRE \(vreName, privacy: .public)")
+                        try await vre.start(quietMode: quietMode)
+                    }
+                }
             }
-
-            let vre = try VRE(
-                name: vreName,
-                vrevmPath: instanceOptions.vrevmPath
-            )
-
-            if vre.vm.isRunning {
-                throw CLIError("VRE '\(vreName)' is running")
-            }
-
-            try await vre.start(quietMode: quietMode)
         }
+    }
+}
+
+extension CLI {
+    static func validateRequiredMemoryToStart(instanceNames: [String]) throws {
+        let requestedVMMemory = try VRE.VM.status()
+            .filter { instanceNames.contains($0.name) }
+            .reduce(0) { (sum, vm) in sum + (vm.memoryGB ?? 0) }
+        try Main.validateRequiredMemory(
+            requiredMemoryGB: requestedVMMemory + Main.requiredMemoryGBHost,
+            // Require to stop other instances if there ins't enough memory.
+            consumedMemoryGB: try VRE.VM.totalRunningVMMemory()
+        )
     }
 }

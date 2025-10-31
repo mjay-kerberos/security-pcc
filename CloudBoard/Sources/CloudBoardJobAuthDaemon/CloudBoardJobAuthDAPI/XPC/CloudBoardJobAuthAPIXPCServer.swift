@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,7 +14,7 @@
 
 //  Copyright © 2024 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+internal import CloudBoardAsyncXPC
 
 public actor CloudBoardJobAuthAPIXPCServer {
     private let listener: CloudBoardAsyncXPCListener
@@ -47,7 +47,7 @@ extension CloudBoardJobAuthAPIXPCServer {
 
 extension CloudBoardJobAuthAPIXPCServer: CloudBoardJobAuthAPIServerToClientProtocol {
     public func authKeysUpdated(newKeySet: AuthTokenKeySet) async throws {
-        try await self.listener.broadcast(
+        await self.listener.broadcast(
             CloudBoardJobAuthAPIXPCServerToClientMessages.AuthKeysUpdated(newKeySet: newKeySet)
         )
     }

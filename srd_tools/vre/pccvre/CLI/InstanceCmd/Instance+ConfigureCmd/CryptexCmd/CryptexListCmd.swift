@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -27,41 +27,22 @@ extension CLI.InstanceCmd.InstanceConfigureCmd.CryptexCmd {
 
         @OptionGroup var globalOptions: CLI.globalOptions
         @OptionGroup var configureOptions: CLI.InstanceCmd.InstanceConfigureCmd.options
-        @OptionGroup var instanceOptions: CLI.InstanceCmd.options
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
-
             let vreName = configureOptions.instanceName
             CLI.logger.log("list cryptex for \(vreName, privacy: .public)")
 
-            guard VRE.exists(vreName) else {
-                throw CLIError("VRE '\(vreName)' not found")
-            }
+            let vre = try VRE.Instance(name: vreName)
+            let darwinInit = try vre.darwinInitHelper()
 
-            let vre = try VRE(
-                name: vreName,
-                vrevmPath: instanceOptions.vrevmPath
-            )
-
-            var darwinInit: DarwinInitHelper
-            do {
-                darwinInit = try DarwinInitHelper(fromFile: vre.darwinInitFile.path)
-            } catch {
-                throw CLIError("unable to load darwin-init for instance")
-            }
-
-            let cryptexes = darwinInit.cryptexes
-            guard cryptexes.count > 0 else {
-                throw CLIError("no cryptexes defined for instance")
-            }
+            let cryptexes = try darwinInit.cryptexes()
 
             let cryptexList: [String] = cryptexes.map { "\($0.variant):\($0.url)" }
             CLI.logger.log("cryptexes reported: \(cryptexList, privacy: .public)")
 
             print("Configured cryptexes:")
             for cryptex in cryptexes {
-                print("- \(cryptex.description)")
+                print("- \(cryptex.variant): \(cryptex.url)")
             }
         }
     }

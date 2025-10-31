@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -18,7 +18,7 @@ import ArgumentParserInternal
 import CloudBoardController
 
 @main
-actor NullCloudControllerApp: AsyncParsableCommand {
+struct NullCloudControllerApp: AsyncParsableCommand {
     func run() async throws {
         let nullCloudController = try await NullCloudController()
         try await nullCloudController.run()

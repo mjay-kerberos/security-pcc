@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -28,6 +28,8 @@ public struct CBJobHelperConfiguration: Codable, Hashable {
     enum CodingKeys: String, CodingKey {
         case cloudAppName = "CloudAppName"
         case _enforceTGTValidation = "EnforceTGTValidation"
+        case _proxyConfiguration = "ProxyConfiguration"
+        // deliberately *not* serialising _secureConfig
     }
 
     /// Name to search for in the `CloudBoardJobName` field in the `_AdditionalProperties` launchd plist to discover
@@ -40,6 +42,36 @@ public struct CBJobHelperConfiguration: Codable, Hashable {
     var enforceTGTValidation: Bool {
         get { self._enforceTGTValidation ?? false }
         set { self._enforceTGTValidation = newValue }
+    }
+
+    var _proxyConfiguration: ProxyConfiguration?
+
+    var proxyConfiguration: ProxyConfiguration {
+        get { self._proxyConfiguration ?? ProxyConfiguration() }
+        set { self._proxyConfiguration = newValue }
+    }
+
+    private var _secureConfig: SecureConfig? = nil
+    /// What sort of role this helper will be providing
+    /// If not supplied this is assumed to be a worker
+    /// we cannot determine if we are a nack processing instance from this
+    /// so we just don't bother for now
+    var isProxy: Bool {
+        /// Attempting to do this in a real run means we didn't apply security checks, this should be instantly terminal
+        precondition(self._secureConfig != nil, "Attempt to access secureconfig when it has not been hooked up")
+        return self._secureConfig!.isProxy
+    }
+
+    /// This is not for direct use except in tests
+    /// It *does not validate* `secureconfig`
+    internal init(
+        secureConfig: SecureConfig,
+        cloudAppName: String? = nil,
+        enforceTGTValidation: Bool? = nil
+    ) {
+        self._secureConfig = secureConfig
+        self.cloudAppName = cloudAppName
+        self._enforceTGTValidation = enforceTGTValidation
     }
 
     public static func fromPreferences(secureConfigLoader: SecureConfigLoader = .real) throws
@@ -60,8 +92,17 @@ public struct CBJobHelperConfiguration: Codable, Hashable {
         }
     }
 
-    mutating func enforceSecurityConfig() {
+    private mutating func applySecureConfig(_ secureConfig: SecureConfig) throws {
+        self._secureConfig = secureConfig
+        // after setting up everything else validate
+        if secureConfig.shouldEnforceAppleInfrastructureSecurityConfig {
+            try self.enforceSecurityConfig()
+        }
+    }
+
+    private mutating func enforceSecurityConfig() throws {
         CloudBoardJobHelper.logger.debug("Enforcing security config")
+        // currently nothing requires enforcing
     }
 
     static func fromPreferences(
@@ -81,10 +122,14 @@ public struct CBJobHelperConfiguration: Codable, Hashable {
             )
             throw error
         }
-
-        if secureConfig.forceSecurityConfigurationOn {
-            configuration.enforceSecurityConfig()
-        }
+        try configuration.applySecureConfig(secureConfig)
         return configuration
     }
+}
+
+/// Note: "EnableReleaseSetValidation" used to be enforced in the helper, so the config was here
+/// It's now done in the AttestationDaemon, and config is done via SecureConfig with a fallback here
+/// We retain the ProxyConfiguration object for a while in case some other proxy specific config comes up
+extension CBJobHelperConfiguration {
+    struct ProxyConfiguration: Codable, Hashable, Sendable {}
 }

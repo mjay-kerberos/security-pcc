@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -20,27 +20,56 @@ import CloudBoardMetrics
 import CloudBoardPlatformUtilities
 import Foundation
 import GRPCClientConfiguration
-import InternalGRPC
-import InternalSwiftProtobuf
 import Logging
 import NIOCore
-import NIOHTTP2
-import NIOTransportServices
 import os
 
-final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendable {
-    private typealias Client = Com_Apple_Ase_Traffic_Servicediscovery_Api_V1_ServiceRegistrationAsyncClient
-    private typealias Request = Com_Apple_Ase_Traffic_Servicediscovery_Api_V1_RegistrationRequest
-    private typealias Response = Com_Apple_Ase_Traffic_Servicediscovery_Api_V1_RegistrationResponse
+/// namespace for types used to interoperate between ``ServiceDiscoveryPublisher`` and
+/// ``ServiceDiscoveryServiceProtocol`` implementations
+enum ServiceDiscovery {
+    typealias Client = Com_Apple_Ase_Traffic_Servicediscovery_Api_V1_ServiceRegistrationAsyncClient
+    typealias Request = Com_Apple_Ase_Traffic_Servicediscovery_Api_V1_RegistrationRequest
+    typealias Response = Com_Apple_Ase_Traffic_Servicediscovery_Api_V1_RegistrationResponse
 
+    struct ServiceDetails: CustomStringConvertible {
+        var workloadType: WorkloadConfig.WorkloadType
+        var workloadTags: [String: WorkloadConfig.RoutingTagValue]
+        var retractionPromise: Promise<Void, Never>
+
+        var description: String {
+            "ServiceDetails: type=\(self.workloadType) tags=\(self.workloadTags)"
+        }
+    }
+
+    struct Locality {
+        var region: String
+        var zone: String?
+
+        static let qa = Locality(region: "QA", zone: "default")
+    }
+
+    struct ServiceUpdate {
+        var name: String
+        var details: ServiceDetails
+    }
+
+    /// Abstraction on the ``GRPCAsyncBidirectionalStreamingCall<Request, Response>``
+    struct Announcement {
+        let responseStream: any AsyncSequence<Response, Swift.Error>
+        let send: (Request) async throws -> Void
+        let finish: () -> Void
+    }
+}
+
+final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendable {
     fileprivate static let logger: os.Logger = .init(
         subsystem: "com.apple.cloudos.cloudboard",
         category: "ServiceDiscovery.Publisher"
     )
 
-    private let client: Client
+    private let serviceDiscoveryComms: any ServiceDiscoveryCommsProtocol
     private let serviceAddress: SocketAddress
-    private let locality: Locality
+    private let locality: ServiceDiscovery.Locality
     private let id: String
     private let lbConfig: [String: String]
     private let backoffConfig: GRPCClientConfiguration.ConnectionBackoff?
@@ -50,79 +79,30 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
     private let hotProperties: HotPropertiesController?
     private let registeredServiceCount = OSAllocatedUnfairLock(initialState: 0)
     private let statusMonitor: StatusMonitor
+    private let nodeReleaseDigest: String
 
     private struct State {
-        var serviceUpdateContinuation: AsyncStream<ServiceUpdate>.Continuation?
-        var services: [String: ServiceDetails] = [:]
+        var serviceUpdateContinuation: AsyncStream<ServiceDiscovery.ServiceUpdate>.Continuation?
+        var services: [String: ServiceDiscovery.ServiceDetails] = [:]
         var draining: Bool = false
-    }
-
-    private struct ServiceDetails: CustomStringConvertible {
-        var workloadTags: [String: WorkloadConfig.RoutingTagValue]
-        var retractionPromise: Promise<Void, Never>
-
-        var description: String {
-            "ServiceDetails: workloadTags=\(self.workloadTags)"
-        }
-    }
-
-    private struct ServiceUpdate {
-        var name: String
-        var details: ServiceDetails
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
 
     init(
-        group: NIOTSEventLoopGroup,
-        targetHost: String,
-        targetPort: Int,
+        serviceDiscoveryComms: any ServiceDiscoveryCommsProtocol,
         serviceAddress: SocketAddress,
-        locality: Locality,
+        locality: ServiceDiscovery.Locality,
         lbConfig: [String: String],
-        tlsConfiguration: ClientTLSConfiguration,
         backoffConfig: GRPCClientConfiguration.ConnectionBackoff?,
-        keepalive: CloudBoardDConfiguration.Keepalive?,
         statusMonitor: StatusMonitor,
         hotProperties: HotPropertiesController? = nil,
         nodeInfo: NodeInfo? = nil,
         cellID: String? = nil,
-        metrics: any MetricsSystem
+        metrics: any MetricsSystem,
+        nodeReleaseDigest: String
     ) throws {
-        Self.logger.log(
-            "Preparing service discovery publisher to \(targetHost, privacy: .public):\(targetPort, privacy: .public), TLS \(tlsConfiguration, privacy: .public), Keepalive: \(String(describing: keepalive), privacy: .public)"
-        )
-        let channel = try GRPCChannelPool.with(
-            target: .hostAndPort(targetHost, targetPort),
-            transportSecurity: .init(tlsConfiguration),
-            eventLoopGroup: group
-        ) { config in
-            config.backgroundActivityLogger = Logging.Logger(
-                osLogSubsystem: "com.apple.cloudos.cloudboard",
-                osLogCategory: "ServiceDiscovery.AsyncClient_BackgroundActivity",
-                domain: "ServiceDiscovery.AsyncClient_BackgroundActivity"
-            )
-            config.keepalive = .init(keepalive)
-            config.debugChannelInitializer = { channel in
-                // We want to go immediately after the HTTP2 handler so we can see what the GRPC idle handler is doing.
-                channel.pipeline.handler(type: NIOHTTP2Handler.self).flatMap { http2Handler in
-                    let pingDiagnosticHandler = GRPCPingDiagnosticHandler(logger: os.Logger(
-                        subsystem: "com.apple.cloudos.cloudboard",
-                        category: "ServiceDiscovery.GRPCPingDiagnosticHandler"
-                    ))
-                    return channel.pipeline.addHandler(pingDiagnosticHandler, position: .after(http2Handler))
-                }
-            }
-            config.delegate = PoolDelegate(metrics: metrics)
-        }
-
-        let logger = Logging.Logger(
-            osLogSubsystem: "com.apple.cloudos.cloudboard",
-            osLogCategory: "ServiceDiscovery.AsyncClient",
-            domain: "ServiceDiscovery.AsyncClient"
-        )
-
-        self.client = .init(channel: channel, defaultCallOptions: CallOptions(logger: logger))
+        self.serviceDiscoveryComms = serviceDiscoveryComms
         self.serviceAddress = serviceAddress
         self.locality = locality
         self.id = UUID().uuidString
@@ -133,53 +113,61 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
         self.cellID = cellID
         self.statusMonitor = statusMonitor
         self.metrics = metrics
+        self.nodeReleaseDigest = nodeReleaseDigest
     }
 
     convenience init(
-        group: NIOTSEventLoopGroup,
+        serviceDiscoveryComms: any ServiceDiscoveryCommsProtocol,
         configuration: CloudBoardDConfiguration.ServiceDiscovery,
         serviceAddress: SocketAddress,
-        localIdentityCallback: GRPCTLSConfiguration.IdentityCallback?,
         hotProperties: HotPropertiesController?,
         nodeInfo: NodeInfo?,
         cellID: String?,
         statusMonitor: StatusMonitor,
-        metrics: any MetricsSystem
+        metrics: any MetricsSystem,
+        nodeReleaseDigest: String
     ) throws {
         try self.init(
-            group: group,
-            targetHost: configuration.targetHost,
-            targetPort: configuration.targetPort,
+            serviceDiscoveryComms: serviceDiscoveryComms,
             serviceAddress: serviceAddress,
-            locality: Locality(region: configuration.serviceRegion, zone: configuration.serviceZone),
+            locality: ServiceDiscovery.Locality(
+                region: configuration.serviceRegion,
+                zone: configuration.serviceZone
+            ),
             lbConfig: configuration.lbConfig,
-            tlsConfiguration: .init(configuration.tlsConfig, identityCallback: localIdentityCallback),
             backoffConfig: configuration.backoffConfig,
-            keepalive: configuration.keepalive,
             statusMonitor: statusMonitor,
             hotProperties: hotProperties,
             nodeInfo: nodeInfo,
             cellID: cellID,
-            metrics: metrics
+            metrics: metrics,
+            nodeReleaseDigest: nodeReleaseDigest
         )
     }
 
     func run() async throws {
         Self.logger.log("Publishing initial service state")
-        let serviceUpdateStream: AsyncStream<ServiceUpdate> = self.state.withLock { state in
-            let (serviceUpdateStream, serviceUpdateContinuation) = AsyncStream<ServiceUpdate>.makeStream()
-            let alreadyRegisteredServices = state.services
+        let serviceUpdateStream: AsyncStream<ServiceDiscovery.ServiceUpdate> =
+            self.state.withLock { state in
+                let (serviceUpdateStream, serviceUpdateContinuation) =
+                    AsyncStream<ServiceDiscovery.ServiceUpdate>.makeStream()
+                let alreadyRegisteredServices = state.services
 
-            // Publish all services that were registered before we got to this point.
-            for service in alreadyRegisteredServices {
-                Self.logger.log(
-                    "Publishing \(service.key, privacy: .public) as current service state with config \(service.value, privacy: .public)"
-                )
-                serviceUpdateContinuation.yield(ServiceUpdate(name: service.key, details: service.value))
+                // Publish all services that were registered before we got to this point.
+                for service in alreadyRegisteredServices {
+                    Self.logger.log(
+                        "Publishing \(service.key, privacy: .public) as current service state with config \(service.value, privacy: .public)"
+                    )
+                    serviceUpdateContinuation.yield(
+                        ServiceDiscovery.ServiceUpdate(
+                            name: service.key,
+                            details: service.value
+                        )
+                    )
+                }
+                state.serviceUpdateContinuation = serviceUpdateContinuation
+                return serviceUpdateStream
             }
-            state.serviceUpdateContinuation = serviceUpdateContinuation
-            return serviceUpdateStream
-        }
 
         try await withLifecycleManagementHandlers(label: "serviceDiscoveryPublisher") {
             do {
@@ -203,10 +191,10 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
         }
     }
 
-    func announceService(name: String, workloadConfig: [String: WorkloadConfig.RoutingTagValue]) {
+    func announceService(name: String, workloadConfig: ServiceDiscoveryWorkloadConfig) {
         let promise: Promise<Void, Never>? = self.state.withLock { state in
             let serviceState = state.services[name]
-            if serviceState?.workloadTags == workloadConfig {
+            if serviceState?.workloadTags == workloadConfig.workloadTags {
                 Self.logger.log("Announcing \(name, privacy: .public) with duplicate config, no change")
                 return nil
             }
@@ -219,7 +207,11 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
             }
 
             // In either case, we have a change here.
-            let details = ServiceDetails(workloadTags: workloadConfig, retractionPromise: .init())
+            let details = ServiceDiscovery.ServiceDetails(
+                workloadType: workloadConfig.workloadType,
+                workloadTags: workloadConfig.workloadTags,
+                retractionPromise: .init()
+            )
             state.services[name] = details
 
             if let serviceState {
@@ -272,18 +264,17 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
         case unexpectedEndOfResponseStream
     }
 
-    private func publishService(_ update: ServiceUpdate) async throws {
+    private func publishService(_ update: ServiceDiscovery.ServiceUpdate) async throws {
         var connectionBackoff = RetryBackoff(config: self.backoffConfig)
         Self.logger.info(
             "Connection backoff created with configuration: \(connectionBackoff.config, privacy: .public)"
         )
-
         while true {
             Self.logger.log(
                 "ServiceDiscoveryPublisher is (re)beginning publication of \(update.name, privacy: .public)"
             )
             try Task.checkCancellation()
-            let announce = self.client.makeAnnounceCall()
+            let announcement = self.serviceDiscoveryComms.announceService(update)
 
             enum Action {
                 case reconnect
@@ -300,7 +291,7 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
                     logger: Self.logger
                 ) { [update] in
                     await self.consumeUpdates(
-                        announce.responseStream,
+                        stream: announcement.responseStream,
                         serviceName: update.name
                     )
                 }
@@ -312,7 +303,7 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
                 ) { [update] in
                     await self.publishUpdates(
                         update,
-                        to: announce.requestStream
+                        announcement: announcement
                     )
                 }
 
@@ -369,14 +360,15 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
     }
 
     private func publishUpdates(
-        _ service: ServiceUpdate,
-        to stream: GRPCAsyncRequestStreamWriter<Request>
+        _ service: ServiceDiscovery.ServiceUpdate,
+        announcement: ServiceDiscovery.Announcement
     ) async -> UpdateEndResult {
         Self.logger.log("Beginning service discovery publisher loop for \(service.name, privacy: .public)")
         var result = await self.sendServiceRegistration(
             serviceName: service.name,
+            workloadType: service.details.workloadType,
             workloadTags: service.details.workloadTags,
-            stream: stream
+            announcement: announcement
         )
         if let result {
             self.statusMonitor.serviceRegistrationErrored()
@@ -402,7 +394,7 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
 
         result = await self.sendServiceRetraction(
             serviceName: service.name,
-            stream: stream
+            announcement: announcement
         )
         if let result {
             self.statusMonitor.serviceDeregistrationErrored()
@@ -411,12 +403,12 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
         self.statusMonitor.serviceDeregistered()
 
         Self.logger.log("Retracted \(service.name, privacy: .public)")
-        stream.finish()
+        announcement.finish()
         return .retracted
     }
 
     private func consumeUpdates(
-        _ stream: GRPCAsyncResponseStream<Response>,
+        stream: any AsyncSequence<ServiceDiscovery.Response, Swift.Error>,
         serviceName: String
     ) async -> UpdateEndResult {
         do {
@@ -441,17 +433,18 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
 
     private func sendServiceRegistration(
         serviceName: String,
+        workloadType: WorkloadConfig.WorkloadType,
         workloadTags: [String: WorkloadConfig.RoutingTagValue],
-        stream: GRPCAsyncRequestStreamWriter<Request>
+        announcement: ServiceDiscovery.Announcement
     ) async -> UpdateEndResult? {
         let cloudOSBuildVersionToPublish = self.nodeInfo?.cloudOSBuildVersion
         let cloudOSReleaseTypeToPublish = self.nodeInfo?.cloudOSReleaseType
         let serverOSBuildVersionToPublish = self.nodeInfo?.serverOSBuildVersion
         let machineNameToPublish = self.nodeInfo?.machineName
         let ensembleIDToPublish = self.nodeInfo?.ensembleID
-        let request: Request
+        let request: ServiceDiscovery.Request
         do {
-            Self.logger.info("Publishing \(serviceName, privacy: .public)")
+            Self.logger.info("Publishing \(serviceName, privacy: .public) with tags: \(workloadTags, privacy: .public)")
             request = try .with {
                 $0.registration = try .with {
                     $0.registrationID = self.id
@@ -463,7 +456,7 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
                             "lb": .with {
                                 $0.fields = .init(self.lbConfig)
                             },
-                            "workload": .with {
+                            workloadType == .proxy ? "trusted-proxy" : "workload": .with {
                                 $0.fields = [String: Com_Apple_Ase_Traffic_Servicediscovery_Api_V1_MetaValue](
                                     workloadTags
                                 )
@@ -476,6 +469,7 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
                                     "machineName": machineNameToPublish,
                                     "ensembleID": ensembleIDToPublish,
                                     "cellId": self.cellID,
+                                    "releaseDigest": self.nodeReleaseDigest,
                                 ])
                             },
                         ]
@@ -491,7 +485,7 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
         do {
             let registrationMessage = (try? request.jsonString()) ?? "<unserialisable>"
             Self.logger.log("Registration message: \(registrationMessage, privacy: .public)")
-            try await stream.send(request)
+            try await announcement.send(request)
             return nil
         } catch {
             Self.logger.warning(
@@ -503,10 +497,10 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
 
     private func sendServiceRetraction(
         serviceName: String,
-        stream: GRPCAsyncRequestStreamWriter<Request>
+        announcement: ServiceDiscovery.Announcement
     ) async -> UpdateEndResult? {
         Self.logger.log("Retracting \(serviceName, privacy: .public)")
-        let request = Request.with {
+        let request = ServiceDiscovery.Request.with {
             $0.deregistration = .with {
                 $0.registrationID = self.id
                 $0.serviceName = serviceName
@@ -514,7 +508,7 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
         }
         do {
             Self.logger.log("Deregistration message: \(String(describing: request), privacy: .public)")
-            try await stream.send(request)
+            try await announcement.send(request)
             return nil
         } catch {
             Self.logger.warning(
@@ -562,15 +556,6 @@ final class ServiceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol, Sendab
     }
 }
 
-extension ServiceDiscoveryPublisher {
-    struct Locality {
-        var region: String
-        var zone: String?
-
-        static let qa = Locality(region: "QA", zone: "default")
-    }
-}
-
 extension Com_Apple_Ase_Traffic_Servicediscovery_Api_V1_SocketAddress {
     init(_ address: SocketAddress) throws {
         self = try .with {
@@ -586,8 +571,12 @@ extension Com_Apple_Ase_Traffic_Servicediscovery_Api_V1_SocketAddress {
     }
 }
 
+enum ServiceDiscoveryError: Error {
+    case unableToConvertSocketAddress(SocketAddress)
+}
+
 extension Com_Apple_Ase_Traffic_Servicediscovery_Api_V1_Locality {
-    init(_ locality: ServiceDiscoveryPublisher.Locality) {
+    init(_ locality: ServiceDiscovery.Locality) {
         self = .with {
             $0.region = locality.region
 
@@ -634,27 +623,6 @@ extension [String: Com_Apple_Ase_Traffic_Servicediscovery_Api_V1_MetaValue] {
     }
 }
 
-enum ServiceDiscoveryError: Error {
-    case unableToConvertSocketAddress(SocketAddress)
-}
-
-extension GRPCChannelPool.Configuration.TransportSecurity {
-    init(_ tlsMode: ClientTLSConfiguration) {
-        switch tlsMode {
-        case .plaintext:
-            self = .plaintext
-        case .simpleTLS(let config):
-            self = .tls(
-                .grpcTLSConfiguration(
-                    hostnameOverride: config.sniOverride,
-                    identityCallback: config.localIdentityCallback,
-                    customRoot: config.customRoot
-                )
-            )
-        }
-    }
-}
-
 extension [String: Com_Apple_Ase_Traffic_Servicediscovery_Api_V1_MetaValue] {
     init(optionalFields: [String: String?]) {
         var result = [String: Com_Apple_Ase_Traffic_Servicediscovery_Api_V1_MetaValue]()
@@ -664,16 +632,6 @@ extension [String: Com_Apple_Ase_Traffic_Servicediscovery_Api_V1_MetaValue] {
             }
         }
         self = result
-    }
-}
-
-extension TimeAmount {
-    init(_ duration: Duration) {
-        let (seconds, attoseconds) = duration.components
-
-        let nanosecondsFromSeconds = seconds * 1_000_000_000
-        let nanosecondsFromAttoseconds = attoseconds / 1_000_000_000
-        self = .nanoseconds(nanosecondsFromSeconds + nanosecondsFromAttoseconds)
     }
 }
 

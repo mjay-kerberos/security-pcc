@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,21 +14,105 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
+import CryptoKit
 import Foundation
 
-package protocol CloudBoardJobAPIServerToClientProtocol: Actor {
-    func findHelper(helperID: UUID) async throws
-    func sendHelperMessage(helperID: UUID, data: Data) async throws
-    func sendHelperEOF(helperID: UUID) async throws
-    func provideResponseChunk(_ data: Data) async throws
-    func endJob() async throws
+/// Shared type to define distribution type for DEK-derived request specific keys used within ensembles. Same as
+/// CloudBoardCommon.CloudBoardInternEnsembleKeyDistributionType but this avoids pulling in CloudBoardCommon.
+package enum CloudBoardJobAPIEnsembleKeyDistributionType: Codable, Sendable {
+    /// Makes the key only available via ensembled on the leader of an ensemble
+    case local
+    /// Distribute the key to follower nodes of an ensemble
+    case distributed
+}
+
+/// Shared type representing encrypted ensemble key metadata. Same as
+/// CloudBoardCommon.CloudBoardInternEnsembleKeyDistributionType but this avoids pulling in CloudBoardCommon.
+package struct CloudBoardJobAPIEnsembleKeyInfo: Codable, Sendable {
+    package var keyID: UUID
+    package var keyEncryptionKey: Data
+
+    package init(keyID: UUID, keyEncryptionKey: Data) {
+        self.keyID = keyID
+        self.keyEncryptionKey = keyEncryptionKey
+    }
+}
+
+/// CloudApp-end of the XPC protocol.
+///
+/// Facilitates sending the messages back to CloudBoardJobHelper.
+package protocol CloudBoardJobAPIServerToClientProtocol {
+    func provideResponseChunk(_ data: Data) async
+    /// A serious error has occured in the cloud app - treat as a failure
+    func internalError() async
+    func endOfResponse() async
+    func endJob() async
+    func findWorker(
+        workerID: UUID,
+        serviceName: String,
+        routingParameters: [String: [String]],
+        responseBypass: Bool,
+        forwardRequestChunks: Bool,
+        isFinal: Bool,
+        spanID: String
+    ) async throws
+    func distributeEnsembleKey(
+        info: String,
+        distributionType: CloudBoardJobAPIEnsembleKeyDistributionType
+    ) async throws -> UUID
+    func distributeSealedEnsembleKey(
+        info: String,
+        distributionType: CloudBoardJobAPIEnsembleKeyDistributionType
+    ) async throws -> CloudBoardJobAPIEnsembleKeyInfo
+    func sendWorkerRequestMessage(workerID: UUID, _ data: Data) async
+    func sendWorkerEOF(workerID: UUID, isError: Bool) async
+    func finalizeRequestExecutionLog() async
+}
+
+/// CloudBoardJobHelper-end of the XPC protocol.
+///
+/// The two protocols are subtly different due to the defined message(and more importantly their response) types,
+/// as well as semantics of asynchronous message handler ordering.
+package protocol CloudBoardJobAPICloudAppResponseHandlerProtocol: Sendable {
+    /// Should not be async to avoid chunk reordering
+    func handleResponseChunk(_ data: Data)
+
+    /// Tell CloudBoard that we have experience a terminal error.
+    func handleInternalError() async throws
+
+    /// Tell CloudBoard that we are done sending response chunks.
+    func handleEndOfResponse() async throws
+
+    /// CloudApp will attempt to wait until it has been told that the EndJob message has been handled
+    func handleEndJob() async throws
+
+    /// Handles CloudApp's request to find a worker.
+    ///
+    /// This _should_ ideally only return once requested worker has been found for a cleaner API, instead of
+    /// a separate call to send the workerFound message.
+    func handleFindWorker(_ constraints: WorkerConstraints) async throws
+
+    /// Handle CloudApp request to a specific worker.
+    ///
+    /// CloudApp fires-and-forgets
+    func handleWorkerRequestMessage(_ workerRequestMessage: WorkerRequestMessage)
+
+    /// Tell the worker we're done
+    func handleWorkerEOF(_ workerEOF: WorkerEOF)
+
+    /// Finalize request execution log
+    func handleFinaliseRequestExecutionLog()
+
+    /// XPC connection has been disconnected. Cleanly or otherwise.
+    ///
+    /// No way of recovering from this.
+    func disconnected(error: Error?)
 }
 
 package protocol CloudBoardJobAPIServerDelegateProtocol:
 AnyObject, Sendable, CloudBoardJobAPIClientToServerProtocol {}
 
-package protocol CloudBoardJobAPIServerProtocol:
-CloudBoardJobAPIServerToClientProtocol {
+package protocol CloudBoardJobAPIServerProtocol: CloudBoardJobAPIServerToClientProtocol {
     func set(delegate: CloudBoardJobAPIServerDelegateProtocol) async
     func connect() async
 }

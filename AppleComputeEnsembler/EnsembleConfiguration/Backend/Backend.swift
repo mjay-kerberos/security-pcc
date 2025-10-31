@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -65,6 +65,9 @@ protocol BackendDelegate {
 
 	/// An incoming message from a node.
 	func incomingMessage(node: Int, message: Data)
+
+	/// A network connection has been established/discnonected to a node.
+	func networkConnectionChange(node: Int, connected: Bool)
 }
 
 struct BackendConfiguration {
@@ -140,4 +143,7 @@ protocol Backend {
 
 	/// gets the number of seconds that can be used for a crypto key
 	func getMaxSecondsPerKey() throws -> UInt64
+
+	// add peer hostnames
+	func addPeerHostname(hostname: String, node: Int) throws -> Bool
 }

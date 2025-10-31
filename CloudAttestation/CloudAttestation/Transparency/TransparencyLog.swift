@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -22,11 +22,11 @@
 public typealias TransparencyLog = TransparencyProver & TransparencyVerifier
 
 public protocol TransparencyProver: Sendable {
-    func proveInclusion(of release: Release) async throws -> TransparencyLogProofs
+    func proveInclusion(of digest: Data) async throws -> TransparencyLogProofs
 }
 
 public protocol TransparencyVerifier: Sendable {
-    func verifyExpiringInclusion(of release: Release, proofs: TransparencyLogProofs) async throws -> Date
+    func verifyExpiringInclusion(of digest: Data, proofs: TransparencyLogProofs) async throws -> Date
 }
 
 public struct TransparencyLogProofs: Sendable, Hashable {
@@ -36,6 +36,23 @@ public struct TransparencyLogProofs: Sendable, Hashable {
     init(proofs: ATLogProofs, expiry: Int64) {
         self.proofs = proofs
         self.expiration = Date(millisecondsSince1970: expiry)
+    }
+
+    init?(proxiedRelease: PrivateCloudCompute_ProxyNodeMetadata.ProxiedRelease) {
+        guard proxiedRelease.hasTransparencyProofs else {
+            return nil
+        }
+        guard proxiedRelease.transparencyProofs.hasProofs else {
+            return nil
+        }
+
+        let proofs = proxiedRelease.transparencyProofs.proofs
+        guard proofs != ATLogProofs() else {
+            return nil
+        }
+
+        self.proofs = proofs
+        self.expiration = nil
     }
 
     public init?(bundle: AttestationBundle) {
@@ -54,6 +71,16 @@ public struct TransparencyLogProofs: Sendable, Hashable {
         self.proofs = proofs
         self.expiration = nil
     }
+
+    public func verify(expiration: Date) throws {
+        guard let proofsExpiration = self.expiration else {
+            return
+        }
+
+        if proofsExpiration < expiration {
+            throw TransparencyLogError.pendingExpiration(proofsExpiration: proofsExpiration, expiration: expiration)
+        }
+    }
 }
 
 // MARK: - TransparencyLog Errors
@@ -71,6 +98,7 @@ public enum TransparencyLogError: Error {
     case insertFailed
     case clientError(any Error)
     case expired
+    case pendingExpiration(proofsExpiration: Date, expiration: Date)
 }
 
 extension TransparencyLogError: CustomNSError {
@@ -91,6 +119,7 @@ extension TransparencyLogError: CustomNSError {
         case .insertFailed: return 10
         case .clientError(_): return 11
         case .expired: return 12
+        case .pendingExpiration(_, _): return 13
         }
     }
 

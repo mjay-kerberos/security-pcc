@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -28,10 +28,12 @@ extension VM {
         let platformFusing: VM.PlatformFusing?
         var cpuCount: UInt
         var memorySize: UInt64
-        var networkConfig: NetworkConfig
-        var nvramArgs: [String: String] // nvram parameters (user-provided or loaded from auxStorage)
+        var networkConfigs: [NetworkConfig]?
+        var nvramArgs: VM.NVRAMmap // nvram parameters (user-provided or loaded from auxStorage)
         var romImages: ROMImages? // iBoot and vSEP -- usu empty to use those in the VZ framework
         var machineIDBlob: Data? // opaque represenation of ECID
+        var virtMeshPlugin: String? // optional path to the VirtMesh plugin bundle
+        var virtMeshRank: Int? // optional rank number for VirtMesh plugin
 
         var ecid: UInt64 {
             if let _ = machineIDBlob, // only stable once using config written to disk
@@ -52,9 +54,11 @@ extension VM {
             machineIDBlob: Data? = nil,
             cpuCount: UInt,
             memorySize: UInt64,
-            networkConfig: NetworkConfig = NetworkConfig(mode: .none),
-            nvramArgs: [String: String]? = nil,
-            romImages: ROMImages? = nil
+            networkConfigs: [NetworkConfig]? = nil,
+            nvramArgs: VM.NVRAMmap? = nil,
+            romImages: ROMImages? = nil,
+            virtMeshPlugin: String? = nil,
+            virtMeshRank: Int? = nil
         ) {
             self.bundle = bundle
             self.platformType = platformType
@@ -65,9 +69,11 @@ extension VM {
 
             self.cpuCount = cpuCount
             self.memorySize = memorySize
-            self.networkConfig = networkConfig
+            self.networkConfigs = networkConfigs
             self.nvramArgs = nvramArgs ?? [:]
             self.romImages = romImages
+            self.virtMeshPlugin = virtMeshPlugin
+            self.virtMeshRank = virtMeshRank
         }
 
         // init instanciates a (new) VM from saved bundle (containing config)
@@ -76,7 +82,7 @@ extension VM {
                 throw VMError("bundle configuration not loaded")
             }
 
-            var nvramArgs: [String: String]?
+            var nvramArgs: VM.NVRAMmap?
             do {
                 // load nvram values from auxStorage
                 let nvram = try VM.NVRAM(auxStorageURL: bundle.auxiliaryStoragePath)
@@ -92,9 +98,11 @@ extension VM {
                 machineIDBlob: bundleConfig.machineIdentifier,
                 cpuCount: bundleConfig.cpuCount,
                 memorySize: bundleConfig.memorySize,
-                networkConfig: NetworkConfig(bundleConfig.networkConfig),
+                networkConfigs: bundleConfig.networkConfigs?.map { NetworkConfig($0) },
                 nvramArgs: nvramArgs,
-                romImages: bundleConfig.romImages
+                romImages: bundleConfig.romImages,
+                virtMeshPlugin: bundleConfig.virtMeshPlugin,
+                virtMeshRank: bundleConfig.virtMeshRank
             )
         }
 
@@ -105,25 +113,15 @@ extension VM {
                     vmConfig: vzConfig(),
                     platformType: platformType,
                     platformFusing: platformFusing,
-                    romImages: romImages
+                    romImages: romImages,
+                    virtMeshPlugin: virtMeshPlugin,
+                    virtMeshRank: virtMeshRank
                 ).write(to: bundle.configPath)
 
                 // write nvram args back to auxStorage
-                try applyNVRAMArgs()
+                try VM.NVRAM(auxStorageURL: bundle.auxiliaryStoragePath).set(nvramArgs)
             } catch {
                 throw VMError("VM bundle: \(error)")
-            }
-        }
-
-        // applyNVRAMArgs applies nvramArgs dictionary to auxiliary storage
-        func applyNVRAMArgs() throws {
-            if nvramArgs.isEmpty {
-                return
-            }
-
-            let nvram = try VM.NVRAM(auxStorageURL: bundle.auxiliaryStoragePath)
-            for (k, v) in nvramArgs {
-                try nvram.set(k, value: v)
             }
         }
 
@@ -182,12 +180,17 @@ extension VM {
             config.memorySize = max(memorySize, VZVirtualMachineConfiguration.minimumAllowedMemorySize)
             config.memorySize = min(config.memorySize, VZVirtualMachineConfiguration.maximumAllowedMemorySize)
 
-            config.networkDevices = [vzNetworkConfig(config: networkConfig)]
+            if let networkConfigs {
+                config.networkDevices = networkConfigs.map { vzNetworkConfig(config: $0) }
+            }
+
             config.serialPorts = [vzSerialPort(input: consoleInput, output: consoleOutput)]
-
-            // DEBUG: VM.vzDumpConfig(config)
-
             config._debugStub = _VZGDBDebugStubConfiguration()
+
+            if let virtMeshPlugin, let virtMeshRank {
+                let device = vzVirtMeshDevice(path: virtMeshPlugin, rank: virtMeshRank)
+                config._customVirtioDevices.append(device)
+            }
 
             do {
                 try config.validate()
@@ -294,24 +297,22 @@ extension VM {
                 network_config.attachment = VZNATNetworkDeviceAttachment()
 
             case .bridged:
-                if let bridgedIf = config.bridgeIf {
+                if let bridgedIf = config.options.bridgeIf {
                     network_config.attachment = VZBridgedNetworkDeviceAttachment(interface: bridgedIf)
                 } else if let bridgedIf = VZBridgedNetworkInterface.networkInterfaces.first {
                     network_config.attachment = VZBridgedNetworkDeviceAttachment(interface: bridgedIf)
                 } else {
-                    VM.logger.error("no matching bridge network interface found")
+                    VM.logger.error("missing host interface for guest interface")
                 }
+
+            case .hostOnly:
+                network_config.attachment = _VZHostOnlyNetworkDeviceAttachment()
 
             default:
                 break
             }
 
-            if let macAddr = config.macAddr {
-                network_config.macAddress = macAddr
-            } else {
-                network_config.macAddress = VZMACAddress.randomLocallyAdministered()
-            }
-
+            network_config.macAddress = config.macAddr
             return network_config
         }
 
@@ -328,17 +329,52 @@ extension VM {
             console_config.attachment = console_attachment
             return console_config
         }
-    }
 
-    // vzDumpConfig outputs the VZVirtualMachineConfiguration (for debugging purposes)
-    static func vzDumpConfig(_ config: VZVirtualMachineConfiguration) {
-        do {
-            let encoded = try _VZVirtualMachineConfigurationEncoder(baseURL: FileManager.fileURL("/"))
-                .data(with: config, format: PropertyListSerialization.PropertyListFormat.xml)
+        func vzVirtMeshDevice(path: String, rank: Int) -> _VZCustomVirtioDeviceConfiguration {
+            // Configure plugin device settings
+            let pluginDevice = _VZCustomVirtioDeviceConfiguration()
+            // PCI ID settings refer to:
+            //   - PCI code definitions: VirtualizationCore/VirtualMachine/Hardware/Pci/Pci.h
+            //   - Sample setup: VirtualizationCore/VirtualMachine/Hardware/Avp/AvpStrongIdentity.mm:plugin_configuration()
 
-            VM.logger.debug("VM Configuration:\n\(String(decoding: encoded, as: UTF8.self), privacy: .public)\n")
-        } catch {
-            VM.logger.error("dump config: \(error, privacy: .public)")
+            // PCI Vendor ID: Apple [0x106b]
+            pluginDevice._PCIVendorID = UInt16(0x106B)
+            pluginDevice._PCISubsystemVendorID = UInt16(0x106B)
+
+            // PCI Device ID: kVirtMeshVirtioDevice [0x1a0e]
+            // ref: VirtualizationCore/VirtualMachine/Hardware/Pci/Pci.h
+            pluginDevice._PCIDeviceID = UInt16(0x1A0E)
+            pluginDevice._PCISubsystemID = UInt16(0x1A0E)
+
+            // This is a non-standard PCI device, use class code kClassUndefined: 0xff
+            // ref: VirtualizationCore/VirtualMachine/Hardware/Avp/AvpStrongIdentity.mm
+            pluginDevice.pciClassID = UInt8(0xFF)
+            pluginDevice.pciSubclassID = UInt8(0x00)
+
+            // Three queues for VirtMesh, for general, control, and data messages
+            pluginDevice.virtioQueueCount = UInt16(3)
+
+            // ref: VirtualizationCore/VirtualMachine/Hardware/Avp/AvpStrongIdentity.mm:78
+            pluginDevice._pluginName = path
+            pluginDevice._pluginPersonality = "com.apple.AppleVirtMeshPlugin.Virtio"
+
+            // ref: Virtualization/Tests/CustomVirtio/CustomVirtioPluginTests.mm:60
+            pluginDevice._supportsSaveRestore = true
+
+            // Set virtmesh node id
+            // Use the first optional feature index for node ID, this has to be compatible with VirtMesh plugin implemnetaion
+            // ref: AppleCIOMesh/VirtMesh/Host/AppleVirtMeshPlugin/IOBridge.mm:didCreateDevice()
+            // This may override some existing virtio optional features, but the optional feature is not used by guest so should be harmless
+            let virtioFeatureIndexNodeID = 0
+            pluginDevice.setOptionalFeatures(UInt32(rank), at: virtioFeatureIndexNodeID)
+            VM.logger.debug("Set rank [\(rank)] to feature index [\(virtioFeatureIndexNodeID)]")
+
+            // Fixes LuckCheer build due to PR 7493 in Virtualization, which refactors the CustomVirtIO device configuration interface
+            // This only affects LuckCheer, not CrystalGlowE
+            let pluginProvider = _VZCustomVirtioDevicePluginProvider(pluginName: pluginDevice._pluginName, pluginPersonality: pluginDevice._pluginPersonality)
+            pluginDevice.provider = pluginProvider
+
+            return pluginDevice
         }
     }
 }

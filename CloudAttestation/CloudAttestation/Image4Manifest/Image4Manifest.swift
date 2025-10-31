@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -46,16 +46,24 @@ public struct Image4Manifest: Equatable {
     }
 
     public func canonicalize(evaluateTrust: Bool = true) throws -> Image4Manifest {
+        try self.canonicalize(evaluateTrust: evaluateTrust, allowVMs: false)
+    }
+
+    private func canonicalize(evaluateTrust: Bool, allowVMs: Bool) throws -> Image4Manifest {
         guard !self.data.isEmpty else {
             throw Error.empty
         }
 
         let coproc: OpaquePointer
         let handle: image4_coprocessor_handle_t
+
         switch (evaluateTrust, self.kind) {
         case (true, .ap):
             coproc = SWIFT_IMAGE4_COPROCESSOR_AP
-            handle = image4_coprocessor_handle_ap_t.IMAGE4_COPROCESSOR_HANDLE_AP.rawValue
+            handle =
+                allowVMs
+                ? image4_coprocessor_handle_ap_t.IMAGE4_COPROCESSOR_HANDLE_AP_ACDC.rawValue
+                : image4_coprocessor_handle_ap_t.IMAGE4_COPROCESSOR_HANDLE_AP.rawValue
 
         case (true, .pdi):
             coproc = SWIFT_IMAGE4_COPROCESSOR_AP
@@ -130,6 +138,15 @@ public struct Image4Manifest: Equatable {
             case .success(let success):
                 return Image4Manifest(data: success, kind: self.kind)
             case .failure(let failure):
+                #if os(macOS) && DEBUG
+                if !allowVMs,
+                    handle == image4_coprocessor_handle_ap_t.IMAGE4_COPROCESSOR_HANDLE_AP.rawValue,
+                    coproc == SWIFT_IMAGE4_COPROCESSOR_AP
+                {
+                    // try again while allowing VMs
+                    return try self.canonicalize(evaluateTrust: evaluateTrust, allowVMs: true)
+                }
+                #endif
                 throw failure
             case .none:
                 throw Error.trustEvaluationExecutionFailure

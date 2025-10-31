@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -19,56 +19,57 @@
 //  Created by Sumit Kamath on 11/17/23.
 //
 
-import CloudAttestation
+// we need to weaklink since we wanted to run xctest on skywagon which might not contain the
+// symbols.
+@_weakLinked import CloudAttestation
+import CryptoKit
 
 enum EnsembleControlMessage: Codable, CustomStringConvertible {
-	case ForwardMessage(Forward)
-	case announceNode(slot: Slot) /// Check in with the leader
-	case acceptNode /// Leader accepts node into ensemble
-	case ensembleComplete(slots: [Slot]) /// The ensemble is ready to en-rumble
-	case pairNode(followerAttestation: String) /// follower reuest leader along with its attestation
-	/// data  to pair with leader and get pairing data.
-	case completePairing(
-		leaderAttestation: String,
-		pairingData: EnsembleChannelSecurity.PairingData?,
-		plainText: String
-	) /// leader informs follower about pairing complete and send pairingdata.
-	case announceSharedKey(encryptedText: Data) /// follower announces that it got shared key.
-	case acceptSharedKey /// leader verifies and acknowledges that follower's key and leaders key
-	/// matches
-	case ensembleSecureComplete /// All nodes now have the shared key and the key set in CIOMesh, so
-	/// data can be encrypted and decrypted.
 	case ensembleFailed /// Something went wrong. Tell everyone
 	case ensembleDraining /// Node is draining. Tell everyone
 	case testMessage /// Just say hi to a node
-	case bigMessageStart(size: Int) /// start of a big message that is diviided into chunks and sent
-	/// from follower
-	case bigMessageChunk(data: Data) /// chunks of data of big message that is sent from follower
-	case bigMessageEnd /// end of big message
+
+	case ForwardMessage(Forward)
 	case rotateKey /// Leader sends message to followers to initiate pairing process to get the
 	/// shared key
+
+	// Control messages applicable to transport over mTLS only
+	case followerAnnounceNode(slot: Slot) /// Check in with the leader
+	case ensembleAcceptAndshareCIOKey(sharedKey: Data) // leader shares the shared key to all followers
+	// via mtls
+	case followerKeyAccepted // follower acknowledges it got the shared key
+	case ensembleCIOKeyShared /// All nodes now have the shared key and the key set in CIOMesh, so
+	/// data can be encrypted and decrypted.
+	case followerActivationComplete // follower acknowledges it activated the backend successfully
+	case ensembleActivationComplete // leader knows that all followers got the key, and activated
+	// successfully. Followers will receive this message and go to ready
+	case followerNodeReady // follower node is ready, and now waiting for leader to signal followers
+	// about
+	// ensemble ready state
+	case ensembleReady // leader knows all followers are ready
+	case acknowledge // message to acknowledge that a server got the message
+	case ensembleShareDataKey(key: Data, singleUseToken: UUID)
+	case followerDataKeyObtained
 
 	// EnsembleControlMessage.description does not expose any private data.
 	var description: String {
 		switch self {
 		case .ForwardMessage(let forward): return ".ForwardMessage(\(forward))"
-		case .announceNode: return ".announceNode"
-		case .acceptNode: return ".acceptNode"
-		case .ensembleComplete: return ".ensembleComplete"
-		case .pairNode: return ".pairNode(followerAttestation: %s)"
-		case .completePairing: return """
-			.completePairing(leaderAttestation: %s, pairingData: %s, plainText: %s)
-			"""
-		case .announceSharedKey: return ".announceSharedKey(encryptedText: %s)"
-		case .acceptSharedKey: return ".acceptSharedKey"
-		case .ensembleSecureComplete: return ".ensembleSecureComplete"
 		case .ensembleFailed: return ".ensembleFailed"
 		case .ensembleDraining: return ".ensembleDraining"
 		case .testMessage: return ".testMessage"
-		case .bigMessageStart(let size): return ".bigMessageStart(size: \(size)"
-		case .bigMessageChunk: return ".bigMessageChunk(data: %s)"
-		case .bigMessageEnd: return ".bigMessageEnd"
 		case .rotateKey: return ".rotateKey"
+		case .ensembleAcceptAndshareCIOKey: return ".ensembleAcceptAndshareCIOKey"
+		case .followerKeyAccepted: return ".followerKeyAccepted"
+		case .followerActivationComplete: return ".followerActivationComplete"
+		case .ensembleActivationComplete: return ".ensembleActivationComplete"
+		case .followerNodeReady: return ".followerNodeReady"
+		case .ensembleReady: return ".ensembleReady"
+		case .followerAnnounceNode: return ".followerAnnounceNode"
+		case .ensembleCIOKeyShared: return ".ensembleCIOKeyShared"
+		case .acknowledge: return ".acknowledge"
+		case .ensembleShareDataKey: return "ensembleShareDataKey"
+		case .followerDataKeyObtained: return "followerDataKeyObtained"
 		}
 	}
 

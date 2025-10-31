@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -24,6 +24,10 @@ extension CFPreferences {
     static var cbJobAuthPreferencesDomain: String {
         "com.apple.cloudos.cb_jobauthd"
     }
+}
+
+enum CloudBoardJobAuthDConfigurationError: Swift.Error {
+    case missingKeyRotationServiceConfiguration
 }
 
 struct CloudBoardJobAuthDConfiguration: Codable, Hashable {
@@ -109,7 +113,7 @@ struct CloudBoardJobAuthDConfiguration: Codable, Hashable {
             throw error
         }
         if secureConfig.shouldEnforceAppleInfrastructureSecurityConfig {
-            config.enforceAppleInfrastructureSecurityConfig()
+            try config.enforceAppleInfrastructureSecurityConfig()
         }
         return config
     }
@@ -187,9 +191,14 @@ extension CloudBoardJobAuthDConfiguration {
 
     /// Enforces security configuration if running on Apple infrastructure (as opposed to e.g. the VRE) with a
     /// 'customer' security policy
-    mutating func enforceAppleInfrastructureSecurityConfig() {
+    mutating func enforceAppleInfrastructureSecurityConfig() throws {
         CloudBoardJobAuthDaemon.logger.log("Enforcing Apple infrastructure security config")
-        self.keyRotationService?.enforceSecurityConfig()
+
+        guard self.keyRotationService != nil else {
+            CloudBoardJobAuthDaemon.logger.error("Missing KeyRotationService configuration")
+            throw CloudBoardJobAuthDConfigurationError.missingKeyRotationServiceConfiguration
+        }
+        self.keyRotationService!.enforceSecurityConfig()
     }
 }
 

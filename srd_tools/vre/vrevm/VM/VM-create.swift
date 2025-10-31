@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -23,24 +23,28 @@ extension VM {
         cpuCount: UInt,
         memorySize: UInt64,
         storageSize: UInt64,
-        networkConfig: NetworkConfig = NetworkConfig(mode: .nat),
-        nvramArgs: [String: String]? = nil,
+        networkConfigs: [NetworkConfig]? = nil,
+        nvramArgs: VM.NVRAMmap? = nil,
         romImages: ROMImages? = nil,
-        platformFusing: VM.PlatformFusing?
+        platformFusing: VM.PlatformFusing?,
+        virtMeshPlugin: String? = nil,
+        virtMeshRank: Int? = nil
     ) throws {
         VM.logger.log("creating VM: \(self.name, privacy: .public)")
 
         // create bundle folder with primary storage
-        try self.bundle.create(storageSize: storageSize)
+        try bundle.create(storageSize: storageSize)
 
         // "modify" a new/empty config (saves config)
         try modify(
             cpuCount: cpuCount,
             memorySize: memorySize,
-            networkConfig: networkConfig,
+            networkConfigs: networkConfigs,
             nvramArgs: nvramArgs,
             romImages: romImages,
-            platformFusing: platformFusing
+            platformFusing: platformFusing,
+            virtMeshPlugin: virtMeshPlugin,
+            virtMeshRank: virtMeshRank
         )
     }
 }

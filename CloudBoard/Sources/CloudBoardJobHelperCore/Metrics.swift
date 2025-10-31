@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -52,6 +52,10 @@ extension HistogramBuckets {
 
     // should be the same as that of CloudboardDCore requestTime metric
     fileprivate static let requestTime: Self = [
+        0.001381,
+        0.001953,
+        0.002762, // 2.5ms is the lower-bound based on testing
+        0.003906,
         0.005524,
         0.007812,
         0.011049,
@@ -120,6 +124,97 @@ extension HistogramBuckets {
         256.0,
         362.038672,
     ]
+
+    fileprivate static let keyUnwrapTime: Self = [
+        0.005524,
+        0.007812,
+        0.011049,
+        0.015625,
+        0.022097,
+        0.03125,
+        0.044194,
+        0.0625,
+        0.088388,
+        0.125,
+        0.176777,
+        0.25,
+        0.353553,
+        0.5, // by the time we are at 500ms mark it really doesn't matter how much slower we go
+    ]
+
+    fileprivate static let findWorkerDuration: Self = [
+        0,
+        0.0001,
+        0.0002,
+        0.0003,
+        0.0004,
+        0.0005,
+        0.0006,
+        0.0007,
+        0.0008,
+        0.0009,
+        0.0010,
+        0.0011,
+        0.0012,
+        0.0013,
+        0.0014,
+        0.0015,
+        0.0016,
+        0.0017,
+        0.0018,
+        0.0019,
+        0.002,
+        0.0025,
+        0.003,
+        0.0035,
+        0.004,
+        0.0045,
+        0.005,
+        0.006,
+        0.007,
+        0.008,
+        0.009,
+        0.01,
+        0.025,
+        0.05,
+        0.075,
+        0.1,
+        0.125,
+        0.15,
+        0.175,
+        0.2,
+        0.25,
+        0.3,
+        0.35,
+        0.4,
+        0.45,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.9,
+        1.0,
+        1.5,
+        2.0,
+        2.5,
+        3.0,
+        4.0,
+        5.0,
+        6.0,
+        7.0,
+        8.0,
+        9.0,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        17.5,
+        20,
+        25,
+        30,
+    ]
 }
 
 enum Metrics {
@@ -149,40 +244,184 @@ enum Metrics {
     enum Messenger {
         struct TotalRequestsReceivedCounter: Counter {
             static let label: MetricLabel = "\(prefix)_messenger_requests_received_total"
+            enum DimensionKey: String, RawRepresentable {
+                case automatedDeviceGroup
+                case featureId
+                case bundleId
+                case inferenceId
+            }
+
             var action: CounterAction
+            var dimensions: MetricDimensions<DimensionKey>
+
+            init(
+                action: CounterAction,
+                automatedDeviceGroup: Bool,
+                featureId: String?,
+                bundleId: String?,
+                inferenceId: String?
+            ) {
+                self.action = action
+                self.dimensions = [
+                    .automatedDeviceGroup: automatedDeviceGroup.description,
+                    .featureId: featureId ?? "",
+                    .bundleId: bundleId ?? "",
+                    .inferenceId: inferenceId ?? "",
+                ]
+            }
         }
 
         struct RequestChunkReceivedSizeHistogram: Histogram {
             static let label: MetricLabel = "\(prefix)_messenger_request_chunk_received_size_bytes"
-            static var buckets: HistogramBuckets = .chunkSize
+            static let buckets: HistogramBuckets = .chunkSize
             var value: Int
+            var dimensions: MetricDimensions<DimensionKey>
+
+            enum DimensionKey: String, RawRepresentable {
+                case automatedDeviceGroup
+                case featureId
+                case bundleId
+                case inferenceId
+            }
+
+            init(size: Int, automatedDeviceGroup: Bool, featureId: String?, bundleId: String?, inferenceId: String?) {
+                self.value = size
+                self.dimensions = [
+                    .automatedDeviceGroup: automatedDeviceGroup.description,
+                    .featureId: featureId ?? "",
+                    .bundleId: bundleId ?? "",
+                    .inferenceId: inferenceId ?? "",
+                ]
+            }
         }
 
         struct TotalResponseChunksReceivedCounter: Counter {
             static let label: MetricLabel = "\(prefix)_messenger_response_chunks_received_total"
+            enum DimensionKey: String, RawRepresentable {
+                case automatedDeviceGroup
+                case featureId
+                case bundleId
+                case inferenceId
+            }
+
             var action: CounterAction
+            var dimensions: MetricDimensions<DimensionKey>
+
+            init(
+                action: CounterAction,
+                automatedDeviceGroup: Bool,
+                featureId: String?,
+                bundleId: String?,
+                inferenceId: String?
+            ) {
+                self.action = action
+                self.dimensions = [
+                    .automatedDeviceGroup: automatedDeviceGroup.description,
+                    .featureId: featureId ?? "",
+                    .bundleId: bundleId ?? "",
+                    .inferenceId: inferenceId ?? "",
+                ]
+            }
         }
 
         struct TotalResponseChunksSentCounter: Counter {
             static let label: MetricLabel = "\(prefix)_messenger_response_chunks_sent_total"
+            enum DimensionKey: String, RawRepresentable {
+                case automatedDeviceGroup
+                case featureId
+                case bundleId
+                case inferenceId
+            }
+
             var action: CounterAction
+            var dimensions: MetricDimensions<DimensionKey>
+
+            init(
+                action: CounterAction,
+                automatedDeviceGroup: Bool,
+                featureId: String?,
+                bundleId: String?,
+                inferenceId: String?
+            ) {
+                self.action = action
+                self.dimensions = [
+                    .automatedDeviceGroup: automatedDeviceGroup.description,
+                    .featureId: featureId ?? "",
+                    .bundleId: bundleId ?? "",
+                    .inferenceId: inferenceId ?? "",
+                ]
+            }
         }
 
         struct TotalResponseChunksInBuffer: Gauge {
             static let label: MetricLabel = "\(prefix)_messenger_response_chunks_in_buffer_total"
+            enum DimensionKey: String, RawRepresentable {
+                case automatedDeviceGroup
+                case featureId
+                case bundleId
+                case inferenceId
+            }
+
             var value: Int
+            var dimensions: MetricDimensions<DimensionKey>
+
+            init(value: Int, automatedDeviceGroup: Bool, featureId: String?, bundleId: String?, inferenceId: String?) {
+                self.dimensions = [
+                    .automatedDeviceGroup: automatedDeviceGroup.description,
+                    .featureId: featureId ?? "",
+                    .bundleId: bundleId ?? "",
+                    .inferenceId: inferenceId ?? "",
+                ]
+                self.value = value
+            }
         }
 
         struct TotalResponseChunkReceivedSizeHistogram: Histogram {
             static let label: MetricLabel = "\(prefix)_messenger_response_chunk_received_size_bytes"
-            static var buckets: HistogramBuckets = .chunkSize
+            static let buckets: HistogramBuckets = .chunkSize
             var value: Int
+            var dimensions: MetricDimensions<DimensionKey>
+
+            enum DimensionKey: String, RawRepresentable {
+                case automatedDeviceGroup
+                case featureId
+                case bundleId
+                case inferenceId
+            }
+
+            init(size: Int, automatedDeviceGroup: Bool, featureId: String?, bundleId: String?, inferenceId: String?) {
+                self.value = size
+                self.dimensions = [
+                    .automatedDeviceGroup: automatedDeviceGroup.description,
+                    .featureId: featureId ?? "",
+                    .bundleId: bundleId ?? "",
+                    .inferenceId: inferenceId ?? "",
+                ]
+            }
         }
 
         struct TotalResponseChunksBufferedSizeHistogram: Histogram {
             static let label: MetricLabel = "\(prefix)_messenger_response_chunk_buffered_size_bytes"
-            static var buckets: HistogramBuckets = .chunkSize
+            static let buckets: HistogramBuckets = .chunkSize
             var value: Int
+            var dimensions: MetricDimensions<DimensionKey>
+
+            enum DimensionKey: String, RawRepresentable {
+                case automatedDeviceGroup
+                case featureId
+                case bundleId
+                case inferenceId
+            }
+
+            init(size: Int, automatedDeviceGroup: Bool, featureId: String?, bundleId: String?, inferenceId: String?) {
+                self.value = size
+                self.dimensions = [
+                    .automatedDeviceGroup: automatedDeviceGroup.description,
+                    .featureId: featureId ?? "",
+                    .bundleId: bundleId ?? "",
+                    .inferenceId: inferenceId ?? "",
+                ]
+            }
         }
 
         struct OverallErrorCounter: ErrorCounter {
@@ -190,39 +429,211 @@ enum Metrics {
             var dimensions: MetricDimensions<DefaultErrorDimensionKeys>
             var action: CounterAction
         }
+
+        struct KeyUnwrapDuration: Histogram {
+            static let label: MetricLabel = "\(prefix)_key_unwrap_duration_seconds"
+            static let buckets: HistogramBuckets = .keyUnwrapTime
+            var dimensions: MetricDimensions<DimensionKey>
+            var value: Double
+
+            enum DimensionKey: String, RawRepresentable {
+                case result
+                case errorDescription
+                case automatedDeviceGroup
+            }
+
+            init(duration: Duration, error: Error?, automatedDeviceGroup: Bool) {
+                self.value = Double(duration.microsecondsClamped) / 1_000_000
+                if let error {
+                    self.dimensions = [
+                        .result: "error",
+                        .errorDescription: String(reportable: error),
+                        .automatedDeviceGroup: automatedDeviceGroup.description,
+                    ]
+                } else {
+                    self.dimensions = [
+                        .result: "success",
+                        .automatedDeviceGroup: automatedDeviceGroup.description,
+                    ]
+                }
+            }
+        }
     }
 
     enum WorkloadManager {
+        // Duration from receiving the request to find a worker from cloudApp till we inform the cloudApp that a worker
+        // has been found
+        struct FindWorkerDuration: Histogram {
+            static let label: MetricLabel = "\(prefix)_find_worker_duration_seconds"
+            static let buckets: HistogramBuckets = .findWorkerDuration
+            var value: Double
+
+            init(duration: Duration) {
+                self.value = duration.seconds
+            }
+        }
+
         struct TotalRequestsReceivedCounter: Counter {
             static let label: MetricLabel = "\(prefix)_workload_manager_requests_received_total"
+            enum DimensionKey: String, RawRepresentable {
+                case automatedDeviceGroup
+            }
+
             var action: CounterAction
+            var dimensions: MetricDimensions<DimensionKey>
+
+            init(action: CounterAction, automatedDeviceGroup: Bool) {
+                self.action = action
+                self.dimensions = [
+                    .automatedDeviceGroup: automatedDeviceGroup.description,
+                ]
+            }
         }
 
         struct TotalResponsesSentCounter: Counter {
             static let label: MetricLabel = "\(prefix)_workload_manager_responses_sent_total"
             var action: CounterAction
+            var dimensions: MetricDimensions<DimensionKey>
+
+            enum DimensionKey: String, RawRepresentable {
+                case automatedDeviceGroup
+                case featureId
+                case bundleId
+                case inferenceId
+            }
+
+            init(
+                action: CounterAction,
+                automatedDeviceGroup: Bool, featureId: String?, bundleId: String?, inferenceId: String?
+            ) {
+                self.action = action
+                self.dimensions = [
+                    .automatedDeviceGroup: automatedDeviceGroup.description,
+                    .featureId: featureId ?? "",
+                    .bundleId: bundleId ?? "",
+                    .inferenceId: inferenceId ?? "",
+                ]
+            }
         }
 
         struct SuccessResponsesSentCounter: Counter {
             static let label: MetricLabel = "\(prefix)_workload_manager_responses_sent_success"
             var action: CounterAction
+            var dimensions: MetricDimensions<DimensionKey>
+
+            enum DimensionKey: String, RawRepresentable {
+                case automatedDeviceGroup
+                case featureId
+                case bundleId
+                case inferenceId
+            }
+
+            init(
+                action: CounterAction,
+                automatedDeviceGroup: Bool, featureId: String?, bundleId: String?, inferenceId: String?
+            ) {
+                self.action = action
+                self.dimensions = [
+                    .automatedDeviceGroup: automatedDeviceGroup.description,
+                    .featureId: featureId ?? "",
+                    .bundleId: bundleId ?? "",
+                    .inferenceId: inferenceId ?? "",
+                ]
+            }
         }
 
         struct FailureResponsesSentCounter: ErrorCounter {
             static let label: MetricLabel = "\(prefix)_workload_manager_responses_sent_failure"
-            var dimensions: MetricDimensions<DefaultErrorDimensionKeys>
+            var dimensions: MetricDimensions<DimensionKey>
             var action: CounterAction
+
+            init(dimensions: MetricDimensions<DimensionKey>, action: CounterAction) {
+                self.action = action
+                self.dimensions = dimensions
+            }
+
+            enum DimensionKey: String, RawRepresentable, DimensionKeysWithError {
+                case automatedDeviceGroup
+                case featureId
+                case bundleId
+                case inferenceId
+                case errorDescription
+            }
+
+            init(
+                action: CounterAction,
+                automatedDeviceGroup: Bool,
+                error: some Swift.Error, featureId: String?, bundleId: String?, inferenceId: String?
+            ) {
+                self.action = action
+                self.dimensions = [
+                    .errorDescription: String(reportable: error),
+                    .automatedDeviceGroup: automatedDeviceGroup.description,
+                    .featureId: featureId ?? "",
+                    .bundleId: bundleId ?? "",
+                    .inferenceId: inferenceId ?? "",
+                ]
+            }
         }
 
         struct TGTValidationCounter: Counter {
             static let label: MetricLabel = "\(prefix)_tgt_validation_total"
             var action: CounterAction
+            var dimensions: MetricDimensions<DimensionKey>
+
+            enum DimensionKey: String, RawRepresentable {
+                case automatedDeviceGroup
+                case featureId
+                case bundleId
+                case inferenceId
+            }
+
+            init(
+                action: CounterAction,
+                automatedDeviceGroup: Bool, featureId: String?, bundleId: String?, inferenceId: String?
+            ) {
+                self.action = action
+                self.dimensions = [
+                    .automatedDeviceGroup: automatedDeviceGroup.description,
+                    .featureId: featureId ?? "",
+                    .bundleId: bundleId ?? "",
+                    .inferenceId: inferenceId ?? "",
+                ]
+            }
         }
 
         struct TGTValidationErrorCounter: ErrorCounter {
             static let label: MetricLabel = "\(prefix)_tgt_validation_error_total"
-            var dimensions: MetricDimensions<DefaultErrorDimensionKeys>
+            var dimensions: MetricDimensions<DimensionKey>
             var action: CounterAction
+
+            init(dimensions: MetricDimensions<DimensionKey>, action: CounterAction) {
+                self.action = action
+                self.dimensions = dimensions
+            }
+
+            enum DimensionKey: String, RawRepresentable, DimensionKeysWithError {
+                case automatedDeviceGroup
+                case errorDescription
+                case featureId
+                case bundleId
+                case inferenceId
+            }
+
+            init(
+                action: CounterAction,
+                automatedDeviceGroup: Bool,
+                error: some Swift.Error, featureId: String?, bundleId: String?, inferenceId: String?
+            ) {
+                self.action = action
+                self.dimensions = [
+                    .errorDescription: String(reportable: error),
+                    .automatedDeviceGroup: automatedDeviceGroup.description,
+                    .featureId: featureId ?? "",
+                    .bundleId: bundleId ?? "",
+                    .inferenceId: inferenceId ?? "",
+                ]
+            }
         }
 
         struct OverallErrorCounter: ErrorCounter {
@@ -246,18 +657,21 @@ enum Metrics {
             enum DimensionKey: String, RawRepresentable {
                 case result
                 case errorDescription
+                case automatedDeviceGroup
             }
 
-            init(duration: Duration, error: Error?) {
+            init(duration: Duration, error: Error?, automatedDeviceGroup: Bool) {
                 self.value = Double(duration.microsecondsClamped) / 1_000_000
                 if let error {
                     self.dimensions = [
                         .result: "error",
                         .errorDescription: String(reportable: error),
+                        .automatedDeviceGroup: automatedDeviceGroup.description,
                     ]
                 } else {
                     self.dimensions = [
                         .result: "success",
+                        .automatedDeviceGroup: automatedDeviceGroup.description,
                     ]
                 }
             }

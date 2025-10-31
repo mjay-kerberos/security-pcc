@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -19,7 +19,29 @@
 //  Created by Marc Orr on 5/2/24.
 //
 
+import Foundation
 import IOKit
+
+public let kEnsemblerPrefix = "com.apple.cloudos.AppleComputeEnsembler"
+public let kCloudOSInfoPrefix = "com.apple.cloudos.cloudOSInfo"
+public let kSkipDarwinInitCheckPreferenceKey = "SkipDarwinInitCheck"
+
+public enum DerivedKeyType: CustomStringConvertible {
+	case MeshEncryption
+	case TlsPsk
+	case TestEncryptDecrypt
+
+	public var description: String {
+		switch self {
+		case .MeshEncryption:
+			return "ensembled-mesh-encryption"
+		case .TlsPsk:
+			return "ensembled-tls-psk"
+		case .TestEncryptDecrypt:
+			return "ensembled-test-encrypt-decrypt"
+		}
+	}
+}
 
 internal enum Slot: Codable, CustomStringConvertible {
 	case notInitialized
@@ -147,4 +169,23 @@ internal class Util {
 
 		return debugStr
 	}
+}
+
+public class DebugMessage {
+	public var primaryMessage: String
+	public var secondaryMessage: String
+
+	init() {
+		self.primaryMessage = ""
+		self.secondaryMessage = ""
+	}
+
+	func updatePrimaryMessage(message: String) {
+		self.primaryMessage = message
+	}
+
+	func updateSecondaryMessage(message: String) {
+		self.secondaryMessage = message
+	}
+
 }

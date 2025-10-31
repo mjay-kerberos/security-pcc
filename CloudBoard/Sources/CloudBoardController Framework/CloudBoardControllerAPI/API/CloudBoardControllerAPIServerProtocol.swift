@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,7 +14,7 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+package import CloudBoardAsyncXPC
 
 public protocol CloudBoardControllerAPIServerToClientProtocol: Actor {
     func updateConfiguration(config: WorkloadConfig) async throws
@@ -24,7 +24,7 @@ public protocol CloudBoardControllerAPIServerToClientProtocol: Actor {
 public protocol CloudBoardControllerAPIServerDelegateProtocol:
 AnyObject, Sendable, CloudBoardControllerAPIClientToServerProtocol {}
 
-public protocol CloudBoardControllerAPIServerProtocol:
+package protocol CloudBoardControllerAPIServerProtocol:
 CloudBoardControllerAPIServerToClientProtocol {
     func connect(
         listenerDelegate: CloudBoardAsyncXPCListenerDelegate,

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -22,6 +22,7 @@ import Virtualization
 
 private let defaultVMName = "vrevm"
 private let envPrefix = "VREVM"
+private let envAppDir = "\(envPrefix)_APPLICATIONDIR"
 private let envDataDir = "\(envPrefix)_DATADIR"
 private let envVMName = "\(envPrefix)_VMNAME"
 private let envNoAsk = "\(envPrefix)_NOASK"
@@ -78,10 +79,18 @@ struct CLI: AsyncParsableCommand {
         }
     }
 
+    // set stdout/err to linebuf for print()
+    static func setOutputLineBuf() {
+        setlinebuf(stdout)
+        setlinebuf(stderr)
+    }
+
     // validateVMName returns arg as String after checking whether valid name for a VM;
     //   non-empty and contains no whitespace
     static func validateVMName(_ arg: String) throws -> String {
-        guard !arg.isEmpty, arg.rangeOfCharacter(from: .whitespaces) == nil else {
+        guard !arg.isEmpty,
+              arg.unicodeScalars.allSatisfy({ CharacterSet.urlHostAllowed.contains($0) })
+        else {
             throw ValidationError("invalid VM name")
         }
 
@@ -113,7 +122,16 @@ struct CLI: AsyncParsableCommand {
             throw ValidationError("invalid mac address")
         }
 
-        return mac.string
+        // throw error if multicast bit set (LSB of first octet)
+        let octs = arg.split(separator: ":", maxSplits: 2)
+        guard octs.count > 1,
+              let oct0 = UInt8(octs[0], radix: 16),
+              oct0 & 0x1 == 0
+        else {
+            throw ValidationError("invalid MAC address (multicast)")
+        }
+
+        return mac.string.lowercased()
     }
 
     // validateNetIfName returns arg as String representing a network interface name;
@@ -126,6 +144,60 @@ struct CLI: AsyncParsableCommand {
         return arg
     }
 
+    // validateNetworkConfig returns a VM.NetworkConfig representing a network configuration
+    //   from arg: <mode: nat, bridged, hostonly>[,subopt=<val>,..] where subopt is among:
+    //      mac=<addr>|random  (also "macaddr")
+    //      bridgeIf=<ifname>  (bridged mode only)
+    //
+    static func validateNetworkConfig(_ arg: String) throws -> VM.NetworkConfig {
+        var spec = arg.split(separator: ",", omittingEmptySubsequences: true)
+        guard spec.count > 0 else {
+            throw ValidationError("invalid network config")
+        }
+
+        let modeStr = spec.removeFirst()
+        guard let mode = VM.NetworkMode(rawValue: String(modeStr)) else {
+            throw ValidationError("invalid network mode: \(modeStr)")
+        }
+
+        if mode == .bridged && !CLI.internalBuild {
+            throw ValidationError("invalid network mode: \(modeStr)")
+        }
+
+        var macAddr: String? = nil
+        var bridgeIf: String? = nil
+
+        for opt in spec {
+            let kv = opt.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: true)
+            guard kv.count == 2 else {
+                throw ValidationError("invalid network config")
+            }
+
+            switch kv[0] {
+            case "mac", "macaddr":
+                if kv[1] != "random" {
+                    macAddr = try validateMACAddr(String(kv[1]))
+                }
+
+            case "sharedInterface":
+                guard mode == .bridged else {
+                    throw ValidationError("invalid network config: bridgeIf only valid for bridged mode")
+                }
+
+                bridgeIf = try validateNetIfName(String(kv[1]))
+
+            default:
+                throw ValidationError("invalid network option: \(kv[0])")
+            }
+        }
+
+        return VM.NetworkConfig(
+            mode: mode,
+            macAddr: macAddr,
+            bridgeIf: bridgeIf
+        )
+    }
+
     // validateFilePath returns arg (representing a path to a file) as String after checking
     //  whether it exists as a file (symlinks are resolved as part of the test)
     static func validateFilePath(_ arg: String) throws -> String {
@@ -135,6 +207,19 @@ struct CLI: AsyncParsableCommand {
 
         guard FileManager.isRegularFile(arg, resolve: true) else {
             throw ValidationError("\(arg): not a file")
+        }
+
+        return arg
+    }
+
+    // validateDirectoryPath returns arg after checking that it exists as a directory
+    static func validateDirectoryPath(_ arg: String) throws -> String {
+        guard FileManager.isExist(arg, resolve: true) else {
+            throw ValidationError("\(arg): not found")
+        }
+
+        guard FileManager.isDirectory(arg, resolve: true) else {
+            throw ValidationError("\(arg): not a directory")
         }
 
         return arg
@@ -163,14 +248,15 @@ struct CLI: AsyncParsableCommand {
     // nvramArgsMap returns dictionary of bootArgs and nvramArgs merged together; CLI input treats boot-args
     //  vs other nvram arguments separately (for convenience) but otherwise the former is merely mapped to
     //  "boot-args" nvramArgs key (and "bare" parameters [e.g. "-v"] are emitted as such)
-    static func nvramArgsMap(bootArgs: String?, nvramArgs: [String: String]?) -> [String: String]? {
-        var res: [String: String] = [:]
+    static func nvramArgsMap(bootArgs: String?, nvramArgs: [String: String]?) -> VM.NVRAMmap? {
+        var res: VM.NVRAMmap = [:]
         if let bootArgs {
-            res["boot-args"] = bootArgs
+            res["boot-args"] = bootArgs.data(using: .utf8)
         }
 
         if let nvramArgs {
-            res.merge(nvramArgs, uniquingKeysWith: { a, _ in a })
+            res.merge(nvramArgs.mapValues { $0.data(using: .utf8) ?? Data() },
+                      uniquingKeysWith: { k, _ in k })
         }
 
         return res.count > 0 ? res : nil
@@ -194,9 +280,9 @@ struct CLI: AsyncParsableCommand {
             dsps.setEventHandler {
                 VM.logger.log("exiting upon PID [\(pid, privacy: .public)] termination")
                 if let vzVM = vm?.vzVM {
-                    vzVM.stop { _ in _stdlib.exit(1) }
+                    vzVM.stop { _ in exit(withError: ExitCode.failure) }
                 } else {
-                    _stdlib.exit(1)
+                    exit(withError: ExitCode.failure)
                 }
             }
 
@@ -251,14 +337,23 @@ struct CLIError: Error, CustomStringConvertible {
 
 // cmdDefaults provides global defaults from envvars or presets
 enum cmdDefaults {
+    // applicationDir returns value of VREVM_APPLICATIONDIR envvar or default location under ~/Library
+    static var applicationDir: String {
+        if let base = ProcessInfo().environment[envAppDir] {
+            return base
+        } else {
+            // $HOME/Library/Application Support/com.apple.security-research.vrevm/
+            return URL.applicationSupportDirectory.appendingPathComponent(applicationName).path
+        }
+    }
+
     // dataDir returns value of VREVM_DATADIR envvar or default location under ~/Library
     static var dataDir: String {
         if let base = ProcessInfo().environment[envDataDir] {
             return base
         } else {
-            // $HOME/Library/Application Support/com.apple.security-research.vrevm
-            return URL.applicationSupportDirectory
-                .appendingPathComponent(applicationName)
+            // <applicationDir>/VM-Library/
+            return FileManager.fileURL(cmdDefaults.applicationDir)
                 .appendingPathComponent("VM-Library")
                 .path
         }

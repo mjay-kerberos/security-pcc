@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -29,7 +29,7 @@ enum FetchLatestResult: Hashable {
 }
 
 /// A data source for fetching the latest configuration package.
-protocol FetcherDataSource {
+protocol FetcherDataSource: Sendable {
     /// Fetches the latest configuration package.
     /// - Parameter currentRevisionIdentifier: The current revision identifier.
     /// - Returns: The result of the fetch.
@@ -148,7 +148,7 @@ extension UpstreamFetcherDataSource: FetcherDataSource {
 ///
 /// Use logging and metrics to report issues that need to be investigated, but issues with the cache
 /// never fail the critical path of the fetch, that's why none of the methods are throwing.
-protocol FetcherCacheProtocol {
+protocol FetcherCacheProtocol: Sendable {
     /// Load the cached value.
     ///
     /// If the value is not available, it returns `nil`.

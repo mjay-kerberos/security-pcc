@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -306,6 +306,7 @@ extension Configuration {
         )
         if let auditLists {
             self.auditLists = auditLists
+            self.requireAllowList = true
         }
     }
 
@@ -344,6 +345,7 @@ extension Configuration {
 
     static func makeSystemLabels() -> [String: String] {
         var labels = [String: String]()
+        #if canImport(cloudOSInfo)
         if #_hasSymbol(CloudOSInfoProvider.self) {
             let cloudOSInfo = CloudOSInfoProvider()
             if #_hasSymbol(cloudOSInfo.observabilityLabels) {
@@ -355,6 +357,7 @@ extension Configuration {
                 }
             }
         }
+        #endif
         let nodeUDID = MobileGestalt.current.uniqueDeviceID
         if nodeUDID == nil {
             Self.logger.error("Can't get a valid UDID")
@@ -368,7 +371,7 @@ extension Configuration {
         labels["_hwmodel"] = hwModel ?? ""
 
         let systemCryptexVersion = self.systemCryptexVersion
-        Self.logger.debug("System Cryptex version: \(systemCryptexVersion ?? "unknown", privacy: .public)")
+        Self.logger.log("Loaded system cryptex version. system_cryptex_version=\(systemCryptexVersion ?? "unknown", privacy: .public)")
         labels["_systemcryptexversion"] = systemCryptexVersion ?? ""
 
         do {
@@ -378,7 +381,7 @@ extension Configuration {
                 labels["_projectid"] = projectId
             }
         } catch {
-            Self.logger.error("Can't get the project ID from CFPrefs: \(error, privacy: .public)")
+            Self.logger.error("Can't get the project ID from CFPrefs. error=\(error, privacy: .public)")
         }
 
     #if os(macOS)
@@ -396,24 +399,33 @@ extension Configuration {
     }
 
     internal static var systemCryptexVersion: String? {
+        #if canImport(cloudOSInfo)
         if #_hasSymbol(CloudOSInfoProvider.self) {
             let cloudOSInfo = CloudOSInfoProvider()
             do {
                 let buildVersion = try cloudOSInfo.cloudOSBuildVersion()
                 return buildVersion
             } catch {
-                Self.logger.error("unable to determine build version from deployment manifest: \(error, privacy: .public), will attempt to fallback to cryptex version.plist")
+                Self.logger.error("""
+                    Unable to determine build version from deployment manifest. \
+                    Will attempt to fallback to cryptex version.plist. \
+                    error=\(error, privacy: .public)
+                    """)
             }
 
             do {
                 let buildVersion = try cloudOSInfo.extractVersionFromSupportCryptex()
                 return buildVersion
             } catch {
-                Self.logger.error("failed to determine build version from cryptex: \(error, privacy: .public)")
+                Self.logger.error("""
+                    Failed to determine build version from cryptex. \
+                    error=\(error, privacy: .public)
+                    """)
                 return nil
             }
-        } else {
-            return nil
         }
+        #endif
+
+        return nil
     }
 }

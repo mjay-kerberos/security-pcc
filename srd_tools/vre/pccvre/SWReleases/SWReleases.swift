@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -40,13 +40,11 @@ public struct SWReleases: RandomAccessCollection {
     init(
         environment: TransparencyLog.Environment,
         altKtInitEndpoint: URL? = nil,
-        tlsInsecure: Bool = false,
         traceLog: Bool = false
     ) async throws {
         self.swlog = try await TransparencyLog(
             environment: environment,
             altKtInitEndpoint: altKtInitEndpoint,
-            tlsInsecure: tlsInsecure,
             traceLog: traceLog
         )
     }
@@ -58,8 +56,7 @@ public struct SWReleases: RandomAccessCollection {
         searchRangeStart: Int64? = nil, // log index search windows
         searchRangeEnd: UInt64? = nil,
         batchSize: UInt64 = 100,
-        altEndpoint: URL? = nil,
-        tlsInsecure: Bool = false
+        altEndpoint: URL? = nil
     ) async throws -> Int {
         var releases: [Release] = []
         let tree = try await swlog.fetchLogTree()

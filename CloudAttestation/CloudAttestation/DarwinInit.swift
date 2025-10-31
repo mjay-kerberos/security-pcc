@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -121,6 +121,7 @@ extension DarwinInit {
         case none
         case carry
         case customer
+        case customerProxy
     }
 }
 
@@ -134,6 +135,8 @@ extension DarwinInit {
         case malformedSecureConfig
         case missingParameter(name: String)
         case invalidParameterValue(parameter: String)
+        case missingDarwinInit
+        case tooManyDarwinInit
 
         var errorDescription: String? {
             switch self {
@@ -153,6 +156,11 @@ extension DarwinInit {
 
             case .missingParameter(let name):
                 "SecureConfigDB entry missing required field \"\(name)\""
+            case .missingDarwinInit:
+                "darwin-init missing from SecureConfigDB"
+
+            case .tooManyDarwinInit:
+                "SecureConfigDB contains more than one darwin-init entry"
             }
         }
     }

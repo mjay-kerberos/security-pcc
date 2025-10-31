@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -33,11 +33,16 @@ extension CLI {
         var vmName: String = cmdDefaults.vmName
 
         func run() throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
             CLI.logger.log("remove VRE \(vmName, privacy: .public)")
 
             let vm = VM(name: vmName, dataDir: globalOptions.datadir)
-            try vm.open()
+
+            do {
+                try vm.open()
+            } catch {
+                CLI.logger.error("Could not read VM bundle configuration: \(error, privacy: .public)")
+            }
+
             if vm.isRunning() {
                 throw CLIError("remove \(vm.name): currently running")
             }

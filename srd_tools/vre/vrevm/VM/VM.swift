@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -31,6 +31,7 @@ class VM {
 
     var ecid: UInt64 { vmConfig?.ecid ?? 0 } // ecid for loaded VM
     var ecidStr: String { String(ecid, radix: 16, uppercase: false) } // ecid in string form
+    var udidStr: String { String(format: "%08X-%016lX", self.vmConfig?.platformType.chipID ?? 0, self.ecid ) }
     var exists: Bool { FileManager.isRegularFile(bundle.configPath, resolve: true) } // true if config exists
     var isOpen: Bool { vzVM != nil } // true is VM config is loaded
 
@@ -43,6 +44,13 @@ class VM {
     enum PlatformType: Int, Codable {
         case notsupported = 0
         case vresearch101 = 3
+
+        var chipID: UInt32 { // not exposed in VZ
+            switch self {
+            case .vresearch101: 0xfe01
+            default: 0
+            }
+        }
     }
 
     enum PlatformFusing: String, CaseIterable, Codable, ExpressibleByArgument {
@@ -59,6 +67,16 @@ class VM {
         case none
         case nat
         case bridged
+        case hostOnly
+
+        static var allCases: [NetworkMode] {
+            var _allCases: [NetworkMode] = [.none, .nat, .hostOnly]
+            if CLI.internalBuild {
+                _allCases += [.bridged]
+            }
+
+            return _allCases
+        }
     }
 
     init(name: String, dataDir: String = cmdDefaults.dataDir) {

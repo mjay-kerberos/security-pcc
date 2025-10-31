@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,7 +14,7 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-public struct CloudBoardAsyncXPCContext {
+package struct CloudBoardAsyncXPCContext: Sendable {
     public let peerConnection: CloudBoardAsyncXPCConnection
 }
 
@@ -22,5 +22,3 @@ extension CloudBoardAsyncXPCContext {
     @TaskLocal
     public static var context: CloudBoardAsyncXPCContext?
 }
-
-extension CloudBoardAsyncXPCContext: Sendable {}

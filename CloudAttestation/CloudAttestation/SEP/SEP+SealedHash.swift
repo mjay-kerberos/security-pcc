@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -177,9 +177,11 @@ extension SEP.SealedHash {
         /// The data of the entry.
         public let data: Data?
         /// The flags assosciated with the entry when it was ratcheted.
-        public let flags: Flags
+        public var flags: Flags
         /// The algorithm used to generate the digest.
         public let algorithm: any HashFunction.Type
+        /// Arbitrary metadata that is not sealed
+        public var metadata: [String: Data]? = nil
 
         init(digest: Data, data: Data?, flags: Flags, algorithm: any HashFunction.Type) {
             self.digest = digest

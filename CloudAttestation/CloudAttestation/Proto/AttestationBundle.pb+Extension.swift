@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -49,17 +49,18 @@ extension Proto_HashAlg {
 
 // MARK: - Codable Extension
 extension Proto_AttestationBundle: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(self.sepAttestation.isEmpty ? nil : self.sepAttestation, forKey: .sepAttestation)
+        try container.encodeIfPresent(self.apTicket.isEmpty ? nil : self.apTicket, forKey: .apTicket)
+        try container.encodeIfPresent(self.hasSealedHashes ? self.sealedHashes : nil, forKey: .sealedHashes)
         try container.encodeIfPresent(
             self.provisioningCertificateChain.isEmpty ? nil : self.provisioningCertificateChain,
             forKey: .provisioningCertificateChain
         )
-        try container.encodeIfPresent(self.sepAttestation.isEmpty ? nil : self.sepAttestation, forKey: .sepAttestation)
-        try container.encodeIfPresent(self.apTicket.isEmpty ? nil : self.apTicket, forKey: .apTicket)
-        try container.encodeIfPresent(self.hasSealedHashes ? self.sealedHashes : nil, forKey: .sealedHashes)
-        try container.encodeIfPresent(self.hasTransparencyProofs ? self.transparencyProofs : nil, forKey: .transparencyProofs)
+        try container.encodeIfPresent(self.appData.isEmpty ? nil : self.appData, forKey: .appData)
         try container.encodeIfPresent(self.hasKeyExpiration ? self.keyExpiration.date : nil, forKey: .keyExpiration)
+        try container.encodeIfPresent(self.hasTransparencyProofs ? self.transparencyProofs : nil, forKey: .transparencyProofs)
     }
 
     enum CodingKeys: CodingKey {
@@ -67,13 +68,14 @@ extension Proto_AttestationBundle: Encodable {
         case sepAttestation
         case apTicket
         case sealedHashes
-        case transparencyProofs
+        case appData
         case keyExpiration
+        case transparencyProofs
     }
 }
 
 extension Proto_SealedHashLedger: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(self.slots.isEmpty ? nil : self.slots, forKey: .slots)
     }
@@ -84,7 +86,7 @@ extension Proto_SealedHashLedger: Encodable {
 }
 
 extension Proto_SealedHash: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(self.hashAlg.rawValue != 0 ? self.hashAlg : nil, forKey: .hashAlg)
         try container.encodeIfPresent(self.entries.isEmpty ? nil : self.entries, forKey: .entries)
@@ -97,7 +99,7 @@ extension Proto_SealedHash: Encodable {
 }
 
 extension Proto_SealedHash.Entry: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(self.digest.isEmpty ? nil : self.digest, forKey: .digest)
         try container.encodeIfPresent(self.flags != 0 ? self.flags : nil, forKey: .flags)
@@ -115,6 +117,8 @@ extension Proto_SealedHash.Entry: Encodable {
         default:
             break
         }
+
+        try container.encodeIfPresent(self.metadata.isEmpty ? nil : self.metadata, forKey: .metadata)
     }
 
     enum CodingKeys: CodingKey {
@@ -123,11 +127,12 @@ extension Proto_SealedHash.Entry: Encodable {
         case cryptex
         case cryptexSalt
         case secureConfig
+        case metadata
     }
 }
 
 extension Proto_Cryptex: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(self.image4Manifest.isEmpty ? nil : self.image4Manifest, forKey: .image4Manifest)
     }
@@ -138,7 +143,7 @@ extension Proto_Cryptex: Encodable {
 }
 
 extension Proto_Cryptex.Salt: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         _ = encoder.container(keyedBy: CodingKeys.self)
     }
 
@@ -146,20 +151,22 @@ extension Proto_Cryptex.Salt: Encodable {
 }
 
 extension Proto_SecureConfig: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(self.entry.isEmpty ? nil : self.entry, forKey: .entry)
         try container.encodeIfPresent(self.metadata.isEmpty ? nil : self.metadata, forKey: .metadata)
+        try container.encodeIfPresent(self.data.isEmpty ? nil : self.data, forKey: .data)
     }
 
     enum CodingKeys: CodingKey {
         case entry
         case metadata
+        case data
     }
 }
 
 extension Proto_HashAlg: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
         switch self {
         case .unknown:
@@ -191,7 +198,7 @@ extension HashFunction {
 }
 
 extension Proto_TransparencyProofs: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(self.hasProofs ? self.proofs : nil, forKey: .proofs)
     }
@@ -202,7 +209,7 @@ extension Proto_TransparencyProofs: Encodable {
 }
 
 extension ATLogProofs: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(self.hasInclusionProof ? self.inclusionProof : nil, forKey: .inclusionProof)
         try container.encodeIfPresent(self.hasMilestoneConsistency ? self.milestoneConsistency : nil, forKey: .milestoneConsistency)
@@ -215,7 +222,7 @@ extension ATLogProofs: Encodable {
 }
 
 extension LogEntry: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(self.logType.rawValue != 0 ? self.logType : nil, forKey: .logType)
         try container.encodeIfPresent(self.hasSlh ? self.slh : nil, forKey: .slh)
@@ -239,7 +246,7 @@ extension LogEntry: Encodable {
 }
 
 extension LogType: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
         switch self {
         case .unknownLog:
@@ -261,7 +268,7 @@ extension LogType: Encodable {
 }
 
 extension SignedObject: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(self.object.isEmpty ? nil : self.object, forKey: .object)
         try container.encodeIfPresent(self.hasSignature ? self.signature : nil, forKey: .signature)
@@ -274,7 +281,7 @@ extension SignedObject: Encodable {
 }
 
 extension Signature: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(self.signature.isEmpty ? nil : self.signature, forKey: .signature)
         try container.encodeIfPresent(
@@ -294,7 +301,7 @@ extension Signature: Encodable {
 extension Signature.SignatureAlgorithm: Encodable {}
 
 extension NodeType: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
         switch self {
         case .paclNode:
@@ -320,7 +327,7 @@ extension NodeType: Encodable {
 }
 
 extension LogConsistency: Encodable {
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(self.hasStartSlh ? self.startSlh : nil, forKey: .startSLH)
         try container.encodeIfPresent(self.hasEndSlh ? self.endSlh : nil, forKey: .endSLH)
@@ -335,5 +342,11 @@ extension LogConsistency: Encodable {
         case proofHashes
         case patInclusionProof
         case tltInclusionProof
+    }
+}
+
+extension Proto_AppData {
+    var identifiers: (version: UInt32, domain: String, name: String) {
+        return (version, domain, name)
     }
 }

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -12,86 +12,328 @@
 // EA1937
 // 10/02/2024
 
+import CloudBoardAttestationDAPI
+
 // Copyright © 2024 Apple. All rights reserved.
+import CloudBoardCommon
 import CloudBoardLogging
 import CloudBoardMetrics
 import DequeModule
 import Foundation
 import NIOCore
 import os
+import Synchronization
 
 enum SessionError: Error {
+    case invalidKeyMaterial
     case sessionReplayed
     case unknownKeyID
+    // Restore failed for the key, so any session for it must be rejected.
+    // This should never happen, it's a simple sense check against the upstream
+    // key revocation path failing in some way
+    case keyIDBlocked
+}
+
+typealias NodeKeyID = Data
+
+struct SessionEntry {
+    let nodeKeyID: NodeKeyID
+    let sessionKey: SessionKey
 }
 
 /// Session store to keep track of requests CloudBoard has seen to prevent replay attacks that might allow an adversary
-/// to exfiltrate sensitive information by replaying a request. CloudBoard prevents this by expecting the 64-byte key
-/// material provided by the client that is used to derive a session key to be unique.
+/// to exfiltrate sensitive information by replaying a request.
 ///
-/// This store will reject new sessions identified by its key material that are already present when attempted to be
+/// CloudBoard prevents this by expecting the 32-byte key  material provided by the client that is used to
+/// derive a session key would be unique and high entropy (further that selecting a smaller subset of those
+/// bytes will retain those characteristics subject to birthday collision limits).
+/// See ``SessionKey`` documentation for the details
+///
+/// This store will reject new sessions identified by this key that are already present when attempted to be
 /// added.
 ///
-/// To prevent unbounded growth, sessions expire once the corresponding SEP-backed node key expires since `cb_jobhelper`
-/// will reject any request that contain key material wrapped to an expired node key anyway which allows us to safely
-/// remove the session from the store.
+/// To prevent unbounded growth, sessions expire once the corresponding SEP-backed node key expires since
+/// `cb_jobhelper` will reject any request that contain key material wrapped to an expired node key anyway
+/// which allows us to safely remove the session from the store.
+///
+/// If there is a failure (including a catastrophic crash such as a jetsam controlled death) on reading a
+/// session store on restart then the store will not block startup, instead it will require the associated key
+/// is dropped.
 final class SessionStore: Sendable {
-    private struct State {
-        var storedSessions = [Data: Set<Data>]()
-        var sessionCount: Int {
-            self.storedSessions.reduce(into: 0) { currentValue, sessionSetPair in
-                currentValue += sessionSetPair.value.count
+    fileprivate static let logger: os.Logger = .init(
+        subsystem: "com.apple.cloudos.cloudboard",
+        category: "SessionStore"
+    )
+
+    private let stateMachine: Mutex<SessionStoreStateMachine> = .init(.init())
+    private let attestationProvider: AttestationProvider
+    private let metrics: MetricsSystem
+    private let sessionStorage: Mutex<(any SessionStorage)?>
+
+    private let eventStream: AsyncStream<SessionStoreEvent>
+    private let eventContinuation: AsyncStream<SessionStoreEvent>.Continuation
+
+    init(
+        attestationProvider: AttestationProvider,
+        metrics: MetricsSystem,
+        sessionStorage: sending any SessionStorage,
+    ) {
+        self.attestationProvider = attestationProvider
+        self.metrics = metrics
+        self.sessionStorage = Mutex<(any SessionStorage)?>(sessionStorage)
+        (self.eventStream, self.eventContinuation) = AsyncStream.makeStream()
+    }
+
+    func run() async throws {
+        let validKeyIDs: [NodeKeyID] = try await self.attestationProvider.currentAttestationSet().validKeyIDs()
+        let restoredSessions = self.sessionStorage.withLock {
+            $0!.restoreSessions(
+                validNodeKeyIDs: validKeyIDs
+            )
+        }
+        // If the restore failed to recover a session then we need to invalidate it
+        // therefore we require explicit positive success/failure indication
+        var revocationList: [NodeKeyID] = []
+        for keyID in validKeyIDs {
+            guard let restored = restoredSessions[keyID] else {
+                fatalError("""
+                    SessionStorage failed to provide the state for *all* keys input: \(validKeyIDs.count) \
+                    output: \(restoredSessions.count) \
+                    example: \(keyID.base64EncodedString())
+                """)
             }
+            switch restored {
+            case .failed:
+                revocationList.append(keyID)
+            case .success:
+                // nothing to do yet, we update the initial state in one go
+                ()
+            }
+        }
+        if !revocationList.isEmpty {
+            Self.logger.info("Initiating revocation of \(revocationList.count) keys.")
+            try await self.attestationProvider.forceRevocation(keyIDs: revocationList)
+        }
+        self.stateMachine.withLock {
+            $0.onRestoredSessions(restoredSessions)
+        }
+        Self.logger.info("Sessions restored.")
+        for await event in self.eventStream {
+            switch event {
+            case .newSession(let sessionEntry):
+                self.sessionStorage.withLock {
+                    $0!.storeSession(sessionEntry)
+                }
+            case .expiredNodeKey(let nodeKeyID):
+                self.sessionStorage.withLock {
+                    $0!.removeSessions(of: nodeKeyID)
+                }
+            }
+        }
+        // This is not necessary in normal processing, but some complex unit tests
+        // 'kill' the daemon, but complex retain references exist that hold the store open
+        // this releases any locks associated with the storage, and also makes the store unusable
+        // which is actually desirable if somehow the run loop stopped
+        self.sessionStorage.withLock {
+            $0 = nil
+        }
+        Self.logger.info("Session store run loop completed")
+    }
+
+    /// Convert an encrypted payload from the parameters (so the header of an OHTTP request)
+    /// into a SessionKey.
+    /// Exposed to make testing easier
+    internal static func reduceToSessionKey(encryptedPayload: Data) throws -> SessionKey {
+        // (see https://datatracker.ietf.org/doc/rfc9458/ Section 4.1)
+        //    Encapsulated Request {
+        //        Key Identifier (8),
+        //        HPKE KEM ID (16),
+        //        HPKE KDF ID (16),
+        //        HPKE AEAD ID (16),
+        //        Encapsulated KEM Shared Secret (8 * Nenc),
+        //        HPKE-Protected Request (..),
+        //      }
+
+        // It is possible for a malicious _client_ to use different OHTTP key identifiers
+        // to repeat the same request up to 256 times
+        // Helpfully those are stored in the first byte and, since clients always use 0
+        // we can just reject other inputs
+        // This deliberately duplicates OHTTPClientStateMachine.defaultKeyID as the real client code
+        // cannot reference that value, or easily change
+        // Note: The use of the reduction to SessionKey below means this no longer matters,
+        // but it's also desirable to check we are doing the right thing as, for now, the KeyID is not used
+        guard encryptedPayload.count > 0, encryptedPayload[encryptedPayload.startIndex] == 0x00 else {
+            // the encrypted payload was user input - so even though it's a pain we do not output it
+            self.logger.error("encrypted payload does not start with 0x00")
+            throw SessionError.invalidKeyMaterial
+        }
+        // Nenc is currently 32 bytes it may grow in future which is fine as any part would be acceptable
+        let otherHeaders = 1 + 2 + 2 + 2
+        // now in the KEM, but we want to be aligned
+        let alignmentOffset = otherHeaders + 1
+        let requiredLength = alignmentOffset + SessionKey.byteLength
+        guard encryptedPayload.count >= requiredLength else {
+            // the length of the encrypted payload is visible externally already
+            Self.logger.error(
+                "encrypted payload was not long enough \(encryptedPayload.count, privacy: .public)"
+            )
+            throw SessionError.invalidKeyMaterial
+        }
+        // Now reduce to a smaller subset that is still high entropy
+        // We just index into the Encapsulated KEM Shared Secret which has sufficient entropy
+        var buffer = ByteBuffer(data: encryptedPayload.dropFirst(alignmentOffset).suffix(SessionKey.byteLength))
+        return try SessionKey(exactlyTheRightSize: &buffer)
+    }
+
+    /// exposed directly for tests
+    internal func waitForInitialization() async {
+        if let pendingInitialization = self.stateMachine.withLock({ $0.ensureInitialized() }) {
+            Self.logger.debug("Waiting for session store initialization")
+            await pendingInitialization.value
         }
     }
 
-    private let state = OSAllocatedUnfairLock(initialState: State())
-    private let attestationProvider: AttestationProvider
-    private let metrics: MetricsSystem
+    func addSession(encryptedPayload: Data, keyID: NodeKeyID) async throws {
+        await self.waitForInitialization()
 
-    init(attestationProvider: AttestationProvider, metrics: MetricsSystem) {
-        self.attestationProvider = attestationProvider
-        self.metrics = metrics
-    }
-
-    func addSession(keyMaterial: Data, keyID: Data) async throws {
         self.metrics.emit(Metrics.SessionStore.SessionAddedCounter(action: .increment))
-        let currentAttestationSet = try await attestationProvider.currentAttestationSet()
-        let validKeyIDs = currentAttestationSet.allAttestations
-            .filter { $0.expiry >= .now }
-            .map { $0.keyID }
 
-        try self.state.withLock { state in
-            Self.removeExpiredKeys(state: &state, validKeyIDs: validKeyIDs, metrics: self.metrics)
+        let sessionKey = try Self.reduceToSessionKey(encryptedPayload: encryptedPayload)
+        let validKeyIDs = try await attestationProvider.currentAttestationSetWithTimeout().validKeyIDs()
+
+        try self.stateMachine.withLock { state in
+            let expired = state.removeExpiredKeys(validKeyIDs: validKeyIDs)
+            for id in expired {
+                self.eventContinuation.yield(.expiredNodeKey(id))
+            }
+            if !expired.isEmpty {
+                self.metrics.emit(Metrics.SessionStore.StoredSessions(value: state.sessionCount))
+            }
 
             // Ensure the key ID is known
             guard validKeyIDs.contains(keyID) else {
+                Self.logger
+                    .error("Did not find any attestation for key ID \(keyID.base64EncodedString(), privacy: .public)")
                 throw SessionError.unknownKeyID
             }
 
-            var sessionSet = state.storedSessions[keyID] ?? []
-
-            // Check for replay
-            if sessionSet.contains(keyMaterial) {
+            switch state.attemptInsert(nodeKeyID: keyID, sessionKey: sessionKey) {
+            case .success:
+                self.eventContinuation.yield(.newSession(.init(nodeKeyID: keyID, sessionKey: sessionKey)))
+                self.metrics.emit(Metrics.SessionStore.StoredSessions(value: state.sessionCount))
+            case .alreadyPresent:
+                // the encrypted payload is already public and might help in diagnosis
+                Self.logger
+                    .error("Attempt to replay session key \(encryptedPayload.base64EncodedString(), privacy: .public)")
                 self.metrics.emit(Metrics.SessionStore.SessionReplayedCounter(action: .increment))
                 throw SessionError.sessionReplayed
+            case .blocked:
+                // this actually indicates a pretty weird state so not bothering to include a metric
+                Self.logger.error("Attempt to insert blocked key ID \(keyID.base64EncodedString(), privacy: .public)")
+                throw SessionError.keyIDBlocked
             }
-
-            // Add session
-            sessionSet.insert(keyMaterial)
-            state.storedSessions[keyID] = sessionSet
-            self.metrics.emit(Metrics.SessionStore.StoredSessions(value: state.sessionCount))
         }
     }
 
-    private static func removeExpiredKeys(state: inout State, validKeyIDs: [Data], metrics: MetricsSystem) {
-        for keyID in state.storedSessions.keys {
+    deinit {
+        self.stateMachine.withLock { $0.cancel() }
+    }
+}
+
+private struct SessionStoreStateMachine {
+    private enum State {
+        case initializing(Promise<Void, Never>)
+        case initialized
+    }
+
+    enum InsertResult {
+        case success
+        case alreadyPresent
+        case blocked
+    }
+
+    private var state = State.initializing(Promise())
+    private var storedSessions = [NodeKeyID: Set<SessionKey>]()
+    private var blockedSessions = Set<NodeKeyID>()
+
+    mutating func attemptInsert(nodeKeyID: NodeKeyID, sessionKey: SessionKey) -> InsertResult {
+        // likely case is we have it already
+        guard var sessionSet = self.storedSessions[nodeKeyID] else {
+            // this would start a new one then, so lets check if it was blocked
+            // in theory the revocation should have kicked in, but this protects us against that failing
+            // or some asynchronous state change failure
+            guard !self.blockedSessions.contains(nodeKeyID) else {
+                return .blocked
+            }
+            self.storedSessions[nodeKeyID] = Set<SessionKey>([sessionKey])
+            return .success
+        }
+        let (wasNew, _) = sessionSet.insert(sessionKey)
+        self.storedSessions[nodeKeyID] = sessionSet
+        return wasNew ? .success : .alreadyPresent
+    }
+
+    /// Checks for any nodeKeyIDs not present in `validKeyIDs`, any found are removed, and returned
+    mutating func removeExpiredKeys(validKeyIDs: [NodeKeyID]) -> [NodeKeyID] {
+        var expiredKeys: [NodeKeyID] = []
+        for keyID in self.storedSessions.keys {
             if !validKeyIDs.contains(keyID) {
-                state.storedSessions.removeValue(forKey: keyID)
+                self.storedSessions.removeValue(forKey: keyID)
+                expiredKeys.append(keyID)
             }
         }
-        metrics.emit(Metrics.SessionStore.StoredSessions(value: state.sessionCount))
+        return expiredKeys
     }
+
+    /// A count of all valid sessions across all active NodeKeyIDs
+    var sessionCount: Int {
+        self.storedSessions.reduce(into: 0) { currentValue, sessionSetPair in
+            currentValue += sessionSetPair.value.count
+        }
+    }
+
+    mutating func onRestoredSessions(_ restoredSessions: [NodeKeyID: RecoveredSessionState]) {
+        switch self.state {
+        case .initializing(let promise):
+            // since this will happen once and only once we can just set them
+            for (keyID, state) in restoredSessions {
+                switch state {
+                case .success(let sessionKeys):
+                    self.storedSessions[keyID] = sessionKeys
+                case .failed:
+                    self.blockedSessions.insert(keyID)
+                }
+            }
+            self.state = .initialized
+            promise.succeed()
+        case .initialized:
+            preconditionFailure("Unexpected state: restored sessions received after initialization. Will ignore")
+        }
+    }
+
+    func ensureInitialized() -> Future<Void, Never>? {
+        switch self.state {
+        case .initializing(let promise):
+            return Future(promise)
+        case .initialized:
+            return nil
+        }
+    }
+
+    func cancel() {
+        switch self.state {
+        case .initializing(let promise):
+            promise.succeed()
+        case .initialized:
+            // no-op
+            ()
+        }
+    }
+}
+
+private enum SessionStoreEvent {
+    case newSession(SessionEntry)
+    case expiredNodeKey(NodeKeyID)
 }
 
 extension TimeAmount {
@@ -103,10 +345,20 @@ extension TimeAmount {
 extension SessionError: ReportableError {
     var publicDescription: String {
         switch self {
+        case .invalidKeyMaterial:
+            "invalidKeyMaterial"
         case .sessionReplayed:
             "sessionReplayed"
         case .unknownKeyID:
             "unknownKeyID"
+        case .keyIDBlocked:
+            "keyIDBlocked"
         }
+    }
+}
+
+extension AttestationSet {
+    func validKeyIDs() -> [NodeKeyID] {
+        self.allAttestations.filter { $0.expiry > .now }.map { $0.keyID }
     }
 }

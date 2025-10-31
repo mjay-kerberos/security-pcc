@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -138,19 +138,30 @@ package actor CloudMetricsAsyncXPCListener {
             )
             await self.handleNewConnection(connection: connection)
         } catch CloudMetricsAsyncXPCError.terminationImminent {
-            self.logger.info("\(self.name, privacy: .public) listener termination is imminent")
+            self.logger.log("""
+                Listener termination is imminent. \
+                connection_name=\(self.name, privacy: .public)
+                """)
             self.listener.cancel()
         } catch CloudMetricsAsyncXPCError.connectionInterrupted {
-            self.logger.info("\(self.name, privacy: .public) listener has been interrupted")
+            self.logger.log("""
+                Listener has been interrupted. \
+                connection_name=\(self.name, privacy: .public)
+                """)
             self.listener.cancel()
         } catch CloudMetricsAsyncXPCError.connectionInvalid(let reason) {
-            self.logger
-                .info("\(self.name, privacy: .public) listener has been invalidated: \(reason ?? "", privacy: .public)")
+            self.logger.log("""
+                Listener has been invalidated. \
+                connection_name=\(self.name, privacy: .public) \
+                reason=\(reason ?? "", privacy: .public)
+                """)
             return true
         } catch {
-            self.logger.error(
-                "\(self.name, privacy: .public) listener error: \(error, privacy: .public))"
-            )
+            self.logger.error("""
+                Listener error. \
+                connection_name=\(self.name, privacy: .public) \
+                error=\(error, privacy: .public)
+                """)
             self.listener.cancel()
         }
 

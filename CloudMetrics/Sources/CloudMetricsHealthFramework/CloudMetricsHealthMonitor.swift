@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -90,14 +90,14 @@ public actor CloudMetricsHealthMonitor {
             """)
             return client
         case .waitingForConnection(var waiters):
-            Self.logger.debug(
+            Self.logger.log(
                 "Function \(function, privacy: .public) waiting for a client"
             )
             let promise = Promise<CloudMetricsHealthXPCClient, any Error>()
             waiters.append(promise)
             self.client = .waitingForConnection(waiters)
             defer {
-                Self.logger.debug("""
+                Self.logger.log("""
                 Function \(function, privacy: .public) has now found a client
                 """)
             }

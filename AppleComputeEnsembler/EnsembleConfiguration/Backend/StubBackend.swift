@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -19,6 +19,7 @@
 //  Created by Alex T Newman on 12/14/23.
 //
 
+import CryptoKit
 import Foundation
 import OSLog
 
@@ -30,6 +31,8 @@ final class StubBackend: Backend {
 	var activated: Bool
 	// Wow really advanced lock
 	var locked: Bool
+
+	var sharedKey: SymmetricKey? = nil
 
 	init(configuration: BackendConfiguration) throws {
 		self.configuration = configuration
@@ -61,7 +64,9 @@ final class StubBackend: Backend {
 		}
 	}
 
-	func setActivatedFlag() {}
+	func setActivatedFlag() {
+		self.activated = true
+	}
 
 	func disconnectCIO(channel: Int) {
 		logger.log("Disconnecting CIO channel: \(channel, privacy: .public)")
@@ -99,23 +104,40 @@ final class StubBackend: Backend {
 	}
 
 	public func getConnectedNodes() throws -> [[String: AnyObject]] {
-		print("getConnectedNodes not implemented for Stub backend")
+		logger.log("getConnectedNodes not implemented for Stub backend")
 		return []
 	}
 
 	public func getCIOCableState() throws -> [[String: AnyObject]] {
-		print("getCIOCableState not implemented for Stub backend")
+		logger.log("getCIOCableState not implemented for Stub backend")
 		return []
 	}
 
-	func setCryptoKey(key _: Data, flags _: UInt32) throws {
+	func setCryptoKey(key: Data, flags _: UInt32) throws {
 		logger.log("Setting crypto key ")
+		self.sharedKey = SymmetricKey(data: key)
+
+        logger
+            .log(
+			"setCryptoKey: Key is: \(key.map { String(format: "%02x", $0) }.joined())"
+		)
 	}
 
 	/// get the crypto key
 	func getCryptoKey() throws -> Data {
 		logger.log("Getting crypto key ")
-		return Data()
+
+		guard let key = sharedKey else {
+			throw EnsembleError.internalError(error: "Shared key was not initialized")
+		}
+
+		let keyData = key.withUnsafeBytes { Data(Array($0)) }
+        logger
+            .log(
+			"getCryptoKey: Key is: \(keyData.map { String(format: "%02x", $0) }.joined())"
+		)
+
+		return key.withUnsafeBytes { Data(Array($0)) }
 	}
 
 	/// gets the number of buffers that can be allocated per Crypto Key.
@@ -128,5 +150,13 @@ final class StubBackend: Backend {
 	func getMaxSecondsPerKey() throws -> UInt64 {
 		logger.log("getting the max seconds per key ")
 		return 1000
+	}
+
+	public func addPeerHostname(hostname: String, node: Int) throws -> Bool {
+		logger
+			.log(
+				"addHostname \(String(describing: hostname), privacy: .public) for node: \(node, privacy: .public)"
+			)
+		return true
 	}
 }

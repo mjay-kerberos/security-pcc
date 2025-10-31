@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -12,7 +12,7 @@
 // EA1937
 // 10/02/2024
 
-//  Copyright © 2024 Apple, Inc. All rights reserved.
+//  Copyright © 2024-2025 Apple, Inc. All rights reserved.
 //
 
 import Foundation
@@ -20,18 +20,55 @@ import Foundation
 // DarwinInit.SSH provides a structured definition of a local user and ssh settings
 
 extension DarwinInitHelper {
+
+    /// validateSSHPubKey performs basic validation of SSH public key: "<keytype> <base64> [options]";
+    /// - Returns: ssh public key string returned with options removed
+    static func validateSSHPubKey(_ pubKey: String) -> String? {
+        var pubKey = pubKey.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
+        guard pubKey.count > 1 else {
+            return nil
+        }
+
+        // example types: ssh-dss, ecdsa-sha2-nistp521, ssh-ed25519, ssh-rsa
+        guard pubKey[0].contains(try! Regex("^[a-z][a-z0-9-]+$")) else {
+            return nil
+        }
+
+        // ensure the key portion is valid base64
+        guard let sshKey = Data(base64Encoded: String(pubKey[1]), options: .ignoreUnknownCharacters) else {
+            return nil
+        }
+        pubKey[1] = Substring(sshKey.base64EncodedString()) // re-encode with lint removed
+
+        // only return type + key
+        return pubKey[0 ... 1].joined(separator: " ")
+    }
+
+    mutating func enableSSH(sshPubKey: String) throws {
+        try modify {
+            try $0.enableSSH(sshPubKey: sshPubKey)
+        } v1Fallback: {
+            $0.enableSSH(sshPubKey: sshPubKey)
+        }
+    }
+
+    mutating func disableSSH() throws {
+        try modify {
+            try $0.disableSSH()
+        } v1Fallback: {
+            $0.disableSSH()
+        }
+    }
+}
+
+extension DarwinInitConfigV1 {
     struct SSH: Codable {
         // only a single user instance may be defined
         struct User: Codable {
             let uid: UInt
             let gid: UInt
             let name: String
-            var sshPubKey: String {
-                get { self._sshPubKey }
-                set(newValue) { self._sshPubKey = validateSSHPubKey(newValue) ?? "" }
-            }
-
-            private var _sshPubKey: String
+            let sshPubKey: String
 
             init(
                 uid: UInt = 0,
@@ -42,7 +79,7 @@ extension DarwinInitHelper {
                 self.uid = uid
                 self.gid = gid
                 self.name = name
-                self._sshPubKey = validateSSHPubKey(sshPubKey) ?? ""
+                self.sshPubKey = sshPubKey
             }
         }
 
@@ -62,28 +99,17 @@ extension DarwinInitHelper {
             let selfjson = asJSONString(self)
             DarwinInitHelper.logger.debug("SSH config: \(selfjson, privacy: .public)")
         }
+    }
 
-        // validateSSHPubKey performs basic validation of SSH public key: "<keytype> <base64> [options]";
-        //  ssh public key string returned with options removed
-        static func validateSSHPubKey(_ pubKey: String) -> String? {
-            var pubKey = pubKey.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
-            guard pubKey.count > 1 else {
-                return nil
-            }
+    static let secPolicyDisabledPrefix = "SSH_DISABLED-"
 
-            // example types: ssh-dss, ecdsa-sha2-nistp521, ssh-ed25519, ssh-rsa
-            guard pubKey[0].contains(try! Regex("^[a-z][a-z0-9-]+$")) else {
-                return nil
-            }
+    mutating func enableSSH(sshPubKey: String) {
+        sshConfig = SSH(enabled: true, user: .init(sshPubKey: sshPubKey))
+        disableSecurityPolicy(prefix: Self.secPolicyDisabledPrefix)
+    }
 
-            // ensure the key portion is valid base64
-            guard let sshKey = Data(base64Encoded: String(pubKey[1]), options: .ignoreUnknownCharacters) else {
-                return nil
-            }
-            pubKey[1] = Substring(sshKey.base64EncodedString()) // re-encode with lint removed
-
-            // only return type + key
-            return pubKey[0 ... 1].joined(separator: " ")
-        }
+    mutating func disableSSH() {
+        sshConfig = SSH(enabled: false)
+        reenableSecurityPolicy(prefix: Self.secPolicyDisabledPrefix)
     }
 }

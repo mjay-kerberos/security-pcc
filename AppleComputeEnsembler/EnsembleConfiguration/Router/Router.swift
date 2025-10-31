@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -37,7 +37,10 @@ protocol RouterDelegate {
 	func ensembleReady()
 
 	/// Callback after the ensemble is ready and a connection fails.
-	func ensembleFailed()
+    func ensembleFailed(failMsg: String)
+
+	/// Callback in order to add a peer to CIOMesh Config.
+	func addPeer(hostName: String, nodeRank: Int)
 }
 
 /// Router initialization configuration.
@@ -92,6 +95,12 @@ protocol Router {
 	func connectionChange(
 		direction: BackendConnectionDirection,
 		channelIndex: Int,
+		node: Int,
+		connected: Bool
+	)
+
+	/// A Network connection has been changed to a node.
+	func networkConnectionChange(
 		node: Int,
 		connected: Bool
 	)

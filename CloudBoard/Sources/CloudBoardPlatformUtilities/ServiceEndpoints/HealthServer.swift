@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,10 +14,12 @@
 
 //  Copyright (c) 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+package import CloudBoardAsyncXPC
 import CloudBoardHealth
 import os
 
+/// Local health server used by other on-node components to query CloudBoard health over XPC. This is called via the
+/// CloudBoardHealth.framework. This interface is used to monitor CloudBoard health during convergence
 public actor HealthServer {
     private var healthState: CloudBoardHealthState = .initializing
 
@@ -26,13 +28,16 @@ public actor HealthServer {
         category: "HealthServer"
     )
 
-    public init() {}
+    private let apiServer: CloudBoardHealthAPIServerProtocol
+
+    package init(apiServer: CloudBoardHealthAPIServerProtocol = CloudBoardHealthAPIXPCServer.localListener()) {
+        self.apiServer = apiServer
+    }
 
     public func run(healthPublisher: ServiceHealthMonitor) async {
         Self.log.info("Starting HealthServer")
         let healthStatusStream = healthPublisher.watch()
-        let server = CloudBoardHealthAPIXPCServer.localListener()
-        await server.connect(listenerDelegate: self, serverDelegate: self)
+        await self.apiServer.connect(listenerDelegate: self, serverDelegate: self)
         Self.log.info("HealthServer started")
 
         for await healthStatus in healthStatusStream {
@@ -43,7 +48,7 @@ public actor HealthServer {
             if self.healthState != newState {
                 self.healthState = newState
                 do {
-                    try await server.healthStateChanged(to: newState)
+                    try await self.apiServer.healthStateChanged(to: newState)
                 } catch {
                     Self.log.error("""
                     HealthServer failed to update client of state change: \
@@ -62,7 +67,7 @@ extension HealthServer: CloudBoardHealthAPIServerDelegateProtocol {
 }
 
 extension HealthServer: CloudBoardAsyncXPCListenerDelegate {
-    public func invalidatedConnection(
+    package func invalidatedConnection(
         _ connection: CloudBoardAsyncXPCConnection
     ) async {
         Self.log.log("""

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -23,6 +23,8 @@ extension TransparencyLog {
     // Decode (AT) Log Leaf node headers from LogLeaves request
     //  (LogLeavesResponse and LogLeavesForRevisionResponse have slightly different Leaf defs)
     struct ATLeaf: Leaf, Hashable {
+        static let serializationVersion = SerializationVersion.V1
+
         let nodeType: TxPB_NodeType
         let nodeBytes: Data
         let nodeData: ATLeafData
@@ -109,7 +111,12 @@ extension TransparencyLog {
         static func decodeNodeData(_ data: Data) throws -> ATLeafData {
             let changeLogNode = try TxPB_ChangeLogNodeV2(serializedBytes: data)
             var nodeBytes = TransparencyByteBuffer(data: changeLogNode.mutation)
-            return try ATLeafData(bytes: &nodeBytes)
+            let atLeafData = try ATLeafData(bytes: &nodeBytes)
+            guard atLeafData.version == TransparencyLog.ATLeaf.serializationVersion else {
+                throw TransparencyLogError("unsupported version (\(atLeafData.version))")
+            }
+
+            return atLeafData
         }
     }
 }

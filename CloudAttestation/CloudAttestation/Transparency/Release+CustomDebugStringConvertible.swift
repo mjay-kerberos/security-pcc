@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -19,7 +19,7 @@
 //  Copyright © 2024 Apple Inc. All rights reserved.
 //
 
-import SwiftASN1
+import SwiftASN1Internal
 
 extension Release: CustomDebugStringConvertible {
     public var debugDescription: String {

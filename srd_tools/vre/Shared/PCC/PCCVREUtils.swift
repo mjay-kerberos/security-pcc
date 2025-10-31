@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -12,7 +12,7 @@
 // EA1937
 // 10/02/2024
 
-//  Copyright © 2024 Apple, Inc. All rights reserved.
+//  Copyright © 2024-2025 Apple, Inc. All rights reserved.
 //
 
 import Foundation
@@ -56,10 +56,28 @@ extension Main {
         }
     }
 
-    private static let requiredMemoryGB = 16
-    private static let recommendedMemoryGB = 24
+    public static let requiredMemoryGBHost = 2
 
-    private static func validateHardwareRequirementsForVRE() throws {
+    static func validateRequiredMemory(
+        requiredMemoryGB: Int,
+        consumedMemoryGB: Int
+    ) throws {
+        do {
+            try _validateRequiredMemory(requiredMemoryGB: requiredMemoryGB,
+                                        consumedMemoryGB: consumedMemoryGB)
+        } catch {
+            if os_variant_allows_internal_security_policies(applicationName) {
+                fputs("Warning:\n\(error)\n", stderr)
+            } else {
+                throw error
+            }
+        }
+    }
+
+    private static func _validateRequiredMemory(
+        requiredMemoryGB: Int,
+        consumedMemoryGB: Int
+    ) throws {
         let memoryGB: Int
         do {
             memoryGB = try Self.memoryGB()
@@ -67,43 +85,18 @@ extension Main {
             throw PCCVREError("Failed to validate hardware requirements - \(error)")
         }
 
-        guard memoryGB >= requiredMemoryGB else {
-            throw PCCVREError("""
-            This device does not meet hardware requirements for the VRE - a Mac with Apple silicon and at least \(requiredMemoryGB)GB of unified memory.
-            This device has \(memoryGB)GB of Unified Memory.
-            """)
-        }
-    }
+        if memoryGB < (requiredMemoryGB + consumedMemoryGB) {
+            let consumedMemoryMessage = if (consumedMemoryGB > 0) {
+                "other running VRE instances use \(consumedMemoryGB)GB, "
+            } else {
+                ""
+            }
+            let error = """
+            This command requires more Unified Memory than available.
+            This command requires \(requiredMemoryGB)GB, \(consumedMemoryMessage)this device has \(memoryGB)GB.
+            """
 
-    static func printHardwareRecommendationWarningIfApplicable() {
-        if os_variant_allows_internal_security_policies(applicationName) {
-            return
-        }
-
-        let suppressWarningEnvvar = "VRE_SUPPRESS_RECOMMENDED_HARDWARE_WARNING"
-        if ProcessInfo().environment[suppressWarningEnvvar] == "1" {
-            return
-        }
-
-        let memoryGB: Int
-        do {
-            memoryGB = try Self.memoryGB()
-        } catch {
-            fputs("Failed to check for recommended hardware - \(error)\n", stderr)
-            return
-        }
-
-        if memoryGB < recommendedMemoryGB {
-            fputs(
-                """
-                Warning:
-                This device has less unified memory than recommended for the VRE.
-                Using this tool might adversely affect the performance of other workloads on this device.
-                \(recommendedMemoryGB)GB of unified memory is recommended for the VRE while this device has \(memoryGB)GB.
-                You can suppress this warning with a \(suppressWarningEnvvar)=1 environment variable.
-                \n
-                """, stderr
-            )
+            throw PCCVREError(error)
         }
     }
 
@@ -118,8 +111,6 @@ extension Main {
         if os_variant_allows_internal_security_policies(applicationName) {
             return
         }
-
-        try validateHardwareRequirementsForVRE()
 
         var sipStatus: UInt64 = 0
         let result = bootpolicy_get_sip_flags(

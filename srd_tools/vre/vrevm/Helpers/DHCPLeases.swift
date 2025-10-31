@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -24,33 +24,32 @@ import Network
 
 struct DHCPLeases {
     private let leasesFile: String
-    private var leases: [Entry]
+    private var leases: [Entry] = []
 
     private struct Entry {
         var name: String? = nil
         var ip_address: IPAddress? = nil
         var hw_address: String? = nil
         var identifier: String? = nil
-        var lease: String? = nil
+        var lease: UInt32 = 0
     }
 
     init(fromFile: String = "/var/db/dhcpd_leases") throws {
         self.leasesFile = fromFile
-        self.leases = []
         self.leases = try load()
     }
 
+    // lookupIPbyMACAddress returns IP address associated with most recent DHCP lease by mac address;
+    //   unfortunately, it's not guaranteed we've picked the correct one in the event the lease exists
+    //   across multiple "virtual bridge" subnets that share the same dhcpd instance.
     func lookupIPbyMACAddress(_ macAddr: String) -> IPAddress? {
         let macAddr = depad(macAddr)
-        for l in leases {
-            if macAddr == l.hw_address {
-                return l.ip_address
-            }
-        }
-
-        return nil
+        return leases.filter { macAddr == $0.hw_address }
+            .sorted(by: { $0.lease > $1.lease })
+            .first?.ip_address
     }
 
+    // load reads and parses dhcp leases file as a set of Entry(s)
     private func load() throws -> [Entry] {
         var entries: [Entry] = []
 
@@ -96,7 +95,7 @@ struct DHCPLeases {
 
                 case "identifier": newEntry?.identifier = String(kv[1])
 
-                case "lease": newEntry?.lease = String(kv[1])
+                case "lease": newEntry?.lease = UInt32(String(kv[1]).trimPrefix("0x")) ?? 0
 
                 default: continue
                 }
@@ -109,7 +108,8 @@ struct DHCPLeases {
         return entries
     }
 
-    // handle differences in whether octets < 16 are 0 padded (VZ == yes; dhcp == no); e.g. "04:aa:.." -> "4:aa:.."
+    // depad normalizes difference in whether octets < 16 are 0 padded (VZ == yes; dhcp == no);
+    //   e.g. "04:aa:.." -> "4:aa:.."
     private func depad(_ macAddr: String) -> String {
         var macFields = macAddr.components(separatedBy: ":")
         for (i, m) in macFields.enumerated() {

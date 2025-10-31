@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -103,11 +103,8 @@ public struct DeviceModePolicy: AttestationPolicy {
 
 // MARK: - Mode
 extension DeviceModePolicy {
-    public struct Mode: Sendable, Hashable {
-        public let restrictedExecution: Bool
-        public let ephemeralData: Bool
-        public let developer: Bool
-    }
+    // TODO: replace this with Top Level ``DeviceState`` struct
+    public typealias Mode = DeviceMode
 
     public enum Constraint: Sendable, Hashable {
         case any
@@ -144,8 +141,8 @@ extension DeviceModePolicy {
 
 extension DeviceModePolicy {
     enum Error: Swift.Error {
-        case restrictedExecutionModeMismatch(actual: Bool, expected: Bool)
-        case ephemeralDataModeMismatch(actual: Bool, expected: Bool)
-        case developerModeMismatch(actual: Bool, expected: Bool)
+        case restrictedExecutionModeMismatch(actual: Bool?, expected: Bool)
+        case ephemeralDataModeMismatch(actual: Bool?, expected: Bool)
+        case developerModeMismatch(actual: Bool?, expected: Bool)
     }
 }

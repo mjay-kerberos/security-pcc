@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,59 +14,360 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
+import CryptoKit
 import Foundation
+package import CloudBoardAsyncXPC
 
-public protocol CloudBoardJobHelperAPIClientProtocol: CloudBoardJobHelperAPIClientToServerProtocol {
-    func set(delegate: CloudBoardJobHelperAPIClientDelegateProtocol) async
+/// An abstraction for making CloudBoardJobHelperAPIClientProtocol instances
+package protocol CloudBoardJobHelperAPIClientFactoryProtocol: Sendable {
+    /// make a connection to a specific instance on this node identified by `uuid`
+    func localConnection(
+        _ uuid: UUID
+    ) async -> any CloudBoardJobHelperAPIClientProtocol
 }
 
-public enum CloudBoardDaemonToJobHelperMessage: Codable, Sendable, Hashable, CustomStringConvertible {
+/// Those parts of the JobHelper API relevant for the client to talk to the server
+package protocol CloudBoardJobHelperAPIClientToServerProtocol: Actor {
+    func invokeWorkloadRequest(_ request: CloudBoardDaemonToJobHelperMessage) async throws
+    func teardown() async throws
+    func abandon() async throws
+}
+
+/// call back notifications available to ``CloudBoardJobHelperAPIClientProtocol``
+package protocol CloudBoardJobHelperAPIClientDelegateProtocol: AnyObject, Sendable,
+CloudBoardJobHelperAPIServerToClientHandlerProtocol {
+    func cloudBoardJobHelperAPIClientSurpriseDisconnect()
+}
+
+/// Code only relevant for the 'owner' of the client that implements all the protocols
+/// applicable to the client.
+/// These are the setup ones which will be called once, the only non test implementation should be
+/// ``CloudBoardJobHelperAPIXPCClient``
+package protocol CloudBoardJobHelperAPIClientProtocol: CloudBoardJobHelperAPIClientToServerProtocol {
+    func set(delegate: CloudBoardJobHelperAPIClientDelegateProtocol) async
+    func connect() async
+}
+
+package struct WorkerAttestationInfo: ByteBufferCodable, Sendable, Hashable, CustomStringConvertible {
+    /// The id we used when requesting the worker, rather an something identifying the node itself
+    public var workerID: UUID
+    /// The id identifying the key within the ``attestationBundle`` on the worker
+    public var keyID: Data
+    /// The serialized bundle, so we can validate it, and pass it along in the REL
+    public var attestationBundle: Data
+    /// Present if response bypass was requested, this is then the OHTTP contextId
+    /// the bypass will be presented to the client on
+    public var bypassContextID: UInt32?
+    public var spanID: String?
+
+    public init(
+        workerID: UUID,
+        keyID: Data,
+        attestationBundle: Data,
+        bypassContextID: UInt32?,
+        spanID: String?
+    ) {
+        self.workerID = workerID
+        self.keyID = keyID
+        self.attestationBundle = attestationBundle
+        self.bypassContextID = bypassContextID
+        self.spanID = spanID
+    }
+
+    public var description: String {
+        """
+        worker: \(self.workerID), 
+        key ID: \(self.keyID), 
+        \(self.attestationBundle.count) bytes, 
+        bypassContextID: \((self.bypassContextID?.description ?? "nil"))
+        """
+    }
+
+    @inlinable
+    public func encode(to buffer: inout ByteBuffer) throws {
+        try self.workerID.encode(to: &buffer)
+        try self.keyID.encode(to: &buffer)
+        try self.attestationBundle.encode(to: &buffer)
+        try self.bypassContextID.encode(to: &buffer)
+        try self.spanID.encode(to: &buffer)
+    }
+
+    public init(from buffer: inout ByteBuffer) throws {
+        self.workerID = try .init(from: &buffer)
+        self.keyID = try .init(from: &buffer)
+        self.attestationBundle = try .init(from: &buffer)
+        self.bypassContextID = try .init(from: &buffer)
+        self.spanID = try .init(from: &buffer)
+    }
+}
+
+package enum CloudBoardDaemonToJobHelperMessage: ByteBufferCodable, Sendable, Hashable, CustomStringConvertible {
     public typealias KeyID = Data
 
     case warmup(WarmupData)
     case parameters(Parameters)
     case requestChunk(Data, isFinal: Bool)
+    case workerAttestation(WorkerAttestationInfo)
+    case workerResponseChunk(UUID, Data, isFinal: Bool)
+    case workerResponseClose(
+        UUID,
+        grpcStatus: Int,
+        grpcMessage: String?,
+        ropesErrorCode: UInt32?,
+        ropesErrorMessage: String?
+    )
+    case workerResponseEOF(UUID)
 
     public var description: String {
         switch self {
         case .warmup(let data):
             "warmup(\(data))"
         case .parameters(let parameters):
-            "parameters (\(parameters))"
+            "parameters(\(parameters))"
         case .requestChunk(let data, isFinal: let isFinal):
-            "requestChunk (\(data.count) bytes, isFinal: \(isFinal))"
+            "requestChunk(\(data.count) bytes, isFinal: \(isFinal))"
+        case .workerAttestation(let info):
+            "workerAttestation(\(info))"
+        case .workerResponseChunk(let workerID, let data, isFinal: let isFinal):
+            "workerResponseChunk(worker: \(workerID), \(data.count) bytes, isFinal: \(isFinal))"
+        case .workerResponseClose(
+            let workerID,
+            let grpcStatus,
+            let grpcMessage,
+            let ropesErrorCode,
+            let ropesErrorMessage
+        ):
+            "workerResponseClose(worker: \(workerID), gRPC status: \(grpcStatus), gRPC message: \(grpcMessage ?? "nil"), ROPES error code: \(ropesErrorCode ?? 0), ROPES message: \(ropesErrorMessage ?? " nil")"
+        case .workerResponseEOF(let workerID):
+            "workerResponseEOF(worker: \(workerID))"
+        }
+    }
+
+    public func encode(to buffer: inout ByteBuffer) throws {
+        switch self {
+        case .warmup(let warmupData):
+            buffer.writeInteger(0)
+            try warmupData.encode(to: &buffer)
+        case .parameters(let parameters):
+            buffer.writeInteger(1)
+            try parameters.encode(to: &buffer)
+        case .requestChunk(let data, isFinal: let isFinal):
+            buffer.writeInteger(2)
+            try data.encode(to: &buffer)
+            try isFinal.encode(to: &buffer)
+        case .workerAttestation(let attestationInfo):
+            buffer.writeInteger(3)
+            try attestationInfo.encode(to: &buffer)
+        case .workerResponseChunk(let uuid, let data, let isFinal):
+            buffer.writeInteger(4)
+            try uuid.encode(to: &buffer)
+            try data.encode(to: &buffer)
+            try isFinal.encode(to: &buffer)
+        case .workerResponseClose(let uuid, let grpcStatus, let grpcMessage, let ropesErrorCode, let ropesMessage):
+            buffer.writeInteger(5)
+            try uuid.encode(to: &buffer)
+            buffer.writeInteger(grpcStatus)
+            try grpcMessage.encode(to: &buffer)
+            try ropesErrorCode.encode(to: &buffer)
+            try ropesMessage.encode(to: &buffer)
+        case .workerResponseEOF(let uuid):
+            buffer.writeInteger(6)
+            try uuid.encode(to: &buffer)
+        }
+    }
+
+    public init(from buffer: inout ByteBuffer) throws {
+        guard let enumCase: Int = buffer.readInteger() else {
+            throw DecodingError.valueNotFound(
+                Self.self,
+                .init(codingPath: [], debugDescription: "no expected enum case")
+            )
+        }
+        switch enumCase {
+        case 0:
+            self = try .warmup(.init(from: &buffer))
+        case 1:
+            self = try .parameters(.init(from: &buffer))
+        case 2:
+            self = try .requestChunk(Data(from: &buffer), isFinal: .init(from: &buffer))
+        case 3:
+            self = try .workerAttestation(.init(from: &buffer))
+        case 4:
+            self = try .workerResponseChunk(
+                .init(from: &buffer),
+                .init(from: &buffer),
+                isFinal: .init(from: &buffer)
+            )
+        case 5:
+            let uuid = try UUID(from: &buffer)
+            guard let grpcStatus: Int = buffer.readInteger() else {
+                throw DecodingError.valueNotFound(
+                    Self.self,
+                    .init(
+                        codingPath: [ByteBufferCodingKey(stringValue: "grpcStatus")],
+                        debugDescription: "no expected integer"
+                    )
+                )
+            }
+            let grpcMessage: Optional<String> = try .init(from: &buffer)
+            let ropesErrorCode: Optional<UInt32> = try .init(from: &buffer)
+            let ropesMessage: Optional<String> = try .init(from: &buffer)
+            self = .workerResponseClose(
+                uuid,
+                grpcStatus: grpcStatus,
+                grpcMessage: grpcMessage,
+                ropesErrorCode: ropesErrorCode,
+                ropesErrorMessage: ropesMessage
+            )
+        case 6:
+            self = try .workerResponseEOF(.init(from: &buffer))
+        case let value:
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: [ByteBufferCodingKey(Self.self)],
+                debugDescription: "bad result enum case \(value)"
+            ))
         }
     }
 }
 
-public struct Parameters: Codable, Sendable, Hashable, CustomStringConvertible {
+/// What we expect from reponse bypass, we simplify the proto down to this
+package enum ResponseBypassMode: Sendable, ByteBufferCodable, CaseIterable {
+    /// no bypass is requested
+    case none
+    /// The worker compute node will construct an OHTTP response stream using:
+    /// Ciphersuite: The same ciphersuite used to unwrap the DEK
+    /// ikm: same ikm used to unwrap the DEK
+    /// responseNonce: a fixed single use value
+    case matchRequestCiphersuiteSharedAeadState
+
+    public var description: String {
+        return switch self {
+        case .none: "none"
+        case .matchRequestCiphersuiteSharedAeadState: "matchRequestCiphersuiteSharedAeadState"
+        }
+    }
+
+    /// We require multiple processes to agree on what "I want response bypass to happen"
+    /// to actually mean.
+    /// This is centralised here.
+    public init(requested: Bool) {
+        self = requested ? .matchRequestCiphersuiteSharedAeadState : .none
+    }
+
+    @inlinable
+    public func encode(to buffer: inout ByteBuffer) throws {
+        switch self {
+        case .none: buffer.writeInteger(0)
+        case .matchRequestCiphersuiteSharedAeadState:
+            buffer.writeInteger(1)
+        }
+    }
+
+    public init(from buffer: inout ByteBuffer) throws {
+        guard let enumCase: Int = buffer.readInteger() else {
+            throw DecodingError.valueNotFound(
+                Self.self,
+                .init(codingPath: [], debugDescription: "no expected enum case")
+            )
+        }
+        switch enumCase {
+        case 0:
+            self = .none
+        case 1:
+            self = .matchRequestCiphersuiteSharedAeadState
+        case let value:
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: [ByteBufferCodingKey(Self.self)],
+                debugDescription: "bad result enum case \(value)"
+            ))
+        }
+    }
+}
+
+/// Parameters message sent from cloudboardd to cb_jobhelper
+package struct Parameters: ByteBufferCodable, Sendable, Hashable, CustomStringConvertible {
     public var requestID: String
     public var oneTimeToken: Data
-    public var encryptedKey: EncryptedKey
-    public var parametersReceived: ContinuousClock.Instant
+    public var encryptedKey: SealedKey
+    public var parametersReceived: Date
     public var plaintextMetadata: PlaintextMetadata
+    public var traceContext: TraceContext
+
+    /// If set to something other than ``ResponseBypassMode.none`` this means response bypass is requested for this
+    /// specific sub request
+    public var responseBypassMode: ResponseBypassMode
+
+    /// If true the actual request payload will not be passed to this instance,
+    /// The use case is for the proxy, which does not need to see the request
+    public var requestBypassed: Bool = false
+
+    /// Should only ever be set for a proxy node, to request a NACK (An immediate empty REL and exit)
+    public var requestedNack: Bool = false
 
     public init(
         requestID: String,
         oneTimeToken: Data,
-        encryptedKey: EncryptedKey,
-        parametersReceived: ContinuousClock.Instant,
-        plaintextMetadata: PlaintextMetadata
+        encryptedKey: SealedKey,
+        parametersReceived: Date,
+        plaintextMetadata: PlaintextMetadata,
+        responseBypassMode: ResponseBypassMode,
+        requestBypassed: Bool,
+        requestedNack: Bool,
+        traceContext: TraceContext
     ) {
         self.requestID = requestID
         self.oneTimeToken = oneTimeToken
         self.encryptedKey = encryptedKey
         self.parametersReceived = parametersReceived
         self.plaintextMetadata = plaintextMetadata
+        self.responseBypassMode = responseBypassMode
+        self.requestBypassed = requestBypassed
+        self.requestedNack = requestedNack
+        self.traceContext = traceContext
     }
 
     public var description: String {
-        "Parameters(requestID: \(self.requestID), oneTimeToken: \(self.oneTimeToken.base64EncodedString()), encryptedKey: \(self.encryptedKey.keyID.base64EncodedString()), \(self.encryptedKey.keyID.count) bytes), parametersReceived: \(self.parametersReceived), plaintextMetadata: \(self.plaintextMetadata)"
+        """
+        Parameters(requestID: \(self.requestID),
+        oneTimeToken: \(self.oneTimeToken.base64EncodedString()),
+        encryptedKey: \(self.encryptedKey.keyID.base64EncodedString()), \(self.encryptedKey.key.count) bytes,
+        responseBypassMode: \(self.responseBypassMode.description))"),
+        requestBypassed: \(self.requestBypassed)"),
+        parametersReceived: \(self.parametersReceived),
+        plaintextMetadata: \(self.plaintextMetadata),
+        requestedNack: \(self.requestedNack),
+        traceContext: \(self.traceContext)
+        """
+    }
+
+    @inlinable
+    public func encode(to buffer: inout ByteBuffer) throws {
+        try self.requestID.encode(to: &buffer)
+        try self.oneTimeToken.encode(to: &buffer)
+        try self.encryptedKey.encode(to: &buffer)
+        try self.parametersReceived.encode(to: &buffer)
+        try self.plaintextMetadata.encode(to: &buffer)
+        try self.responseBypassMode.encode(to: &buffer)
+        try self.requestBypassed.encode(to: &buffer)
+        try self.requestedNack.encode(to: &buffer)
+        try self.traceContext.encode(to: &buffer)
+    }
+
+    public init(from buffer: inout ByteBuffer) throws {
+        self.requestID = try .init(from: &buffer)
+        self.oneTimeToken = try .init(from: &buffer)
+        self.encryptedKey = try .init(from: &buffer)
+        self.parametersReceived = try .init(from: &buffer)
+        self.plaintextMetadata = try .init(from: &buffer)
+        self.responseBypassMode = try .init(from: &buffer)
+        self.requestBypassed = try .init(from: &buffer)
+        self.requestedNack = try .init(from: &buffer)
+        self.traceContext = try .init(from: &buffer)
     }
 }
 
 extension Parameters {
-    public struct EncryptedKey: Codable, Sendable, Hashable {
+    package struct SealedKey: ByteBufferCodable, Sendable, Hashable {
         public var keyID: Data
         public var key: Data
 
@@ -74,11 +375,22 @@ extension Parameters {
             self.keyID = keyID
             self.key = key
         }
+
+        @inlinable
+        package func encode(to buffer: inout ByteBuffer) throws {
+            try self.keyID.encode(to: &buffer)
+            try self.key.encode(to: &buffer)
+        }
+
+        package init(from buffer: inout ByteBuffer) throws {
+            self.keyID = try .init(from: &buffer)
+            self.key = try .init(from: &buffer)
+        }
     }
 }
 
 extension Parameters {
-    public struct PlaintextMetadata: Codable, Sendable, Hashable {
+    package struct PlaintextMetadata: ByteBufferCodable, Sendable, Hashable {
         public var bundleID: String
         public var bundleVersion: String
         public var featureID: String
@@ -104,30 +416,63 @@ extension Parameters {
             self.workloadParameters = workloadParameters
             self.automatedDeviceGroup = automatedDeviceGroup
         }
+
+        @inlinable
+        public func encode(to buffer: inout ByteBuffer) throws {
+            try self.automatedDeviceGroup.encode(to: &buffer)
+            try self.bundleID.encode(to: &buffer)
+            try self.bundleVersion.encode(to: &buffer)
+            try self.clientInfo.encode(to: &buffer)
+            try self.featureID.encode(to: &buffer)
+            try self.workloadType.encode(to: &buffer)
+            try self.workloadParameters.encode(to: &buffer)
+        }
+
+        public init(from buffer: inout ByteBuffer) throws {
+            self.automatedDeviceGroup = try String(from: &buffer)
+            self.bundleID = try String(from: &buffer)
+            self.bundleVersion = try String(from: &buffer)
+            self.clientInfo = try String(from: &buffer)
+            self.featureID = try String(from: &buffer)
+            self.workloadType = try String(from: &buffer)
+            self.workloadParameters = try [String: [String]](from: &buffer)
+        }
+    }
+
+    package struct TraceContext: ByteBufferCodable, Sendable, Hashable {
+        public var traceID: String
+        public var spanID: String
+
+        public init(
+            traceID: String,
+            spanID: String
+        ) {
+            self.traceID = traceID
+            self.spanID = spanID
+        }
+
+        @inlinable
+        public func encode(to buffer: inout ByteBuffer) throws {
+            try self.traceID.encode(to: &buffer)
+            try self.spanID.encode(to: &buffer)
+        }
+
+        public init(from buffer: inout ByteBuffer) throws {
+            self.traceID = try String(from: &buffer)
+            self.spanID = try String(from: &buffer)
+        }
     }
 }
 
-public struct WarmupData: Codable, Sendable, Hashable, CustomStringConvertible {
-    public var setupMessageReceived: ContinuousClock.Instant
-
-    public init(
-        setupMessageReceived: ContinuousClock.Instant
-    ) {
-        self.setupMessageReceived = setupMessageReceived
-    }
+package struct WarmupData: ByteBufferCodable, Sendable, Hashable, CustomStringConvertible {
+    public init() {}
 
     public var description: String {
-        return "WarmupData(setupMessageReceived: \(self.setupMessageReceived))"
+        return "WarmupData"
     }
-}
 
-public protocol CloudBoardJobHelperAPIClientToServerProtocol: Actor {
-    func invokeWorkloadRequest(_ request: CloudBoardDaemonToJobHelperMessage) async throws
-    func teardown() async throws
-    func abandon() async throws
-}
+    @inlinable
+    public func encode(to _: inout ByteBuffer) throws {}
 
-public protocol CloudBoardJobHelperAPIClientDelegateProtocol: AnyObject, Sendable,
-CloudBoardJobHelperAPIServerToClientProtocol {
-    func cloudBoardJobHelperAPIClientSurpriseDisconnect()
+    public init(from _: inout ByteBuffer) throws {}
 }

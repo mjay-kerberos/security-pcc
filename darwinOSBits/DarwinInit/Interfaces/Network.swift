@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -26,6 +26,7 @@ import Darwin
 import DarwinPrivate
 import Darwin.POSIX.sys.socket
 import libnarrativecert
+import RegexBuilder
 
 enum Network {
     static let logger = Logger.network
@@ -36,23 +37,23 @@ enum Network {
         return URLSession(configuration: configuration)
     }()
 
-    private class TimeoutDelegate: NSObject, URLSessionTaskDelegate {
-        let timeout: TimeInterval
+    private class DataDelegate: NSObject, URLSessionTaskDelegate {
+        let timeout: TimeInterval?
+        public let cred: URLCredential?
         
-        init(timeout t: Duration) {
-            self.timeout = TimeInterval(t.components.seconds) + Double(t.components.attoseconds)/1e18
+        public init(timeout t: Duration?, cred: URLCredential?) {
+            self.timeout = if let t {
+                TimeInterval(t.components.seconds) + Double(t.components.attoseconds)/1e18
+            } else {
+                nil
+            }
+            self.cred = cred
         }
 
         func urlSession(_ session: URLSession, didCreateTask task: URLSessionTask) {
-            logger.debug("ulrSession.didCreateTask: \(task), setting timeout to \(self.timeout)")
+            guard let timeout = self.timeout else { return }
+            logger.debug("ulrSession.didCreateTask: \(task), setting timeout to \(timeout)")
             task._timeoutIntervalForResource = timeout
-        }
-    }
-    
-    private class NarrativeURLSessionDelegate: NSObject, URLSessionTaskDelegate {
-        public let cred: URLCredential?
-        public init(cred: URLCredential?) {
-            self.cred = cred
         }
 
         public func urlSession(
@@ -68,11 +69,231 @@ enum Network {
         }
     }
 
+    private static var narrativeCredential : URLCredential? = {
+        // Try to fetch Narrative cert from key chain for authenticated CDN downloads if acdc actor identity configured
+        let cert = NarrativeCert(domain: .acdc, identityType: .actor)
+        let credential = cert.getCredential()
+        if credential == nil {
+            logger.debug("Failed to create URL credential for auth challenge. Narrative identity may not be configured properly.")
+        } else {
+            logger.debug("Successfully created URL credential for auth challenge")
+        }
+        return credential
+    }()
+
+    private actor RangeTracker {
+        let chunkSize: UInt64
+        var currentOffset: UInt64
+        
+        init(chunkSize: UInt64) {
+            self.chunkSize = chunkSize
+            self.currentOffset = 0
+        }
+        
+        // Blindly return the next possible range without knowing full content length
+        func nextRange() -> ClosedRange<UInt64> {
+            let startRange = currentOffset
+            let endRange = currentOffset + chunkSize - 1
+            // Update offset for next chunk!
+            currentOffset += chunkSize
+            return startRange...endRange
+        }
+    }
+
+    private static func writeChunk(to fd: FileDescriptor, data: Data, at offset: Int64) throws {
+        let bytesWritten = try data.withUnsafeBytes() {
+            try fd.write(toAbsoluteOffset: offset, $0, retryOnInterrupt: true)
+        }
+        guard bytesWritten == data.count else {
+            throw Network.Error.dataTransformFailed(.incomplete("\(bytesWritten) bytes written does not match expected \(data.count)"))
+        }
+    }
+
+    private static func canDoRangeRequests(for url: URL, chunkSize: UInt64?) async -> Bool {
+        // For clients who specify a chunk size, we trust that their server supports range requests
+        if let chunkSize {
+            logger.info("Range request chunk size of \(chunkSize) specified. Assuming range requests are supported for \(url)")
+            return true
+        }
+
+        // Otherwise, verify range request support using a HEAD request
+        var response : HTTPURLResponse
+        do {
+            response = try await head(from: url) as HTTPURLResponse
+        } catch {
+            logger.error("Failed to perfom HEAD request to \(url): \(error)")
+            return false
+        }
+
+        guard let acceptRanges = response.value(forHTTPHeaderField: "Accept-Ranges") else {
+            logger.error("Server does not specify \"Accept-Ranges\"")
+            return false
+        }
+
+        // Typically, if a server doesn't support ranges, it omits Accept-Ranges, but sometimes sets to "none"
+        guard acceptRanges == "bytes" else {
+            logger.error("Server specified \"Accept-Ranges\"=\(acceptRanges) when \"bytes\" was expected")
+            return false
+        }
+        logger.info("Server specified \"Accept-Ranges\"=\(acceptRanges)")
+
+        // Also read the content length for debugging purposes
+        if let contentLength = response.value(forHTTPHeaderField: "Content-Length") {
+            logger.debug("Server specified \"Content-Length\"=\(contentLength)")
+        }
+
+        return true
+    }
+
+    
+    private static func getContentRangeComponents(from contentRangeString: String) -> ContentRangeComponents? {
+        let startRef = Reference(Substring.self)
+        let endRef = Reference(Substring.self)
+        let totalRef = Reference(Substring.self)
+        let contentRangePattern = Regex {
+            Anchor.startOfLine
+            "bytes "
+            Capture(as: startRef) { OneOrMore(.digit) }
+            "-"
+            Capture(as: endRef) { OneOrMore(.digit) }
+            "/"
+            Capture(as: totalRef) { OneOrMore(.digit) }
+            Anchor.endOfLine
+        }
+
+        guard let match = contentRangeString.firstMatch(of: contentRangePattern) else {
+            logger.error("Failed to match Content-Range pattern in \(contentRangeString)")
+            return nil
+        }
+
+        let start = String(match[startRef])
+        let end = String(match[endRef])
+        let total = String(match[totalRef])
+        logger.info("Matched start: \(start), end: \(end), total: \(total) in Content-Range string: \(contentRangeString)")
+
+        guard let startValue = UInt64(start), let endValue = UInt64(end), let totalValue = UInt64(total) else {
+            logger.error("Failed to convert Content-Range string components to UInt64")
+            return nil
+        }
+        return ContentRangeComponents(start: startValue, end: endValue, total: totalValue)
+    }
+
+    private static func downloadRange(
+        at url: URL,
+        range: ClosedRange<UInt64>,
+        attempts maxAttempts: Int = 1,
+        backoff: BackOff = .linear(.seconds(10), offset: .seconds(5)),
+        background: Bool? = nil,
+    ) async throws -> RangeResult {
+        var request = URLRequest(url: url)
+        // disable automatic urlsession 'Accept-Encoding: gzip'
+        request.addValue("identity", forHTTPHeaderField: "Accept-Encoding")
+
+        // add range header for current range to request
+        let rangeHeaderValue = "bytes=\(range.lowerBound)-\(range.upperBound)"
+        request.setValue(rangeHeaderValue, forHTTPHeaderField: "Range")
+
+        if background == true {
+            logger.info("Using background network service type to fetch range: (\(range.lowerBound)-\(range.upperBound))")
+            request.networkServiceType = .background
+        }
+
+        let expectedChunkSize = UInt64(range.count)
+        // Perform data chunk fetch in retry loop using maxAttempts and NarrativeAuth (because this is likely an auth CDN download)
+        // Specify expected content length for chunk so perform can retry if incomplete data received
+        var data: Data?
+        var response: HTTPURLResponse
+        do {
+            (data, response) = try await perform(request: request, attempts: maxAttempts, timeout: nil, syncTime: false, useNarrativeAuth: true, expectedContentLength: expectedChunkSize)
+        } catch let error as Network.Error {
+            switch error {
+            // If perform threw due to a 416, a range was requested beyond the file size
+            case .requestedRangeNotSatisfiable(let code):
+                logger.log("Recieved \(code) requested range not satisfiable for range (\(range.lowerBound)-\(range.upperBound))")
+                // Pass this along so we stop making further requests
+                response = HTTPURLResponse(url: url, statusCode: code, httpVersion: nil, headerFields: nil)!
+            default:
+                throw error
+            }
+        }
+        return RangeResult(data: data, response: response, offset: range.lowerBound)
+    }
+
+    static func downloadRanges(
+        at url: URL,
+        to destinationPath: FilePath,
+        attempts: Int = 1,
+        backoff: BackOff = .linear(.seconds(10), offset: .seconds(5)),
+        background: Bool? = nil,
+        maxActiveTasks: Int,
+        chunkSize: UInt64
+    ) async throws {
+        // Create file where data chunks will be written to ahead of time
+        var fd: FileDescriptor
+        do {
+            fd = try FileDescriptor.open(
+                destinationPath, .writeOnly,
+                options: [.create, .truncate],
+                permissions: .fileDefault)
+        } catch {
+            throw Network.Error.fileCreationFailed(error)
+        }
+        defer {
+            do {
+                try fd.close()
+            } catch {
+                logger.error("Failed to close file descriptor for writing to \(destinationPath): \(error)")
+            }
+        }
+
+        // Init range tracker actor for determining offset of next chunk to download
+        let rangeTracker = RangeTracker(chunkSize: chunkSize)
+
+        // Sync with timed once before making all range requests (we won't sync again for each range)
+        if !Time.isSynchronized {
+            logger.warning("Time is not synced before making network request, continuing")
+        }
+
+        logger.log("Downloading ranges from [\(url)] to [\(destinationPath)] using max of \(maxActiveTasks) active tasks...")
+        let _ = try await withThrowingTaskGroup { group in
+            // Create up to kMaxActiveTasks to fetch chunks
+            for _ in 0..<maxActiveTasks {
+                // Seed maxActiveTasks with potential ranges to fetch. Since nextRange is oblivious to content length,
+                // any extra tasks will immediately be served a 416 and no data
+                let range = await rangeTracker.nextRange()
+                group.addTask {
+                    logger.info("Adding task to fetch range: (\(range.lowerBound)-\(range.upperBound))")
+                    return try await downloadRange(at: url, range: range, attempts: attempts, backoff: backoff, background: background)
+                }
+            }
+            for try await result in group {
+                // Verify we actually got data and not nil with 416 before writing to disk
+                // TODO: Note 206 check is redundant since we check this in perform() - can maybe remove?
+                if (result.data != nil) && (result.response.statusCode == 206) {
+                    logger.info("Received \(result.response.statusCode) status code for \(result.data!.count) byte chunk, writing to disk at offset \(result.offset)")
+                    try writeChunk(to: fd, data: result.data!, at: Int64(result.offset))
+                }
+
+                // If a 416 was returned, do NOT request another range
+                if result.response.statusCode != 416 {
+                    let range = await rangeTracker.nextRange()
+                    group.addTask {
+                        logger.info("Adding task to fetch range: (\(range.lowerBound)-\(range.upperBound))")
+                        return try await downloadRange(at: url, range: range, attempts: attempts, backoff: backoff, background: background)
+                    }
+                } else {
+                    logger.log("Received 416 status code, no more data to fetch!")
+                }
+            }
+        }
+    }
+
     static func download(
         from url: URL,
         to path: FilePath,
         attempts maxAttempts: Int = 1,
-        backoff: BackOff = .linear(.seconds(10), offset: .seconds(5))
+        backoff: BackOff = .linear(.seconds(10), offset: .seconds(5)),
+        background: Bool? = nil
     ) async throws {
         if !Time.isSynchronized {
             logger.warning("Time is not synced before making network request, continuing")
@@ -84,15 +305,14 @@ enum Network {
         // disable automatic urlsession 'Accept-Encoding: gzip'
         request.addValue("identity", forHTTPHeaderField: "Accept-Encoding")
 
-        // Attempt to fetch Narrative cert from key chain for authenticated CDN downloads if acdc actor identity has been configured
-        let cert = NarrativeCert(domain: .acdc, identityType: .actor)
-        let credential = cert.getCredential()
-        if credential == nil {
-            logger.debug("Failed to create URL credential for auth challenge. Narrative identity may not be configured properly.")
-        } else {
-            logger.debug("Successfully created URL credential for auth challenge")
+        if background == true {
+            logger.info("Using background network service type to download \(url)")
+            request.networkServiceType = .background
         }
-        let delegate = NarrativeURLSessionDelegate(cred: credential)
+
+        // Init delegate with Narrative credential in case this is a authenticated CDN download and no timeout
+        let credential = narrativeCredential
+        let delegate = DataDelegate(timeout: nil, cred: credential)
 
         try await retry(count: maxAttempts, backoff: backoff) { attempt in
             let fileURL: URL
@@ -127,7 +347,7 @@ enum Network {
             do {
                 try source.copy(to: path)
             } catch {
-                throw Network.Error.dataTransformFailed(error)
+                throw Network.Error.dataTransformFailed(.error(error))
             }
 
         } shouldRetry: { error in
@@ -138,12 +358,15 @@ enum Network {
             return error.shouldRetry
         }
     }
-    
+
     static func downloadItem(
         at url: URL,
         to destinationDirectory: FilePath? = nil,
         attempts: Int = 3,
-        backoff: BackOff = .linear(.seconds(10), offset: .seconds(5))
+        backoff: BackOff = .linear(.seconds(10), offset: .seconds(5)),
+        background: Bool? = nil,
+        maxActiveTasks: Int? = nil,
+        chunkSize: UInt64? = nil
     ) async -> FilePath? {
         guard let destinationDirectory = destinationDirectory ?? FilePath.createTemporaryDirectory() else {
             return nil
@@ -166,13 +389,20 @@ enum Network {
             }
         } else {
             do {
-                try await download(from: url, to: destinationPath, attempts: attempts, backoff: backoff)
+                // Determine if range requests are possible. If not, just download to disk using one request to avoid buffering large file into memory in downloadRanges. If supported, go for it!
+                if await canDoRangeRequests(for: url, chunkSize: chunkSize) {
+                    logger.log("Range requests supported for \(url). Will download using range requests...")
+                    try await downloadRanges(at: url, to: destinationPath, attempts: attempts, backoff: backoff, maxActiveTasks: maxActiveTasks ?? kMaxActiveTasks, chunkSize: chunkSize ?? kCDNChunkSize)
+                } else {
+                    logger.log("Range requests unsupported for \(url). Will download full file using one request...")
+                    try await download(from: url, to: destinationPath, attempts: attempts, backoff: backoff, background: background)
+                }
             } catch {
                 logger.error("Download failed: \(error.localizedDescription)")
                 return nil
             }
         }
-
+        logger.log( "Successfully downloaded \(url) to \(destinationPath)")
         return destinationPath
     }
 
@@ -182,21 +412,33 @@ enum Network {
     /// - parameter attempts: The maximum number of retries to attempt
     /// - parameter timeout: Maximum time allowed for a single attempt
     /// - parameter backoff: The backoff strategy to use when retrying
+    /// - parameter syncTime: Whether we should attempt to sync with timed
+    /// - parameter useNarrativeAuth: Whether we should use Narrative mtls in response to authentication challenges
+    /// - parameter expectedContentLength:The expected content length of data, used by range requests
     ///
     /// - Returns: The contents of the URL specified by the request as a `Data` instance
     private static func perform(
         request: URLRequest,
         attempts maxAttempts: Int = 3,
-        timeout: Duration = .seconds(10),
-        backoff: BackOff = .linear(.seconds(10), offset: .seconds(5))
-    ) async throws -> Data {
-        if !Time.isSynchronized {
+        timeout: Duration? = .seconds(10),
+        backoff: BackOff = .linear(.seconds(10), offset: .seconds(5)),
+        syncTime: Bool = true,
+        useNarrativeAuth: Bool = false,
+        expectedContentLength: UInt64? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
+        // We don't want to sync with timed if this is a range request!
+        if syncTime && !Time.isSynchronized {
             logger.warning("Time is not synced before making network request, continuing")
         }
         let id = UUID()
         logger.log("Performing HTTP request \(id) \(request.logDescription)")
        
-        let sessionDelegate = TimeoutDelegate(timeout: timeout)
+        var credential: URLCredential?
+        // Don't bother attempting to fetch Narrative cert from keychain if this is just a GET, POST, etc
+        if useNarrativeAuth {
+            credential = narrativeCredential
+        }
+        let sessionDelegate = DataDelegate(timeout: timeout, cred: credential)
         return try await retry(count: maxAttempts, backoff: backoff) { attempt in
             let data: Data
             let response: URLResponse
@@ -211,11 +453,44 @@ enum Network {
                 throw Network.Error.noResponse
             }
 
+            // Servers that support ranges will typically send a 416 when you request a range starting beyond the file size
+            // Throw a specific error indicating this for callers doing range request downloads
+            guard httpResponse.statusCode != 416 else {
+                throw Network.Error.requestedRangeNotSatisfiable(httpResponse.statusCode)
+            }
+
             guard (200...299).contains(httpResponse.statusCode) else {
                 throw Network.Error.badResponse(httpResponse.statusCode)
             }
 
-            return data
+            // If this is a range request with expected content length, need to do some special error handling
+            if let expectedContentLength {
+                // Range requests should receive a 206 from server if supported. 200 is unacceptable.
+                // Note, as long as the range started within the file size, we expect a 206
+                guard httpResponse.statusCode == 206 else {
+                    throw Network.Error.badResponse(httpResponse.statusCode)
+                }
+
+                var actualExpected = expectedContentLength
+                // Extract the value of "Content-Range" header with form "bytes <start byte>-<end byte>/<total bytes>"
+                guard let contentRange = httpResponse.value(forHTTPHeaderField: "Content-Range") else {
+                    throw Network.Error.noData
+                }
+                // Extract the start, end, and total bytes from Content-Range
+                guard let components = getContentRangeComponents(from: contentRange) else {
+                    throw Network.Error.dataTransformFailed(.incomplete("\"Content-Range\" header value not in expected form"))
+                }
+                // If this is the last chunk and total bytes are not a perfect multiple of expected, adjust the expected size
+                if (components.end == components.total - 1) && (components.total % expectedContentLength != 0) {
+                    actualExpected = components.total % expectedContentLength
+                }
+                // If we received incomplete data for this range, we should retry
+                guard actualExpected == UInt64(data.count) else {
+                    throw Network.Error.incomplete
+                }
+            }
+
+            return (data, httpResponse)
 
         } shouldRetry: { error in
             logger.error("Request (\(id)) attempt failed: \(error.localizedDescription)")
@@ -237,7 +512,8 @@ enum Network {
         var urlRequest = URLRequest(url: url)
         urlRequest.httpBody = try JSONEncoder().encode(request)
         urlRequest.httpMethod = "POST"
-        return try await perform(request: urlRequest, attempts: attempts, timeout: timeout, backoff: backoff)
+        let (data, _) = try await perform(request: urlRequest, attempts: attempts, timeout: timeout, backoff: backoff)
+        return data
     }
 
     /// Fetches the content of the URL via a HTTP GET request.
@@ -251,7 +527,8 @@ enum Network {
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "GET"
         urlRequest.addHeaders(additionalHTTPHeaders: additionalHTTPHeaders)
-        return try await perform(request: urlRequest, attempts: attempts, timeout: timeout, backoff: backoff)
+        let (data, _) = try await perform(request: urlRequest, attempts: attempts, timeout: timeout, backoff: backoff)
+        return data
     }
     
     /// Performs a HTTP PUT request to the given URL.
@@ -265,7 +542,23 @@ enum Network {
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "PUT"
         urlRequest.addHeaders(additionalHTTPHeaders: additionalHTTPHeaders)
-        return try await perform(request: urlRequest, attempts: attempts, timeout: timeout)
+        let (data, _) = try await perform(request: urlRequest, attempts: attempts, timeout: timeout)
+        return data
+    }
+    
+    /// Performs a HTTP HEAD request to the given URL
+    static func head(
+        from url: URL,
+        additionalHTTPHeaders: [String: String] = [:],
+        attempts: Int = 3,
+        timeout: Duration = .seconds(10),
+        backoff: BackOff = .linear(.seconds(10), offset: .seconds(5))
+    ) async throws -> HTTPURLResponse {
+        var urlRequest = URLRequest(url: url)
+        urlRequest.httpMethod = "HEAD"
+        urlRequest.addHeaders(additionalHTTPHeaders: additionalHTTPHeaders)
+        let (_, response) = try await perform(request: urlRequest, attempts: attempts, timeout: timeout, useNarrativeAuth: true)
+        return response
     }
 
     // Helper for getting Mellanox interface bsd name on J236
@@ -393,13 +686,39 @@ extension Network {
 }
 
 extension Network {
+    internal struct RangeResult {
+        let data: Data?
+        let response: HTTPURLResponse
+        let offset: UInt64
+        
+    }
+}
+
+extension Network {
+    internal struct ContentRangeComponents {
+        let start: UInt64
+        let end: UInt64
+        let total: UInt64
+    }
+}
+
+extension Network {
+    internal enum DataTransformError {
+        case error(Swift.Error)
+        case incomplete(String)
+    }
+}
+
+extension Network {
     internal enum Error: Swift.Error {
         case incomplete
         case connectionError(Swift.Error)
         case noResponse
         case badResponse(Int)
         case noData
-        case dataTransformFailed(Swift.Error)
+        case dataTransformFailed(DataTransformError)
+        case fileCreationFailed(Swift.Error)
+        case requestedRangeNotSatisfiable(Int)
     }
 }
 
@@ -416,8 +735,17 @@ extension Network.Error: LocalizedError {
             return "Received bad response \(code) from server"
         case .noData:
             return "Received no data from server"
-        case let .dataTransformFailed(error):
-            return "Failed to handle received data: \(error.localizedDescription)"
+        case let .dataTransformFailed(dataTransformError):
+            switch dataTransformError {
+            case .error(let error):
+                return "Failed to handle received data: \(error.localizedDescription)"
+            case .incomplete(let description):
+                return "Failed to handle received data: \(description)"
+            }
+        case let .fileCreationFailed(error):
+            return "Failed to create file for downloading data: \(error.localizedDescription)"
+        case let .requestedRangeNotSatisfiable(code):
+            return "Received \(code) requested range is not satisfiable from server"
         }
     }
 }

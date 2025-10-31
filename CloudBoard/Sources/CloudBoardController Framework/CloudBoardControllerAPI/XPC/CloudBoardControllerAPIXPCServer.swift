@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,7 +14,7 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+package import CloudBoardAsyncXPC
 
 public actor CloudBoardControllerAPIXPCServer {
     private let listener: CloudBoardAsyncXPCListener
@@ -57,7 +57,7 @@ extension CloudBoardControllerAPIXPCServer: CloudBoardControllerAPIServerToClien
 }
 
 extension CloudBoardControllerAPIXPCServer: CloudBoardControllerAPIServerProtocol {
-    public func connect(
+    package func connect(
         listenerDelegate: CloudBoardAsyncXPCListenerDelegate,
         serverDelegate: CloudBoardControllerAPIServerDelegateProtocol
     ) async {

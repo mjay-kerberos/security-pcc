@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -26,6 +26,8 @@
 #include <image4/trust_evaluation.h>
 
 static const image4_coprocessor_t* SWIFT_IMAGE4_COPROCESSOR_AP = (&_image4_coprocessor_ap);
+
+static const image4_coprocessor_t* SWIFT_IMAGE4_COPROCESSOR_AP_LOCAL = (&_image4_coprocessor_ap_local);
 
 static const image4_coprocessor_t* SWIFT_IMAGE4_COPROCESSOR_CRYPTEX1 = (&_image4_coprocessor_cryptex1);
 

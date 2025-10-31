@@ -1,4 +1,4 @@
-<!-- Copyright © 2024 Apple Inc. All Rights Reserved. -->
+<!-- Copyright © 2025 Apple Inc. All Rights Reserved. -->
 
 <!-- APPLE INC. -->
 <!-- PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT -->
@@ -49,6 +49,7 @@
 		<string>com.apple.cloudos.cb_attestationd</string>
 		<string>com.apple.cloudos.cb_jobhelper</string>
 		<string>com.apple.acdc.cloudmetricsd</string>
+		<string>com.apple.dnssd.service</string>
 	</array>
 	<key>com.apple.private.sandbox.profile:embedded</key>
 	<string>apple-cloud</string>
@@ -88,5 +89,11 @@
 	<array>
 		<string>/private/var/db/secureconfig/</string>
 	</array>
+    <key>com.apple.security.exception.files.home-relative-path.read-write</key>
+    <array>
+        <string>Library/Caches/com.apple.cloudos.cloudboardd/</string>
+    </array>
+    <key>com.apple.security.ts.tmpdir</key>
+    <string>com.apple.cloudos.cloudboardd</string>
 </dict>
 </plist>

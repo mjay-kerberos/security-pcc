@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -21,8 +21,15 @@
 
 /// An attestor intended for use with hardware ceremonies.
 public struct CeremonyAttestor: Attestor {
+
     @_spi(Private)
     public var inner: NodeAttestor
+
+    public var attestingKey: SecKey {
+        get throws {
+            try inner.attestingKey
+        }
+    }
 
     @_spi(Private)
     public var assetProvider: any AttestationAssetProvider {
@@ -44,12 +51,12 @@ public struct CeremonyAttestor: Attestor {
         }
     }
 
-    var sepAttestationImpl: any SEP.AttestationProtocol {
+    public internal(set) var sepProtocol: any SEP.AttestationProtocol {
         get {
-            self.inner.sepAttestationImpl
+            self.inner.sepProtocol
         }
         set {
-            self.inner.sepAttestationImpl = newValue
+            self.inner.sepProtocol = newValue
         }
     }
 
@@ -65,32 +72,17 @@ public struct CeremonyAttestor: Attestor {
     ///   - key: The key to use for signing the attestation.
     ///   - expiration: The expiration date for the attestation.
     ///   - nonce: The nonce to use for the attestation.
-    public func attest(key: SecKey, expiration: Date, nonce: Data?) async throws -> AttestationBundle {
-        try await self.inner.attest(key: key, expiration: expiration, nonce: nonce)
+    public func attest(key: SecKey, using: SecKey, expiration: Date, nonce: Data?) async throws -> AttestationBundle {
+        try await self.inner.attest(key: key, using: using, expiration: expiration, nonce: nonce)
     }
 }
 
 // MARK: - CeremonyAssetProvider
 
 extension CeremonyAttestor {
-    @_spi(Private)
-    public struct AssetProvider: AttestationAssetProvider {
-        public var apTicket: Data {
-            get throws {
-                try inner.apTicket
-            }
-        }
-
+    struct AssetProvider: AttestationAssetProvider {
         public var provisioningCertificateChain: [Data] {
             []
         }
-
-        public var sealedHashEntries: [UUID: [SEP.SealedHash.Entry]] {
-            get throws {
-                try inner.sealedHashEntries
-            }
-        }
-
-        public var inner: DefaultAssetProvider = DefaultAssetProvider()
     }
 }

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,7 +14,7 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+package import CloudBoardAsyncXPC
 import os
 
 /// An XPC connection to the client.
@@ -65,7 +65,7 @@ public actor ConfigurationAPIXPCServer {
         get async { await self.listener.endpoint }
     }
 
-    public init(
+    package init(
         listener: CloudBoardAsyncXPCListener,
         delegate: ConfigurationAPIServerDelegateProtocol? = nil
     ) {
@@ -158,7 +158,7 @@ extension ConfigurationAPIXPCServer: ConfigurationAPIServerProtocol {
 }
 
 extension ConfigurationAPIXPCServer: CloudBoardAsyncXPCListenerDelegate {
-    public func invalidatedConnection(_ connection: CloudBoardAsyncXPCConnection) async {
+    package func invalidatedConnection(_ connection: CloudBoardAsyncXPCConnection) async {
         guard let delegate = self.delegate else {
             Self.logger.error("No delegate set.")
             return

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -15,6 +15,7 @@
 // Copyright © 2024 Apple. All rights reserved.
 
 import CloudBoardMetrics
+import Foundation
 
 private let prefix = "cb_attestationd"
 
@@ -102,10 +103,101 @@ enum Metrics {
         }
     }
 
+    enum CloudBoardAttestationDaemon {
+        struct PhysicalMemoryFootprintGauge: Gauge {
+            static let label: MetricLabel = "\(prefix)_physical_memory_footprint_bytes"
+            var value: Int
+        }
+
+        struct LifetimeMaxPhysicalMemoryFootprintGauge: Gauge {
+            static let label: MetricLabel = "\(prefix)_lifetime_max_physical_memory_footprint_bytes"
+            var value: Int
+        }
+    }
+
     enum CloudBoardAttestationServer {
         struct KeyRotationCounter: Counter {
             static let label: MetricLabel = "\(prefix)_key_rotated_total"
             var action: CounterAction
+        }
+    }
+
+    enum TransparencyLog {
+        struct TransparencyLogCounter: Counter {
+            static let label: MetricLabel = "\(prefix)_transparency_log_total"
+            var action: CounterAction
+        }
+
+        struct TransparencyLogErrorCounter: ErrorCounter {
+            static let label: MetricLabel = "\(prefix)_transparency_log_failed_total"
+            var dimensions: MetricDimensions<DefaultErrorDimensionKeys>
+            var action: CounterAction
+        }
+
+        struct TransparencyLogRetryCounter: Counter {
+            static let label: MetricLabel = "\(prefix)_transparency_log_retry_total"
+            var action: CounterAction
+        }
+    }
+
+    enum CloudAttestationValidator {
+        enum InCache: String, RawRepresentable {
+            case miss // total miss, started new validation
+            case hit // cache hit - ver cheap
+            case deduped // miss, but another validaiton already started, awaiting that
+        }
+
+        enum DimensionKey: String, RawRepresentable {
+            case inCache
+        }
+
+        /// Number of validated entries
+        struct WorkerValidationCacheCountGauge: Gauge {
+            static let label: MetricLabel = "\(prefix)_compute_node_attestation_cache_validated_count"
+            var value: Double
+        }
+
+        /// Number of entries being validated at this point
+        struct WorkerValidationCacheValidatingCountGauge: Gauge {
+            static let label: MetricLabel = "\(prefix)_compute_node_attestation_cache_validating_count"
+            var value: Double
+        }
+
+        struct ValidationCounter: Counter {
+            static let label: MetricLabel = "\(prefix)_compute_node_attestation_validation_total"
+            var action: CounterAction
+            var dimensions: MetricDimensions<DimensionKey>
+            init(action: CounterAction, inCache: InCache) {
+                self.action = action
+                self.dimensions = Self.makeDimensions(inCache: inCache)
+            }
+
+            /// useful for unit test assertions
+            static func makeDimensions(inCache: InCache) -> MetricDimensions<DimensionKey> {
+                [
+                    .inCache: inCache.rawValue,
+                ]
+            }
+        }
+
+        struct FailedValidationCounter: ErrorCounter {
+            static let label: MetricLabel = "\(prefix)_compute_node_attestation_failed_validation_total"
+            var dimensions: MetricDimensions<DefaultErrorDimensionKeys>
+            var action: CounterAction
+        }
+
+        struct ValidationDurationHistogram: Histogram {
+            static let label: MetricLabel = "\(prefix)_compute_node_attestation_validation_seconds"
+            static let buckets: HistogramBuckets = .keyAttestationTime
+            var dimensions: MetricDimensions<DimensionKey>
+            var value: Double
+
+            init(duration: Duration, inCache: InCache) {
+                self.value = duration.seconds
+                self.dimensions = [
+                    .inCache: inCache.rawValue,
+                ]
+            }
         }
     }
 }

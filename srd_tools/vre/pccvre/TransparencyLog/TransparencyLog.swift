@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -42,6 +42,9 @@ struct TransparencyLog: Sendable {
         self.environment.transparencyPrimaryTree ? .privateCloudCompute : .privateCloudComputeInternal
     }
 
+    // supported protocol version of Transparency Log requests
+    static let protocolVersion = TxPB_ProtocolVersion.v3
+
     static let atLogType: TxPB_LogType = .atLog
     static let requestUUIDHeader = "X-Apple-Request-UUID"
 
@@ -49,20 +52,17 @@ struct TransparencyLog: Sendable {
     static var traceLog: Bool = false // include (excessive) debugging messages of Transparency Log calls
 
     let environment: Environment
-    let tlsInsecure: Bool // don't verify certificates; use "http:" in URI to skip TLS altogether
     let instanceUUID: UUID // passed into upstream API (for logging)
     var ktInitBag: KTInitBag? // KT Init Bag (links to Transparency endpoints for selected env/application)
-    var useIdentity: Bool { !self.tlsInsecure && self.environment != .production } // for mTLS
+    var useIdentity: Bool { self.environment != .production } // for mTLS
 
     init(
         environment: Environment,
         altKtInitEndpoint: URL? = nil,
-        tlsInsecure: Bool = false,
         loadKtInitBag: Bool = true,
         traceLog: Bool = false
     ) async throws {
         self.environment = environment
-        self.tlsInsecure = tlsInsecure
         self.instanceUUID = UUID()
 
         TransparencyLog.traceLog = traceLog
@@ -80,7 +80,6 @@ struct TransparencyLog: Sendable {
             do {
                 self.ktInitBag = try await KTInitBag(
                     endpoint: endpoint,
-                    tlsInsecure: self.tlsInsecure,
                     useIdentity: self.useIdentity
                 )
             } catch {
@@ -97,7 +96,6 @@ struct TransparencyLog: Sendable {
     //  if request fails, doesn't obtain a 2xx response, or doesn't match provided mimeType
     static func urlGet(
         url: URL,
-        tlsInsecure: Bool = false,
         useIdentity: Bool = false,
         timeout: TimeInterval = 15,
         headers: [String: String]? = nil,
@@ -108,7 +106,6 @@ struct TransparencyLog: Sendable {
 
         return try await TransparencyLog.urlRequest(
             request: request,
-            tlsInsecure: tlsInsecure,
             useIdentity: useIdentity,
             contentType: mimeType
         )
@@ -119,7 +116,6 @@ struct TransparencyLog: Sendable {
     //  2xx response, or response content type != "application/protobuf"
     static func urlPostProtbuf(
         url: URL,
-        tlsInsecure: Bool = false,
         useIdentity: Bool = false,
         requestBody: Data,
         timeout: TimeInterval = 15,
@@ -135,7 +131,6 @@ struct TransparencyLog: Sendable {
 
         return try await TransparencyLog.urlRequest(
             request: request,
-            tlsInsecure: tlsInsecure,
             useIdentity: useIdentity,
             contentType: pbContentType
         )
@@ -152,21 +147,15 @@ struct TransparencyLog: Sendable {
 
     // urlRequest issues populated request to endpoint and returns payload and response if status code 2xx is
     //  received and (if contantType is set) confirms mimeType in payload matches expected.
-    //  TLS verification is suppressed if tlsInsecure is true.
     static func urlRequest(
         request: URLRequest,
-        tlsInsecure: Bool = false,
         useIdentity: Bool = false,
         contentType: String? = nil,
         rateLimitStart: Duration = .milliseconds(100),
         rateLimitMax: Duration = .milliseconds(1000)
     ) async throws -> (Data, URLResponse) {
         let session: URLSession
-        if tlsInsecure {
-            session = URLSession(configuration: .default,
-                                 delegate: TransparencyLog.InsecureTLSDelegate(),
-                                 delegateQueue: nil)
-        } else if useIdentity {
+        if useIdentity {
             session = URLSession(configuration: .default,
                                  delegate: TransparencyLog.MutualTLSDelegate(identityProvider: AnyIdentityProvider()),
                                  delegateQueue: nil)
@@ -245,22 +234,6 @@ struct TransparencyLog: Sendable {
         }
     }
 
-    // InsecureTLSDelegate is a URLSessionDelegate to bypass certificate errors on TLS connections
-    private class InsecureTLSDelegate: NSObject, URLSessionDelegate {
-        func urlSession(
-            _ session: URLSession,
-            didReceive challenge: URLAuthenticationChallenge,
-            completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-        ) {
-            if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
-                completionHandler(.useCredential,
-                                  URLCredential(trust: challenge.protectionSpace.serverTrust!))
-            } else {
-                completionHandler(.performDefaultHandling, nil)
-            }
-        }
-    }
-
     // MutualTLSDelegate is a URLSessionDelegate to provide mutual TLS backed by Apple Narrative identity certs
     private class MutualTLSDelegate: NSObject, URLSessionDelegate {
         let identityProvider: IdentityProvider
@@ -292,10 +265,7 @@ struct TransparencyLog: Sendable {
 extension TransparencyLog {
     // fetchPubkeys retrieves public keys used to verify signature of Top Level trees
     @discardableResult
-    func fetchPubkeys(
-        altEndpoint: URL? = nil,
-        tlsInsecure: Bool? = nil
-    ) async throws -> PublicKeys {
+    func fetchPubkeys(altEndpoint: URL? = nil) async throws -> PublicKeys {
         guard let endpoint = altEndpoint ?? ktInitBag?.url(.atResearcherPublicKeys) else {
             throw TransparencyLogError("must provide Public Keys endpoint")
         }
@@ -305,7 +275,6 @@ extension TransparencyLog {
         do {
             let pubKeys = try await PublicKeys(
                 endpoint: endpoint,
-                tlsInsecure: tlsInsecure ?? self.tlsInsecure,
                 useIdentity: self.useIdentity,
                 requestUUID: self.instanceUUID
             )
@@ -321,8 +290,7 @@ extension TransparencyLog {
     func fetchLogTree(
         logType: TxPB_LogType = Self.atLogType,
         application: TxPB_Application? = nil,
-        altEndpoint: URL? = nil,
-        tlsInsecure: Bool? = nil
+        altEndpoint: URL? = nil
     ) async throws -> Tree {
         guard let endpoint = altEndpoint ?? ktInitBag?.url(.atResearcherListTrees) else {
             throw TransparencyLogError("must provide List Keys endpoint")
@@ -335,7 +303,6 @@ extension TransparencyLog {
         do {
             logTrees = try await Trees(
                 endpoint: endpoint,
-                tlsInsecure: tlsInsecure ?? self.tlsInsecure,
                 useIdentity: self.useIdentity,
                 requestUUID: self.instanceUUID
             )
@@ -363,8 +330,7 @@ extension TransparencyLog {
     func fetchLogHead(
         logTree: Tree,
         useCache: Bool = false,
-        altEndpoint: URL? = nil,
-        tlsInsecure: Bool? = nil
+        altEndpoint: URL? = nil
     ) async throws -> Head {
         guard let endpoint = altEndpoint ?? ktInitBag?.url(.atResearcherLogHead) else {
             throw TransparencyLogError("must provide Log Head endpoint")
@@ -376,7 +342,6 @@ extension TransparencyLog {
         do {
             let relLogHead = try await Head(
                 endpoint: endpoint,
-                tlsInsecure: tlsInsecure ?? self.tlsInsecure,
                 useIdentity: self.useIdentity,
                 logTree: logTree,
                 appCerts: nil, 
@@ -430,7 +395,6 @@ extension TransparencyLog {
 
         let logLeaves = TransparencyLog.Leaves(
             endpoint: endpoint,
-            tlsInsecure: self.tlsInsecure,
             useIdentity: self.useIdentity,
             logTree: tree
         )

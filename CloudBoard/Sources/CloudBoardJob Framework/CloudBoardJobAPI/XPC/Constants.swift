@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -16,3 +16,5 @@
 
 internal let kCloudBoardJobAPIXPCLocalServiceEntitlement =
     "com.apple.private.cloudos.cloudboardjob"
+internal let kCloudBoardJobAPIOutboundPCCRequestEntitlement =
+    "com.apple.private.cloudos.cb_jobhelper.outbound-pcc-request"

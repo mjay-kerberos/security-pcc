@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -15,14 +15,13 @@
 // Copyright © 2023 Apple. All rights reserved.
 
 import CFPreferenceCoder
-import CloudBoardAsyncXPC
+internal import CloudBoardAsyncXPC
+import CloudBoardCommon
 import CloudBoardConfigurationDAPI
 import CloudBoardLogging
 import CloudBoardMetrics
-import DarwinPrivate.dirhelper
 import Foundation
 import os
-import System
 
 /// An actor that represents the top level of the configuration daemon and runs all the nested tasks.
 public actor ConfigurationDaemon {
@@ -37,14 +36,14 @@ public actor ConfigurationDaemon {
     ///   gets read from the preferences.
     /// - Throws: If loading the configuration fails.
     public init(configurationPath: String? = nil) async throws {
-        Self.configureTempDir()
+        configureTemporaryDirectory(suffix: CFPreferences.cbConfigPreferencesDomain, logger: Self.logger)
         let daemonConfiguration: ConfigurationDConfiguration = if let configurationPath {
             try ConfigurationDConfiguration.fromFile(path: configurationPath, secureConfigLoader: .real)
         } else {
             try ConfigurationDConfiguration.fromPreferences()
         }
         let launchDelay = daemonConfiguration.launchDelay
-        try await withLogging(operation: "launchDelay \(launchDelay) seconds", sensitiveError: false) {
+        try await withErrorLogging(operation: "launchDelay \(launchDelay) seconds", sensitiveError: false) {
             try await Task.sleep(for: .seconds(launchDelay))
         }
         Self.logger.info("Bootstrapping metrics with client name \(Self.metricsClientName, privacy: .public)")
@@ -185,17 +184,5 @@ public actor ConfigurationDaemon {
             Self.logger.fault("Fatal error, exiting: \(String(unredacted: error), privacy: .public)")
         }
         self.metrics.emit(Metrics.Daemon.ExitedLoopCounter(action: .increment))
-    }
-
-    private static func configureTempDir() {
-        guard _set_user_dir_suffix(CFPreferences.cbConfigPreferencesDomain) else {
-            let error = Errno(rawValue: errno)
-            Self.logger.fault("""
-            Failed to set temporary directory suffix: \(error, privacy: .public)
-            """)
-            fatalError("Failed to set temporary directory suffix: \(error)")
-        }
-        // Ensure the directory is created and TMPDIR is set.
-        _ = NSTemporaryDirectory()
     }
 }

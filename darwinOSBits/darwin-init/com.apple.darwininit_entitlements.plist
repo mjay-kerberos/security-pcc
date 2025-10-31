@@ -1,4 +1,4 @@
-<!-- Copyright © 2024 Apple Inc. All Rights Reserved. -->
+<!-- Copyright © 2025 Apple Inc. All Rights Reserved. -->
 
 <!-- APPLE INC. -->
 <!-- PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT -->
@@ -21,6 +21,7 @@
 	<key>com.apple.private.MobileGestalt.AllowedProtectedKeys</key>
 	<array>
 		<string>ReleaseType</string>
+		<string>IsFactorySignedRestore</string>
 	</array>
 	<key>com.apple.mobileactivationd.spi</key>
 	<true/>
@@ -35,6 +36,8 @@
 	<key>com.apple.private.system_installd.connection</key>
 	<true/>
 	<key>com.apple.darwininit.config-server.remote</key>
+	<true/>
+	<key>com.apple.private.factory.darwininit.config-server.remote.access</key>
 	<true/>
 	<key>com.apple.private.logging.preferences</key>
 	<true/>

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -270,11 +270,12 @@ public func withErrorLogging<ReturnType>(
 }
 
 // A non-Sendable body variant.
-public func withLogging<ReturnType>(
+public func withLogging<ReturnType: Sendable>(
     operation: String,
     diagnosticKeys: some CustomStringConvertible,
     sensitiveError: Bool = true,
     logger: Logger? = nil,
+    isolation _: isolated (any Actor)? = #isolation,
     _ body: () async throws -> ReturnType
 ) async rethrows -> ReturnType {
     let errorLogger = logger ?? defaultLogger
@@ -303,10 +304,11 @@ public func withLogging<ReturnType>(
 }
 
 // A non-Sendable body variant.
-public func withLogging<ReturnType>(
+public func withLogging<ReturnType: Sendable>(
     operation: String,
     sensitiveError: Bool = true,
     logger: Logger? = nil,
+    isolation _: isolated (any Actor)? = #isolation,
     _ body: () async throws -> ReturnType
 ) async rethrows -> ReturnType {
     return try await withLogging(

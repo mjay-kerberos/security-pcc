@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -115,10 +115,19 @@ public struct CloudBoardJobAuthDaemon: Sendable {
                     authTokenSigningKeyProvider: authTokenSigningKeyProvider
                 ).run()
             }
-        }
 
-        /// Workaround to prevent Swift compiler from ignoring all conformances defined in Logging+ReportableError
-        /// rdar://126351696 (Swift compiler seems to ignore protocol conformances not used in the same target)
-        _ = KeyRotationServiceClientError.unexpectedResponse.publicDescription
+            group.addTask {
+                try await runEmitMemoryUsageMetricsLoop(
+                    logger: Self.logger,
+                    metricsSystem: self.metrics,
+                    physicalMemoryFootprintGauge: {
+                        Metrics.CloudBoardJobAuthDaemon.PhysicalMemoryFootprintGauge(value: $0)
+                    },
+                    lifetimeMaxPhysicalMemoryFootprintGauge: {
+                        Metrics.CloudBoardJobAuthDaemon.LifetimeMaxPhysicalMemoryFootprintGauge(value: $0)
+                    }
+                )
+            }
+        }
     }
 }

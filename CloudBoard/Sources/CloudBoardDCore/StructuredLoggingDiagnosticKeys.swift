@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -13,13 +13,13 @@
 // 10/02/2024
 
 //  Copyright © 2024 Apple Inc. All rights reserved.
+import ServiceContextModule
 
 /// Diagnostic keys to log in tracing logs.
 struct CloudBoardDaemonDiagnosticKeys: OptionSet, CustomStringConvertible {
     var rawValue: Int
 
     static let rpcID = Self(rawValue: 1 << 0)
-    static let requestID = Self(rawValue: 1 << 1)
 
     var description: String {
         var text = ""
@@ -29,17 +29,9 @@ struct CloudBoardDaemonDiagnosticKeys: OptionSet, CustomStringConvertible {
         }
         text.append("[")
         if self.contains(.rpcID) {
-            text.append("rpcID=\(CloudBoardDaemon.rpcID) ")
+            text.append("rpcID=\(ServiceContext.current?.rpcID ?? .zero)")
         }
-
-        if self.contains(.requestID) {
-            text.append("requestTrackingID=\(CloudBoardDaemon.requestTrackingID) ")
-        }
-
-        text.removeLast(1)
-        if !text.isEmpty {
-            text.append("] ")
-        }
+        text.append("] ")
 
         return text
     }

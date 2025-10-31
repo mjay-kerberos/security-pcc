@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -29,7 +29,6 @@ extension TransparencyLog {
 
         init(
             endpoint: URL, // KTInitBag base REST endpoint
-            tlsInsecure: Bool = false,
             useIdentity: Bool = false, // set x-internal header if true
             signedBag: Bool = true // request signed payload version (and verify)
         ) async throws {
@@ -41,7 +40,6 @@ extension TransparencyLog {
 
             let (data, _) = try await urlGet(
                 url: endpoint,
-                tlsInsecure: tlsInsecure,
                 useIdentity: false, // not actually used for this call
                 headers: useIdentity ? ["x-internal": "true"] : nil, // .. but indicate available
                 mimeType: "application/xml"

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -67,7 +67,7 @@ be passed to the darwinOS through boot-args. This allows the command \
     @Option(name: [.customLong("usage-label")], help: "Usage label for tagging log messages forwarded by splunkloggingd and emitted by OSAnalytics")
     var usageLabel: String?
     
-    @Option(name: [.customLong("config-security-policy")], help: "Policy for security and privacy validation of the darwin-init config. May be set to 'customer' or 'carry'. If not set, no security/privacy validation is performed. Included in the attestation bundle.")
+    @Option(name: [.customLong("config-security-policy")], help: "Policy for security and privacy validation of the darwin-init config. May be set to 'customer', 'customerProxy' or 'carry'. If not set, no security/privacy validation is performed. Included in the attestation bundle.")
     var configSecurityPolicy: String?
     
     @Option(name: [.customLong("config-security-policy-version")], help: "Version number to use when validating darwin-init config against the config-security-policy. Each time new policy enforcement logic is deployed for a darwin-init key, we will increment the version number. Clients may override this and use an older version so that they only receive a warning but can still apply their config.")
@@ -239,6 +239,12 @@ extension Generate {
         
         @Option(name: [.customLong("aea-decryption-key")], help: "Pre-determined decryption key for an AEA cryptex")
         var aeaDecryptionKey: [String] = []
+        
+        @Option(name: [.customLong("max-active-tasks")], help: "Maximum parallel active tasks for performing range request downloads. Defaults is 4.")
+        var maxActiveTasks: Int?
+        
+        @Option(name: [.customLong("chunk-size")], help: "Chunk size (in bytes) to use when performing parallel range request downloads. If set, darwin-init will assume range requests are supported without verifying via a HEAD request. Note: If unspecified, but darwin-init detects range requests are supported a default of 16 MiB is used.")
+        var chunkSize: UInt64?
 
 		var config: [DInitCryptexConfig]? {
 			guard !cryptexUrl.isEmpty else { return nil }
@@ -259,7 +265,9 @@ extension Generate {
 					appleConnect: appleConnect,
 					cacheable: cacheable[safe: index],
                     identifier: identifier[safe: index],
-                    aeaDecryptionParams: aeaDecryptionParams)
+                    aeaDecryptionParams: aeaDecryptionParams,
+                    maxActiveTasks: maxActiveTasks,
+                    chunkSize: chunkSize)
 			}
 		}
 

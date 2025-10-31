@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -38,23 +38,32 @@ extension CLI {
         @Option(name: [.customLong("nram")], help: "Change memory (GiB) for guest.")
         var nramGB: UInt?
 
-        @Option(name: [.customLong("network"), .customShort("n")], help: "Change network connectivity for guest.")
-        var networkMode: VM.NetworkMode?
+        @Option(name: [.customLong("network"), .customShort("n")],
+                help: """
+                Specify network connectivity for guest (<mode>[,subopt=val,..]+).",
+                  <mode> one of: \(VM.NetworkMode.allCases.map { "\($0)" }.joined(separator: ", "))
+                  <subopt> one of:
+                      macaddr=<xx:xx:xx:xx:xx:xx>|random
+                      \(CLI.internalBuild ? "sharedInterface=<name> (bridged mode only)" : "")
+                """,
+                transform: { try validateNetworkConfig($0) })
+        var networkConfigs: [VM.NetworkConfig] = []
 
         @Option(name: [.customLong("macaddr"), .customLong("mac")],
-                help: "Specify network MAC address for guest VM [xx:xx:xx:xx:xx:xx].",
+                help: "Specify primary network MAC address for guest VM [xx:xx:xx:xx:xx:xx].",
                 transform: { try validateMACAddr($0) })
         var macAddr: String?
 
         @Option(name: [.customLong("sharedInterface")],
-                help: "Specify local host interface for VM to bridge onto.",
+                help: ArgumentHelp("Specify local host interface for VM primary network to bridge onto.",
+                                   visibility: .customerHidden),
                 transform: { try validateNetIfName($0) })
         var bridgeIf: String?
 
         @Option(name: [.customLong("darwin-init"), .customShort("I")],
                 help: "Update path to darwin-init.json startup config (copied in).",
-                transform: { try DarwinInit(fromFile: $0) })
-        var darwinInit: DarwinInit?
+                transform: { try DarwinInitConfig(fromFile: $0) })
+        var darwinInit: DarwinInitConfig?
 
         @Option(name: [.customLong("boot-args"), .customShort("B")], help: "Change boot-args.")
         var bootArgs: String?
@@ -71,7 +80,16 @@ extension CLI {
                 transform: { try validateFilePath($0) })
         var vsepImage: String?
 
-        func validate() throws {
+        @Option(name: [.customLong("virt-mesh-plugin")],
+                help: "Path to VirtMesh plugin.",
+                transform: { try validateDirectoryPath($0) })
+        var virtMeshPlugin: String? = nil
+
+        @Option(name: [.customLong("virt-mesh-rank")],
+                help: "Rank to VirtMesh plugin.")
+        var virtMeshRank: Int? = nil
+
+        mutating func validate() throws {
             if let ncpu {
                 guard ncpu > 0 else {
                     throw ValidationError("invalid ncpu")
@@ -84,15 +102,22 @@ extension CLI {
                 }
             }
 
-            if let _ = macAddr {
-                guard let _ = networkMode else {
-                    throw ValidationError("must specify network mode to change settings")
+            // if macaddr and/or sharedInterface provided, set them on the first ("primary") entry
+            if macAddr != nil || bridgeIf != nil {
+                guard networkConfigs.count > 0 else {
+                    throw ValidationError("must re-specify network config to change settings")
                 }
+
+                let net0 = networkConfigs[0]
+                networkConfigs[0] = VM.NetworkConfig(
+                    mode: net0.mode,
+                    macAddr: macAddr ?? net0.macAddr.string,
+                    bridgeIf: net0.options.bridgeIf?.identifier
+                )
             }
         }
 
         func run() throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
             CLI.logger.log("modify VRE \(vmName, privacy: .public)")
 
             let vm = VM(name: vmName, dataDir: globalOptions.datadir)
@@ -108,18 +133,15 @@ extension CLI {
                 avpsepbooter: vsepImage
             )
 
-            var networkConfig: VM.NetworkConfig?
-            if let networkMode {
-                networkConfig = VM.NetworkConfig(mode: networkMode, macAddr: macAddr, bridgeIf: bridgeIf)
-            }
-
             do {
                 try vm.modify(
                     cpuCount: ncpu,
                     memorySize: nram,
-                    networkConfig: networkConfig,
+                    networkConfigs: networkConfigs.count > 0 ? networkConfigs : nil,
                     nvramArgs: nvramArgsMap(bootArgs: bootArgs, nvramArgs: nvramArgs),
-                    romImages: romImages
+                    romImages: romImages,
+                    virtMeshPlugin: virtMeshPlugin,
+                    virtMeshRank: virtMeshRank
                 )
             } catch {
                 throw CLIError("modify VM \(vmName): \(error)")

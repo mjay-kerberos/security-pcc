@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,6 +14,7 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
+import CloudBoardCommon
 import CloudBoardController
 import NullCloudControllerAPI
 import os
@@ -39,9 +40,9 @@ actor NullCloudController {
         await self.controller.onShutdown {
             Self.log.log("Handling shutdown from cloudboardd")
         }
-        await self.controller.onDisconnect {
+        await self.controller.onDisconnect { @Sendable in
             Self.log.warning("Handling disconnect from cloudboardd")
-            self.connectionID += 1
+            await self.incrementConnectionID()
         }
     }
 
@@ -55,6 +56,33 @@ actor NullCloudController {
 
         let cloudAppName = self.config.cloudAppName ?? "NullCloudApp"
 
+        // Determine if this node is a proxy node
+        let isProxy: Bool
+        let routingGroupAliases: [String]
+        do {
+            Self.log.info("Loading secure config from SecureConfigDB")
+            let secureConfig = try SecureConfigLoader.real.load()
+            isProxy = secureConfig.isProxy
+            routingGroupAliases = secureConfig.routingGroupAliases
+        } catch {
+            Self.log.error(
+                "Error loading secure config: \(String(unredacted: error), privacy: .public). Assuming node is not a proxy."
+            )
+            isProxy = false
+            routingGroupAliases = []
+        }
+        let maxBatchSize = await self.controller.prefs.maxBatchSize ?? (isProxy ? 55 : 1000)
+
+        var workloadTags = await self.controller.prefs.workloadTags.mapValues {
+            switch $0 {
+            case .string(let value): WorkloadConfig.RoutingTagValue.string(value)
+            case .stringList(let value): WorkloadConfig.RoutingTagValue.stringList(value)
+            }
+        }
+        if !routingGroupAliases.isEmpty {
+            workloadTags["routingGroupAliases"] = WorkloadConfig.RoutingTagValue.stringList(routingGroupAliases)
+        }
+
         while true {
             let connectionID = self.connectionID
             await self.controller.connect()
@@ -63,12 +91,15 @@ actor NullCloudController {
             Self.log.log("Sending RegisterWorkload...")
             try await self.controller.registerWorkload(
                 config: WorkloadConfig(
-                    maxBatchSize: self.controller.prefs.maxBatchSize,
-                    optimalBatchSize: self.controller.prefs.optimalBatchSize,
+                    maxBatchSize: maxBatchSize,
+                    optimalBatchSize: self.controller.prefs.optimalBatchSize ?? maxBatchSize,
                     currentBatchSize: 0,
-                    routingTags: self.controller.prefs.tags
-                ), properties: WorkloadProperties(
-                    workloadName: "tie-cloudboard-apple-com",
+                    workloadTags: workloadTags,
+                    workloadType: isProxy ? .proxy : .worker
+                ),
+                properties: WorkloadProperties(
+                    // Default to the TIE service name as this has traditionally been used for the null app as well
+                    workloadName: self.controller.prefs.serviceName ?? "tie-cloudboard-apple-com",
                     cloudAppName: cloudAppName
                 )
             )
@@ -86,6 +117,10 @@ actor NullCloudController {
 
             Self.log.warning("Detected cloudboardd disconnect, re-registering")
         }
+    }
+
+    private func incrementConnectionID() {
+        self.connectionID += 1
     }
 }
 

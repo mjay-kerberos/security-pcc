@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -40,7 +40,11 @@ internal final class CloudMetricsService: CloudMetricsServerProtocol, Sendable {
     }
 
     internal func setConfiguration(_ configuration: CloudMetricsConfigurationDictionary, client: String) async throws {
-        logger.log("setConfiguration(client: \(client, privacy: .public), overrides: \(configuration.overrides, privacy: .private)")
+        logger.log("""
+            setConfiguration. \
+            client=\(client, privacy: .public) \
+            overrides=\(configuration.overrides, privacy: .private)
+            """)
         if let store = try manager.getMetricsStore(for: client) {
             await withThrowingTaskGroup(of: Void.self) { group in
                 for (id, override) in configuration.overrides {

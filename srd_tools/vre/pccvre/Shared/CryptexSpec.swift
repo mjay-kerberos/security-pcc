@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -35,10 +35,10 @@ struct CryptexSpec: CustomStringConvertible {
         fileType: AssetHelper.FileType? = nil
     ) throws {
         guard FileManager.isExist(path, resolve: true) else {
-            throw POSIXError(.ENOENT)
+            throw CLIError("File does not exist \(path)")
         }
         guard FileManager.isRegularFile(path, resolve: true) else {
-            throw POSIXError(.EFTYPE)
+            throw CLIError("Not a regular file when required for \(path)")
         }
 
         self.path = FilePath(path)

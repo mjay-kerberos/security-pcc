@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,20 +14,35 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-/// Represents a message sent over a CloudBoardAsyncXPCConnection.
-public protocol CloudBoardAsyncXPCMessage: Codable, Sendable {
+/// Represents a message sent over a ``CloudBoardAsyncXPCConnection``
+package protocol CloudBoardAsyncXPCMessage: Sendable {
     /// Type of a value returned when a message is handled successfully.
-    associatedtype Success: Codable, Sendable
+    associatedtype Success: Sendable
 
     /// Error type thrown on failure.
-    associatedtype Failure: Codable, Error
+    associatedtype Failure: Error
 
     /// A reply from a remote service that can either be an error or return value.
     typealias Reply = CloudBoardAsyncXPCMessageResult<Success, Failure>
 }
 
+/// Represents a message sent over a ``CloudBoardAsyncXPCConnection`` using ``Codable`` for the serialisation.
+/// These are (slightly) slower than ``CloudBoardAsyncXPCByteBufferMessage``, consider using that
+/// instead for messages on the hot path of a request
+package protocol CloudBoardAsyncXPCCodableMessage: CloudBoardAsyncXPCMessage, Codable
+where Success: Codable, Success: Sendable, Failure: Codable, Failure: Error {}
+
+/// Represents a message sent over a CloudBoardAsyncXPCConnection using ``ByteBufferCodable`` for the
+/// serialisation.
+/// These are (slightly) faster than ``CloudBoardAsyncXPCCodableMessage`` and should be used for any
+/// messages on the hot path of a request.
+///
+/// We require a conformance to Equatable so that the encode/decode round trip can be trivially tested
+package protocol CloudBoardAsyncXPCByteBufferMessage: CloudBoardAsyncXPCMessage, ByteBufferCodable, Equatable
+where Success: ByteBufferCodable, Success: Sendable, Failure: ByteBufferCodable, Failure: Error {}
+
 /// A non-posted message whose return value type is Void. The sender will wait
 /// for a reply before proceeding
-public struct ExplicitSuccess: Codable, Sendable {
+package struct ExplicitSuccess: Codable, Sendable, Equatable {
     public init() {}
 }

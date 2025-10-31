@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -299,7 +299,7 @@ internal final class OpenTelemetryStore: MetricsStore, Sendable {
             }
         }
         self.metricOverrides.withLock { $0.setOverride(id: id, override: override) }
-        logger.log("Configured metric override for \(label, privacy: .public)")
+        logger.log("Configured metric override. metric_label=\(label, privacy: .public)")
     }
 
     internal func collectAllMetrics(producer: MetricProducer) -> [OpenTelemetrySdk.StableMetricData] {

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,6 +14,7 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
+import CloudBoardLogging
 import Foundation
 import Security
 import Security_Private.SecItemPriv
@@ -97,5 +98,18 @@ extension CryptoKit.SecureEnclave.Curve25519.KeyAgreement.PrivateKey {
             // Discard the LAContext
             self = try .init(from: secKey)
         }
+    }
+}
+
+extension Keychain.Error: ReportableError {
+    var publicDescription: String {
+        let errorType = switch self {
+        case .keychainItemNotAKey: "keychainItemNotAKey"
+        case .keyNotFound: "keyNotFound"
+        case .keychainQueryError(let osStatus, _): "keychainQueryError(osStatus: \(osStatus))"
+        case .missingSecKeyAttributes: "missingSecKeyAttributes"
+        case .missingTokenOID: "missingTokenOID"
+        }
+        return "keychain.\(errorType)"
     }
 }

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -31,6 +31,11 @@ extension CLI {
         )
 
         struct options: ParsableArguments {
+            @Option(name: [.customLong("storage")], help: "Storage of transparency log checkpoint.")
+            var storage: String = CLIDefaults.applicationDir
+                .appending(path: "transparency-log")
+                .path(percentEncoded: false)
+
             // Debugging/test options
             @Option(name: [.customLong("environment"), .customShort("E")],
                     help: ArgumentHelp("Select Transparency Log service environment",
@@ -42,10 +47,6 @@ extension CLI {
                                        visibility: .customerHidden),
                     transform: { try CLI.parseURL($0) })
             var ktInitEndpoint: URL?
-
-            @Flag(name: [.customLong("tlsinsecure")],
-                  help: ArgumentHelp("Disable TLS verification", visibility: .customerHidden))
-            var tlsInsecure: Bool = false
         }
     }
 }

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -74,6 +74,7 @@ let kDInitAppleConnectRealm = "APPLECONNECT.APPLE.COM"
 
 let kDInitRemoteServicePrefix = "remotedevice="
 let kDInitRemoteServiceName = "com.apple.darwininit.config-server"
+let kDInitFactoryRemoteServiceName = "com.apple.factory.darwininit.config-server.remote"
 
 /// The "knox" scheme
 let kKnoxURLScheme = "knox"
@@ -103,6 +104,11 @@ let kUplinkMTUHintKey = "uplinkmtu"
 // Taken from Manta. Keep in sync with schema.json.
 let kUplinkMTUMin = 1280
 let kUplinkMTUMax = 16384
+
+// Chunk size for making range requests to the CDN in bytes
+let kCDNChunkSize: UInt64 = 16 << 20 // 16 MiB = 16 * 2^(20) bytes
+// Max number of active tasks to perform range requests in parallel
+let kMaxActiveTasks: Int = 4
 
 public let logger = Logger.default
 

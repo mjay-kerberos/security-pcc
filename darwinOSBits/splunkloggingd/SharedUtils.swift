@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -30,7 +30,13 @@ import OSAnalytics_Private
 let sharedSubsystem = "com.apple.splunkloggingd"
 fileprivate let log = Logger(subsystem: sharedSubsystem, category: "SharedUtils")
 fileprivate let serialNo = MobileGestalt.current.serialNumber as String?
+
 fileprivate let releaseType: String = MobileGestalt.current.releaseType
+#if os(iOS)
+fileprivate let isPCC: Bool = releaseType.contains("Darwin Cloud")
+#else
+fileprivate let isPCC: Bool = false
+#endif
 
 let kUsageLabelKey = "serverOS-usage-label"
 
@@ -223,11 +229,7 @@ func shouldOwnCrashDeletion() -> Bool {
         log.log("Found mocked value for shouldOwnCrashDeletion, returning \(val)")
         return val
     }
-#if os(iOS)
-    return releaseType.contains("Darwin Cloud")
-#else
-    return false
-#endif
+    return isPCC
 }
 
 func systemCrashDir() -> String? {
@@ -397,7 +399,11 @@ fileprivate func _configuredSystemAuditTable() throws -> URL? {
         return nil
     } catch {
         log.error("Failed to load secure config logPolicyPath with exception \(error, privacy: .public)")
-        throw error
+        if isPCC {
+            throw error
+        } else {
+            return nil
+        }
     }
 }
 
@@ -426,7 +432,11 @@ fileprivate func _logFilteringEnforced() throws -> Bool? {
         return result
     } catch {
         log.error("SecureConfig error for logFilteringEnforced: \(error, privacy: .public)")
-        throw error
+        if isPCC {
+            throw error
+        } else {
+            return nil
+        }
     }
 }
 
@@ -455,9 +465,13 @@ fileprivate func _crashRedactionEnabled() -> Bool? {
         log.info("crashRedactionEnabled: found value of \(String(describing: result), privacy: .public) from Secure Config")
         return result
     } catch {
-        // The path this is called from can't handle a thrown error, so we must handle it. Default to "on"
+        // The path this is called from can't handle a thrown error, so we must handle it. Default to "on" for PCC
         log.error("SecureConfig error for crashRedactionEnabled, defaulting to true: \(error, privacy: .public)")
-        return true
+        if isPCC {
+            return true
+        } else {
+            return false
+        }
     }
 }
 

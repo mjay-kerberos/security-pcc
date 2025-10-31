@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -28,20 +28,26 @@ import os.log
 
 public struct EnsembleValidator: Validator {
     static let logger = Logger(subsystem: "com.apple.CloudAttestation", category: "EnsembleValidator")
-
     var release: Release
-    var chipIdentity: SEP.Identity
-    var boardID: UInt32
+    var deviceIdentifiers: DeviceIdentifiers
     var hardwareIdentifiers: HardwareIdentifiersPolicy.Identifiers {
-        (archBits: chipIdentity.archBits, chipID: chipIdentity.chipID, boardID: boardID)
+        (archBits: deviceIdentifiers.chipID.archBits, chipID: deviceIdentifiers.chipID.chipID, boardID: deviceIdentifiers.boardID)
     }
     var restrictedExecution: DeviceModePolicy.Constraint
     var ephemeralData: DeviceModePolicy.Constraint
     var developer: DeviceModePolicy.Constraint
     var cryptexLockdown: Bool
     var securityPolicy: DarwinInit.SecureConfigSecurityPolicy
+    var deviceFilter: DeviceFilter
+    var assetProvider: any AttestationAssetProvider
+    var udid: String? = nil
+    var fingerprints: [Data]? = nil
 
-    static let dcik = SecKeyCopySystemKey(.DCIK, nil)?.takeRetainedValue()
+    private var requireProdTrustAnchors: Bool = true
+    private var checkRevocation: Bool = true
+
+    @_spi(Private)
+    public var strictCertificateValidation: Bool = true
 
     // Defang parameters
     @_spi(Private)
@@ -50,44 +56,42 @@ public struct EnsembleValidator: Validator {
     @_spi(Private)
     public var clock: Date?
 
-    @_spi(Private)
-    public var strictCertificateValidation: Bool
-
-    @_spi(Private)
-    public var requireProdTrustAnchors: Bool
-
-    @_spi(Private)
-    public var checkRevocation: Bool
-
     /// Creates a new ``EnsembleValidator``.
     public init() throws {
-        self = try .init(assetProvider: DefaultAssetProvider())
+        self = try .init(sepProtocol: SEP.PhysicalDevice(), assetProvider: PCC.AssetProvider())
+    }
+
+    public typealias DeviceFilter = @Sendable (DeviceIdentifiers) -> Bool
+
+    public init(_ block: @escaping DeviceFilter) throws {
+        self = try .init()
+        self.deviceFilter = block
     }
 
     @_spi(Private)
-    public init(assetProvider: some AttestationAssetProvider) throws {
+    public init(sepProtocol sepAttestationImpl: any SEP.AttestationProtocol, assetProvider: some AttestationAssetProvider) throws {
+        guard let mode = DeviceMode.local else {
+            throw Error.introspectionError(.missingDeviceMode)
+        }
+        try self.init(sepProtocol: sepAttestationImpl, assetProvider: assetProvider, deviceMode: mode)
+    }
+
+    init(sepProtocol sepAttestationImpl: any SEP.AttestationProtocol, assetProvider: some AttestationAssetProvider, deviceMode mode: DeviceMode) throws {
         self.roots = []
         self.clock = nil
-        (self.chipIdentity, self.boardID) = try Self.localChipIdentity()
+        self.deviceIdentifiers = try Self.deviceIdentifiers()
         self.release = try Release.local(assetProvider: assetProvider)
-        let (mode, cryptexLockdown) = try Self.localDeviceStates()
+
         self.restrictedExecution = .init(mode.restrictedExecution)
         self.ephemeralData = .init(mode.ephemeralData)
         self.developer = .init(mode.developer)
-        self.cryptexLockdown = cryptexLockdown
+        self.cryptexLockdown = try assetProvider.sealedHashEntries[cryptexSlotUUID]?.last?.flags.contains(.ratchetLocked) ?? false
 
-        let provisioningCertChain = try? assetProvider.provisioningCertificateChain
-
-        // if we have a cert, we require our peers to have a cert
-        self.strictCertificateValidation = provisioningCertChain?.isEmpty == false
-        if let provisioningCertChain {
-            // if we have a production cert, require our peers to have a production cert
-            self.requireProdTrustAnchors = Self.isProductionCert(chain: provisioningCertChain)
-            self.checkRevocation = true
-        } else {
-            self.requireProdTrustAnchors = false
-            self.checkRevocation = false
+        self.deviceFilter = { _ in
+            true
         }
+
+        self.assetProvider = assetProvider
 
         if #_hasSymbol(SecureConfigParameters.self) {
             let secureConfig = try SecureConfigParameters.loadContents()
@@ -113,41 +117,9 @@ public struct EnsembleValidator: Validator {
         return (try? policy.evaluateCertificateChain(chain)) != nil
     }
 
-    /// The default policy.
-    public var defaultPolicy: some AttestationPolicy {
-        self.buildPolicy(for: nil, fingerprints: nil)
-    }
-
-    /// Returns a policy for the given UDID.
-    /// - Parameter udid: The UDID.
-    public func policyFor(udid: String) -> some AttestationPolicy {
-        self.buildPolicy(for: udid, fingerprints: nil)
-    }
-
-    /// Returns a policy for the given UDID and ensemble certificate fingerprints.
-    /// - Parameters:
-    ///   - udid: The UDID.
-    ///   - fingerprints: The fingerprints.
-    public func policyFor(udid: String, fingerprints: [Data]) -> some AttestationPolicy {
-        self.buildPolicy(for: udid, fingerprints: fingerprints)
-    }
-
-    /// Returns a policy for the given SEP identity.
-    /// - Parameter identity: The identity.
-    public func policyFor(identity: SEP.Identity) -> some AttestationPolicy {
-        self.buildPolicy(for: identity.udid, fingerprints: nil)
-    }
-
-    var trustAnchors: [SecCertificate] {
-        if requireProdTrustAnchors {
-            X509Policy.prodProvisioningRoots
-        } else {
-            self.roots + X509Policy.prodProvisioningRoots + X509Policy.testProvisioningRoots
-        }
-    }
-
+    /// The policy to use for validation.
     @PolicyBuilder
-    private func buildPolicy(for udid: String?, fingerprints: [Data]?) -> some AttestationPolicy {
+    public var policy: some AttestationPolicy {
         let revocationPolicy: X509Policy.RevocationPolicy? = self.checkRevocation ? [.any] : nil
         X509Policy(required: self.strictCertificateValidation, roots: self.trustAnchors, clock: self.clock, revocation: revocationPolicy)
         if let fingerprints {
@@ -155,13 +127,11 @@ public struct EnsembleValidator: Validator {
         }
         SEPAttestationPolicy(insecure: !self.strictCertificateValidation).verifies { attestation in
             if let udid = udid {
-                let udidsMatch = attestation.identity?.udid == udid
-                let _ =
-                    udidsMatch
-                    ? (Self.logger.log("Attestation udid \(attestation.identity?.udid ?? "<unknown>", privacy: .public) matches \(udid, privacy: .public)"))
-                    : Self.logger.error("Attestation udid \(attestation.identity?.udid ?? "<unknown>", privacy: .public) does not match \(udid, privacy: .public)")
-                udidsMatch
+                let attestationUDID = attestation.identity?.udid
+                #Predicate { attestationUDID == udid }
             }
+            let allowedDeviceID = self.deviceFilter(try DeviceIdentifiers(from: attestation))
+            #Predicate { allowedDeviceID == true }
         }
         APTicketPolicy()
         SEPImagePolicy()
@@ -178,33 +148,38 @@ public struct EnsembleValidator: Validator {
         )
         DarwinInitPolicy(securityPolicy: self.securityPolicy)
     }
-}
 
-extension EnsembleValidator {
-    static func localDeviceStates() throws -> (deviceMode: DeviceModePolicy.Mode, cryptedLockdown: Bool) {
-        guard let dcik else {
-            throw Error.missingDCIK
+    var trustAnchors: [SecCertificate] {
+        if requireProdTrustAnchors {
+            X509Policy.prodProvisioningRoots
+        } else {
+            self.roots + X509Policy.prodProvisioningRoots + X509Policy.testProvisioningRoots
         }
-        guard let dcikPub = SecKeyCopyPublicKey(dcik) else {
-            throw Error.missingDCIK
-        }
-        let dummyKey = try EnsembleHPKE.createSEPKey()
-        var error: Unmanaged<CFError>?
-        guard let attestData = SecKeyCreateAttestation(dcik, dummyKey, &error)?.takeRetainedValue() as? Data else {
-            throw Error.introspectionError(.attestationError(underlying: error!.takeRetainedValue()))
-        }
-        let attest = try SEP.Attestation(from: attestData, signer: dcikPub)
-        let cryptexLockdown = attest.sealedHash(at: cryptexSlotUUID)?.flags.contains(.ratchetLocked) ?? false
-        return (
-            DeviceModePolicy.Mode(
-                restrictedExecution: attest.restrictedExecutionMode ?? false,
-                ephemeralData: attest.ephemeralDataMode ?? false,
-                developer: attest.developerMode ?? true
-            ), cryptexLockdown
-        )
     }
 
-    static func localChipIdentity() throws -> (identity: SEP.Identity, boardID: UInt32) {
+    public func validate(bundle: AttestationBundle, nonce: Data?) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle) {
+        let provisioningCertChain = try? await assetProvider.provisioningCertificateChain
+        var copy = self
+
+        // if we have a cert, we require our peers to have a cert
+        copy.strictCertificateValidation = provisioningCertChain?.isEmpty == false
+        if let provisioningCertChain {
+            // if we have a production cert, require our peers to have a production cert
+            copy.requireProdTrustAnchors = Self.isProductionCert(chain: provisioningCertChain)
+            copy.checkRevocation = true
+        } else {
+            copy.requireProdTrustAnchors = false
+            copy.checkRevocation = false
+        }
+
+        return try await copy.defaultValidate(bundle: bundle, nonce: nonce)
+    }
+}
+
+// MARK: - Local Device Identifiers
+
+extension EnsembleValidator {
+    static func deviceIdentifiers() throws -> DeviceIdentifiers {
         guard let entry = IORegistryEntry(path: "IODeviceTree:/chosen") else {
             throw Error.introspectionError(.missingIODeviceTreeChosen)
         }
@@ -233,11 +208,20 @@ extension EnsembleValidator {
             throw Error.introspectionError(.missingBoardID)
         }
 
-        return (
+        return .init(
             // SW_SEED is not exposed in IORegistry, so just set to 0.
-            identity: SEP.Identity(chipID: CHIP, ecid: ECID, archBits: .init(productionStatus: EPRO == 1, securityMode: ESEC == 1, securityDomain: securityDomain), swSeed: 0),
+            chipID: SEP.Identity(chipID: CHIP, ecid: ECID, archBits: .init(productionStatus: EPRO == 1, securityMode: ESEC == 1, securityDomain: securityDomain), swSeed: 0),
             boardID: BORD
         )
+
+    }
+}
+
+// MARK: - Legacy API support
+
+extension EnsembleValidator {
+    public var defaultPolicy: some AttestationPolicy {
+        policy
     }
 }
 
@@ -263,6 +247,7 @@ extension EnsembleValidator.Error {
         case missingSealedHashEntries
         case missingCryptexSlot
         case missingDarwinInit
+        case missingDeviceMode
         case attestationError(underlying: Swift.Error)
     }
 }

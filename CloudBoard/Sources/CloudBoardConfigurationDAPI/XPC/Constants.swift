@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,7 +14,7 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+package import CloudBoardAsyncXPC
 
 internal let kConfigurationAPIXPCLocalServiceEntitlement =
     "com.apple.private.cloudos.hotproperties"
@@ -23,7 +23,7 @@ internal let kConfigurationAPIXPCLocalServiceName =
 
 extension CloudBoardAsyncXPCListener {
     /// A listener that handles local connections for the configuration service name.
-    public static var configurationDaemon: CloudBoardAsyncXPCListener {
+    package static var configurationDaemon: CloudBoardAsyncXPCListener {
         .init(
             localService: kConfigurationAPIXPCLocalServiceName,
             entitlement: nil

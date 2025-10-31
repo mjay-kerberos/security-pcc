@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -61,23 +61,31 @@ extension CLI {
         var restoreVariantName: String?
 
         @Option(name: [.customLong("network"), .customShort("n")],
-                help: "Specify network connectivity for guest.")
-        var networkMode: VM.NetworkMode = .nat
+                help: """
+                Specify network connectivity for guest (<mode>[,subopt=val,..]+).",
+                  <mode> one of: \(VM.NetworkMode.allCases.map { "\($0)" }.joined(separator: ", "))
+                  <subopt> one of:
+                      macaddr=<xx:xx:xx:xx:xx:xx>|random
+                      \(CLI.internalBuild ? "sharedInterface=<name> (bridged mode only)" : "")
+                """,
+                transform: { try validateNetworkConfig($0) })
+        var networkConfigs: [VM.NetworkConfig] = []
 
         @Option(name: [.customLong("macaddr"), .customLong("mac")],
-                help: "Specify network MAC address for guest VM [xx:xx:xx:xx:xx:xx].",
+                help: "Specify primary network MAC address for guest VM [xx:xx:xx:xx:xx:xx].",
                 transform: { try validateMACAddr($0) })
         var macAddr: String?
 
         @Option(name: [.customLong("sharedInterface")],
-                help: "Specify local host interface for VM to bridge onto.",
+                help: ArgumentHelp("Specify local host interface for VM primary network to bridge onto.",
+                                   visibility: .customerHidden),
                 transform: { try validateNetIfName($0) })
         var bridgeIf: String?
 
         @Option(name: [.customLong("darwin-init"), .customShort("I")],
                 help: "Path to darwin-init.json startup config (copied in).",
-                transform: { try DarwinInit(fromFile: $0) })
-        var darwinInit: DarwinInit?
+                transform: { try DarwinInitConfig(fromFile: $0) })
+        var darwinInit: DarwinInitConfig?
 
         @Option(name: [.customLong("boot-args"), .customShort("B")], help: "Specify boot-args.")
         var bootArgs: String?
@@ -109,6 +117,15 @@ extension CLI {
                 transform: { try validateFilePath($0) })
         var txm: String?
 
+        @Option(name: [.customLong("virt-mesh-plugin")],
+                help: "Path to VirtMesh plugin.",
+                transform: { try validateDirectoryPath($0) })
+        var virtMeshPlugin: String? = nil
+
+        @Option(name: [.customLong("virt-mesh-rank")],
+                help: "Rank to VirtMesh plugin.")
+        var virtMeshRank: Int? = nil
+
         mutating func validate() throws {
             guard ncpu > 0 else {
                 throw ValidationError("invalid ncpu")
@@ -135,10 +152,23 @@ extension CLI {
                     restoreVariantName = try CLI.restoreVariantName(restoreVariant)
                 }
             }
+
+            if networkConfigs.count == 0 {
+                networkConfigs.append(VM.NetworkConfig(mode: .nat))
+            }
+
+            // if macaddr and/or sharedInterface provided, set them on the first ("primary") entry
+            if macAddr != nil || bridgeIf != nil {
+                let net0 = networkConfigs[0]
+                networkConfigs[0] = VM.NetworkConfig(
+                    mode: net0.mode,
+                    macAddr: macAddr ?? net0.macAddr.string,
+                    bridgeIf: net0.options.bridgeIf?.identifier
+                )
+            }
         }
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
             CLI.logger.log("create VRE \(vmName, privacy: .public)")
 
             let vm = VM(name: vmName, dataDir: globalOptions.datadir)
@@ -160,12 +190,12 @@ extension CLI {
                     cpuCount: ncpu,
                     memorySize: nram,
                     storageSize: storage,
-                    networkConfig: VM.NetworkConfig(mode: networkMode,
-                                                    macAddr: macAddr,
-                                                    bridgeIf: bridgeIf),
+                    networkConfigs: networkConfigs,
                     nvramArgs: nvramArgs,
                     romImages: romImages,
-                    platformFusing: fusing
+                    platformFusing: fusing,
+                    virtMeshPlugin: virtMeshPlugin,
+                    virtMeshRank: virtMeshRank
                 )
             } catch {
                 throw CLIError("create VM \(vmName): \(error)")

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,10 +14,10 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+package import CloudBoardAsyncXPC
 import os
 
-public actor CloudBoardJobHelperAPIXPCServer {
+package actor CloudBoardJobHelperAPIXPCServer {
     static let logger: os.Logger = .init(
         subsystem: "com.apple.cloudos.cloudboard",
         category: "CloudBoardJobHelperAPIXPCServer"
@@ -52,15 +52,15 @@ extension CloudBoardJobHelperAPIXPCServer {
 }
 
 extension CloudBoardJobHelperAPIXPCServer: CloudBoardJobHelperAPIServerToClientProtocol {
-    public func sendWorkloadResponse(_ response: JobHelperToCloudBoardDaemonMessage) async throws {
-        try await self.listener.broadcast(
-            CloudBoardJobHelperAPIXPCServerToClientMessages.WorkloadResponse(message: response)
+    public func sendWorkloadResponse(_ response: JobHelperToCloudBoardDaemonMessage) async {
+        await self.listener.broadcast(
+            response
         )
     }
 }
 
 extension CloudBoardJobHelperAPIXPCServer: CloudBoardJobHelperAPIServerProtocol {
-    public func set(delegate: CloudBoardJobHelperAPIServerDelegateProtocol) async {
+    public func set(delegate: CloudBoardJobHelperAPIClientToServerProtocol) async {
         self.delegate = delegate
     }
 
@@ -70,7 +70,7 @@ extension CloudBoardJobHelperAPIXPCServer: CloudBoardJobHelperAPIServerProtocol 
 
     internal func configureHandlers(_ handlers: inout CloudBoardAsyncXPCConnection.MessageHandlerStore) {
         handlers.register(CloudBoardJobHelperAPIXPCClientToServerMessages.InvokeWorkload.self) { request in
-            Self.logger.debug("Received InvokeWorkload XPC message")
+            Self.logger.debug("Received InvokeWorkload XPC message in helper")
             let delegate = try await self.ensureDelegate()
             do {
                 try await delegate.invokeWorkloadRequest(request.message)

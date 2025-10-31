@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -28,7 +28,7 @@ enum DInitConfigSource {
     case network(URL)
     case ec2imds(String)
     case standardInput
-    case remoteService(String)
+    case remoteService(device: String, service: String)
 }
 
 extension DInitConfigSource: CustomStringConvertible {
@@ -44,8 +44,8 @@ extension DInitConfigSource: CustomStringConvertible {
             return "ec2imds: \(kDInitEC2Prefix)\(key)"
         case .standardInput:
             return "standard input"
-        case let .remoteService(deviceType):
-            return "remoteService: \(kDInitRemoteServicePrefix)\(deviceType)"
+        case let .remoteService(deviceType, serviceName):
+            return "remoteService: \(kDInitRemoteServicePrefix)\(deviceType)|\(serviceName)"
         }
     }
 }
@@ -61,7 +61,8 @@ extension DInitConfigSource: Decodable {
         } else if stringValue.hasPrefix(kDInitEC2Prefix) {
             self = .ec2imds(String(stringValue.dropFirst(kDInitEC2Prefix.count)))
         } else if stringValue.hasPrefix(kDInitRemoteServicePrefix) {
-            self = .remoteService(String(stringValue.dropFirst(kDInitRemoteServicePrefix.count)))
+            let components = stringValue.dropFirst(kDInitRemoteServicePrefix.count).components(separatedBy: "|")
+            self = .remoteService(device: components[0], service: components[1])
         } else {
             self = .fileSystem(FilePath(stringValue))
         }
@@ -82,8 +83,8 @@ extension DInitConfigSource: Encodable {
             try container.encode("\(kDInitEC2Prefix)\(key)")
         case .standardInput:
             try container.encode("-")
-        case let .remoteService(deviceType):
-            try container.encode("\(kDInitRemoteServicePrefix)\(deviceType)")
+        case let .remoteService(deviceType, serviceName):
+            try container.encode("\(kDInitRemoteServicePrefix)\(deviceType)|\(serviceName)")
         }
     }
 }
@@ -99,8 +100,8 @@ extension DInitConfigSource: ExpressibleByArgument {
         } else if argument.hasPrefix(kDInitEC2Prefix) {
             self = .ec2imds(String(argument.dropFirst(kDInitEC2Prefix.count)))
         } else if argument.hasPrefix(kDInitRemoteServicePrefix) {
-            let deviceTypeDesc = String(argument.dropFirst(kDInitRemoteServicePrefix.count))
-            self = .remoteService(deviceTypeDesc)
+            let components = argument.dropFirst(kDInitRemoteServicePrefix.count).components(separatedBy: "|")
+            self = .remoteService(device: components[0], service: components[1])
         } else {
             self = .fileSystem(FilePath(argument))
         }

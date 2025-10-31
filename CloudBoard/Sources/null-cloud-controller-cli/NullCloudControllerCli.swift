@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -33,9 +33,12 @@ extension NullCloudControllerCli {
         @Option(name: .shortAndLong, help: "State to update. Supported states: \(State.allCases)")
         public var state: State
 
+        @Option(name: .shortAndLong, help: "Busy reason. Only supported when state is busy.")
+        public var busyReason: String?
+
         func run() async throws {
             let xpcClient = await NullCloudControllerAPIXPCClient()
-            let response = try await xpcClient.updateState(state: .init(from: self.state))
+            let response = try await xpcClient.updateState(state: .init(from: self.state, busyReason: self.busyReason))
             print(response)
         }
     }
@@ -56,12 +59,17 @@ enum State: String, ExpressibleByArgument, CaseIterable {
 }
 
 extension WorkloadControllerState {
-    init(from state: State) {
-        switch state {
-        case .initializing: self = .initializing
-        case .busy: self = .busy
-        case .ready: self = .ready
-        case .error: self = .error(message: nil)
+    init(from state: State, busyReason: String?) {
+        switch (state, busyReason) {
+        case (.initializing, _): self = .initializing
+        case (.busy, let reason):
+            if let reason {
+                self = .busyWithReason(reason)
+            } else {
+                self = .busy
+            }
+        case (.ready, _): self = .ready
+        case (.error, _): self = .error(message: nil)
         }
     }
 }

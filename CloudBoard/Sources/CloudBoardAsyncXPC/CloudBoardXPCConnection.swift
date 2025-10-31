@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,6 +14,7 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
+import CloudBoardOSActivity
 import Foundation
 import OSLog
 import XPC
@@ -22,42 +23,57 @@ import XPCPrivate
 // MARK: - Actor
 
 /// Represents an authorized bi-directional xpc connection established by a remote client to the XPC service:
-public actor CloudBoardAsyncXPCConnection: Identifiable {
+package actor CloudBoardAsyncXPCConnection: Identifiable {
     private typealias XPCResult = Result<XPCDictionary, CloudBoardAsyncXPCError>
     public typealias ConnectionEventHandler = @Sendable (CloudBoardAsyncXPCConnection) async -> Void
 
     public nonisolated let name: String
-    private var logger: Logger
-    private var connection: XPCConnection
+    public var logger: Logger
+    private var connection: XPCLocalConnection
     private var connectionQueue: DispatchQueue
+    private var postedMessageHandlers: [String: XPCPostedMessageHandler]
     private var nonPostedMessageHandlers: [String: XPCNonPostedMessageHandler]
 
     private var onConnectionInvalidated: ConnectionEventHandler?
     private var onConnectionInterrupted: ConnectionEventHandler?
     private var onConnectionTerminationImminent: ConnectionEventHandler?
 
-    internal init(_ connection: XPCConnection) {
+    internal init(_ connection: XPCLocalConnection) {
         self.connection = connection
         self.connectionQueue = DispatchQueue(
             label: "com.apple.CloudBoardAsyncXPC.CloudBoardXPCConnection.queue",
-            qos: .userInteractive
+            qos: .userInteractive,
         )
+        self.postedMessageHandlers = [:]
         self.nonPostedMessageHandlers = [:]
         self.logger = Logger(subsystem: "com.apple.CloudBoardAsyncXPC", category: "CloudBoardXPCConnection")
         self.name = connection.name
         self.connection.setTargetQueue(self.connectionQueue)
     }
 
-    private func handleMessage(message: XPCDictionary) {
+    private func handleMessage(message: sending XPCDictionary) {
         guard let type: String = message[kMessageTypeKey] else {
             self.logger.error("Could not get type for message from \(self.name, privacy: .public) connection")
             return
         }
 
-        self.logger.trace("Handle \(type, privacy: .public) message from \(self.name, privacy: .public) connection")
+        self.logger.debug("Handle \(type, privacy: .public) message from \(self.name, privacy: .public) connection")
         let logger = self.logger
-        if let handler = self.nonPostedMessageHandlers[type] {
-            Task.detached(priority: Task.currentPriority) { [weak self, message, logger] in
+        if let handler = self.postedMessageHandlers[type] {
+            // posted message handler should not be async as that can trivially lead to
+            // messages getting reordered.
+            { [weak self, message] in
+                guard let self else { return }
+                defer { withExtendedLifetime(self) {} }
+                guard let encodedMessage: xpc_object_t = message[kMessageBodyKey] else {
+                    return
+                }
+                CloudBoardAsyncXPCContext.$context.withValue(.init(peerConnection: self)) {
+                    handler(encodedMessage)
+                }
+            }()
+        } else if let handler = self.nonPostedMessageHandlers[type] {
+            Task(priority: Task.currentPriority) { [weak self, message, logger] in
                 guard let self else { return }
                 defer { withExtendedLifetime(self) {} }
 
@@ -75,14 +91,12 @@ public actor CloudBoardAsyncXPCConnection: Identifiable {
                         replyDict[kMessageBodyKey] = encodedReply
                     }
                 } catch {
-                    logger
-                        .error(
-                            "Failed to handle \(type, privacy: .public) message with reply: \(error, privacy: .public)"
-                        )
+                    logger.error(
+                        "Failed to handle \(type, privacy: .public) message with reply: \(error, privacy: .public)"
+                    )
                     replyDict[kMessageRemoteProcessErrorKey] = String(describing: error)
                     replyDict.removeValue(forKey: kMessageBodyKey)
                 }
-
                 replyDict.sendReply()
             }
         } else {
@@ -95,8 +109,17 @@ public actor CloudBoardAsyncXPCConnection: Identifiable {
     }
 
     /// Extract return value for a specific message type from an xpc reply message
-    private func getReply<Message: CloudBoardAsyncXPCMessage>(object: XPCObject, from _: Message.Type) throws -> Message
-    .Success {
+    private func getReply<Message: CloudBoardAsyncXPCMessage>(object: XPCObject, from: Message.Type) throws -> Message
+    .Success where Message.Reply: Codable {
+        let encodedReply = try getEncodedReply(object: object, from: from)
+        let reply = try XPCObjectDecoder().decode(Message.Reply.self, from: encodedReply)
+        return try reply.get()
+    }
+
+    internal func getEncodedReply(
+        object: XPCObject,
+        from _: (some CloudBoardAsyncXPCMessage).Type
+    ) throws -> xpc_object_t {
         let dict = try XPCDictionary(connection: self.connection, object: object)
         guard let encodedReply: xpc_object_t = dict[kMessageBodyKey] else {
             guard let unexpectedError: String = dict[kMessageRemoteProcessErrorKey] else {
@@ -108,10 +131,7 @@ public actor CloudBoardAsyncXPCConnection: Identifiable {
                 connectionName: self.connection.name
             )
         }
-
-        let decoder = XPCObjectDecoder()
-        let reply = try decoder.decode(Message.Reply.self, from: encodedReply)
-        return try reply.get()
+        return encodedReply
     }
 
     /// All libxpc events are tunneled thru this method and dispatched to appropriate handlers
@@ -136,6 +156,7 @@ public actor CloudBoardAsyncXPCConnection: Identifiable {
                     "\(self.name, privacy: .public) connection has been invalidated: \(reason ?? "", privacy: .public)"
                 )
             await self.onConnectionInvalidated?(self)
+            self.connection.eventsContinuation.finish()
             return true
         } catch {
             self.logger.error(
@@ -151,7 +172,7 @@ public actor CloudBoardAsyncXPCConnection: Identifiable {
     /// handlers.
     @discardableResult
     public func activate() -> Self {
-        self.activate(messageHandlers: [:])
+        self.activate(postedMessageHandlers: [:], messageHandlers: [:])
         return self
     }
 
@@ -161,33 +182,37 @@ public actor CloudBoardAsyncXPCConnection: Identifiable {
     public func activate(buildMessageHandlerStore: (inout MessageHandlerStore) -> Void) -> Self {
         var store = CloudBoardAsyncXPCConnection.MessageHandlerStore()
         buildMessageHandlerStore(&store)
-        self.activate(messageHandlers: store.handlers)
+        self.activate(postedMessageHandlers: store.postedHandlers, messageHandlers: store.handlers)
         return self
     }
 
     @discardableResult
     internal func activate(
+        postedMessageHandlers: [String: XPCPostedMessageHandler],
         messageHandlers: [String: XPCNonPostedMessageHandler]
     ) -> Self {
-        self.nonPostedMessageHandlers = messageHandlers
+        self.nonPostedMessageHandlers.merge(messageHandlers, uniquingKeysWith: { _, newHandler in newHandler })
+        self.postedMessageHandlers.merge(postedMessageHandlers, uniquingKeysWith: { _, newHandler in newHandler })
 
-        // NOTE: We should pass a weak reference to self,
-        // however, libswift_Concurrency when ran only in combination with XCTest
-        // either over-releases async context or it gets corrupted, therefore
-        // libswift_Concurrency hits a bad access exception in swift_task_switchImpl.
-        //
-        // To keep unit tests in place, lets pass a strong reference to self here. In practice,
-        // client code will call cancel to terminate the connection and thus break
-        // the strong reference.
-        Task {
-            for await object in self.connection.events where await self.handleXPCEvent(object: object) {
-                return
+        Task { [weak self] in
+            guard let self else { return }
+            for await object in await self.connection.events {
+                _ = await self.handleXPCEvent(object: object)
             }
         }
 
         self.connection.resume()
 
         return self
+    }
+
+    public func registerHandler<Message: CloudBoardAsyncXPCCodableMessage>(
+        _: Message.Type,
+        handler: @Sendable @escaping (Message) async throws -> Message.Success
+    ) {
+        var store = CloudBoardAsyncXPCConnection.MessageHandlerStore()
+        store.register(Message.self, handler: handler)
+        self.nonPostedMessageHandlers.merge(store.handlers, uniquingKeysWith: { _, newHandler in newHandler })
     }
 
     /// Cancel and close xpc connection
@@ -201,31 +226,33 @@ public actor CloudBoardAsyncXPCConnection: Identifiable {
     }
 
     /// Send a non-posted message with response data.
-    @discardableResult
     public func send<Message>(_ message: Message) async throws -> Message.Success
-    where Message: CloudBoardAsyncXPCMessage {
-        let interval = Signposter.signposter.beginInterval("Send", "\(self.connection.name)")
+    where Message: CloudBoardAsyncXPCCodableMessage {
+        let interval = Signposter.signposter.beginInterval("Send", "\(self.connection.name) \(type(of: message))")
         defer {
             Signposter.signposter.endInterval("Send", interval)
         }
+        // Only create a new activity if none is already present
         return try await self._send(message)
     }
 
     /// Send a non-posted message without response data.
     public func send<Message>(_ message: Message) async throws
-    where Message: CloudBoardAsyncXPCMessage, Message.Success == ExplicitSuccess {
-        let interval = Signposter.signposter.beginInterval("Send", "\(self.connection.name)")
+    where Message: CloudBoardAsyncXPCCodableMessage, Message.Success == ExplicitSuccess {
+        let interval = Signposter.signposter.beginInterval("Send", "\(self.connection.name) \(type(of: message))")
         defer {
             Signposter.signposter.endInterval("Send", interval)
         }
+        // Only create a new activity if none is already present
         _ = try await self._send(message)
     }
 
-    private func _send<Message: CloudBoardAsyncXPCMessage>(_ message: Message) async throws -> Message.Success {
-        let encodedMessage = try Signposter.signposter.withIntervalSignpost("XPC Encode") {
-            let encoder = XPCObjectEncoder()
-            return try encoder.encode(message)
-        }
+    private func _send<Message: CloudBoardAsyncXPCCodableMessage>(
+        _ message: Message
+    ) async throws -> Message.Success {
+        let interval = Signposter.signposter.beginInterval("XPC Encode", "\(Message.Type.self)")
+        let encodedMessage = try XPCObjectEncoder().encode(message)
+        Signposter.signposter.endInterval("XPC Encode", interval)
 
         var dict = XPCDictionary()
         dict[kMessageTypeKey] = String(describing: Message.self)
@@ -233,7 +260,10 @@ public actor CloudBoardAsyncXPCConnection: Identifiable {
 
         return try await withCheckedThrowingContinuation { continuation in
             let replyLock = NSLock()
-            let interval = Signposter.signposter.beginInterval("Send encoded", "\(self.connection.name)")
+            let interval = Signposter.signposter.beginInterval(
+                "Send encoded",
+                "\(self.connection.name) \(type(of: message))"
+            )
             self.connection.sendMessageWithReply(dict, self.connectionQueue) { object in
                 Signposter.signposter.endInterval("Send encoded", interval)
                 do {
@@ -254,9 +284,14 @@ public actor CloudBoardAsyncXPCConnection: Identifiable {
     }
 
     /// Send a posted message.
-    public func send<Message: CloudBoardAsyncXPCMessage>(_ message: Message) throws where Message.Success == Never,
-    Message.Failure == Never {
-        let interval = Signposter.signposter.beginInterval("Post", "\(self.connection.name)")
+    ///
+    /// Posted message can have no return or error from the remote end.
+    ///
+    /// Returns as soon as message has been sent out.
+    public func post<Message: CloudBoardAsyncXPCCodableMessage>(_ message: Message) throws
+        where Message.Success == Never,
+        Message.Failure == Never {
+        let interval = Signposter.signposter.beginInterval("Post", "\(self.connection.name) \(type(of: message))")
         defer {
             Signposter.signposter.endInterval("Post", interval)
         }
@@ -296,20 +331,31 @@ public actor CloudBoardAsyncXPCConnection: Identifiable {
 
 extension CloudBoardAsyncXPCConnection {
     internal typealias XPCNonPostedMessageHandler = @Sendable (xpc_object_t) async throws -> xpc_object_t
+    /// Posted message handlers should not be made async as that can trivially lead to messages being reordered
+    /// when they are getting delivered in quick succession.
+    internal typealias XPCPostedMessageHandler = @Sendable (xpc_object_t) -> Void
 
     public struct MessageHandlerStore: Sendable {
+        static let logger: Logger = .init(subsystem: "com.apple.CloudBoardAsyncXPC", category: "MessageHandlerStore")
+        /// Handlers requiring a response from the other side
         internal private(set) var handlers: [String: XPCNonPostedMessageHandler]
+        /// "Fire and forget" handlers
+        internal private(set) var postedHandlers: [String: XPCPostedMessageHandler]
 
         public init() {
             self.handlers = [:]
+            self.postedHandlers = [:]
         }
 
-        public mutating func register<Message: CloudBoardAsyncXPCMessage>(
+        public mutating func register<Message: CloudBoardAsyncXPCCodableMessage>(
             _: Message.Type,
             handler: @Sendable @escaping (Message) async throws -> Message.Success
         ) {
             self.handlers[String(describing: Message.self)] = { encodedMessage in
-                let message = try Signposter.signposter.withIntervalSignpost("XPC handler decode") {
+                let message = try Signposter.signposter.withIntervalSignpost(
+                    "XPC handler decode",
+                    "\(Message.Type.self)"
+                ) {
                     let decoder = XPCObjectDecoder()
                     return try decoder.decode(Message.self, from: encodedMessage)
                 }
@@ -322,11 +368,25 @@ extension CloudBoardAsyncXPCConnection {
                     reply = .failure(error)
                 }
 
-                let encodedReply = try Signposter.signposter.withIntervalSignpost("XPC handler response encode") {
-                    let encoder = XPCObjectEncoder()
-                    return try encoder.encode(reply)
-                }
+                let interval = Signposter.signposter.beginInterval("XPC handler response encode", "\(type(of: reply))")
+                let encoder = XPCObjectEncoder()
+                let encodedReply = try encoder.encode(reply)
+                Signposter.signposter.endInterval("XPC handler response encode", interval)
                 return encodedReply
+            }
+        }
+
+        public mutating func register<Message: CloudBoardAsyncXPCCodableMessage>(
+            _: Message.Type,
+            handler: @Sendable @escaping (Message) -> Void
+        ) where Message.Success == Never, Message.Failure == Never {
+            self.postedHandlers[String(describing: Message.self)] = { encodedMessage in
+                let message = Signposter.signposter.withIntervalSignpost("XPC handler decode", "\(Message.Type.self)") {
+                    let decoder = XPCObjectDecoder()
+                    return try! decoder.decode(Message.self, from: encodedMessage)
+                }
+
+                handler(message)
             }
         }
     }
@@ -364,5 +424,162 @@ extension CloudBoardAsyncXPCConnection {
 extension CloudBoardAsyncXPCConnection {
     public func entitlementValue(for entitlement: String) -> [String] {
         return self.connection.entitlementValue(for: entitlement)
+    }
+}
+
+// MARK: - ByteBufferCodable support
+
+extension CloudBoardAsyncXPCConnection {
+    /// Send a posted message.
+    public func post<Message>(_ message: Message) throws
+    where Message: CloudBoardAsyncXPCByteBufferMessage, Message.Success == Never, Message.Failure == Never {
+        let interval = Signposter.signposter.beginInterval("Post", "bb \(self.connection.name) \(type(of: message))")
+        defer {
+            Signposter.signposter.endInterval("Post", interval)
+        }
+        var byteBuffer = ByteBuffer()
+        try message.encode(to: &byteBuffer)
+
+        var dict = XPCDictionary()
+        dict[kMessageTypeKey] = String(describing: Message.self)
+        dict[kMessageBodyKey] = byteBuffer.withUnsafeReadableBytes {
+            xpc_data_create($0.baseAddress, $0.count)
+        }
+        self.connection.sendMessage(dict)
+    }
+
+    /// Send a non-posted message with response data.
+    public func send<Message>(_ message: Message) async throws -> Message.Success
+    where Message: CloudBoardAsyncXPCByteBufferMessage {
+        let interval = Signposter.signposter.beginInterval("Send", "bb \(self.connection.name) \(type(of: message))")
+        defer {
+            Signposter.signposter.endInterval("Send", interval)
+        }
+        return try await self._sendByteBufferCodable(message)
+    }
+
+    /// Send a non-posted message without response data.
+    public func send<Message>(_ message: Message) async throws
+    where Message: CloudBoardAsyncXPCByteBufferMessage, Message.Success == ExplicitSuccess {
+        let interval = Signposter.signposter.beginInterval("Send", "bb \(self.connection.name) \(type(of: message))")
+        defer {
+            Signposter.signposter.endInterval("Send", interval)
+        }
+        _ = try await self._sendByteBufferCodable(message)
+    }
+
+    private func _sendByteBufferCodable<Message: CloudBoardAsyncXPCByteBufferMessage>(
+        _ message: Message
+    ) async throws -> Message.Success
+    where Message: ByteBufferCodable, Message.Reply: ByteBufferCodable {
+        let interval = Signposter.signposter.beginInterval("XPC Encode", "bb \(Message.Type.self)")
+        var byteBuffer = ByteBuffer()
+        try message.encode(to: &byteBuffer)
+        let xpc_data = byteBuffer.withUnsafeReadableBytes {
+            xpc_data_create($0.baseAddress, $0.count)
+        }
+        Signposter.signposter.endInterval("XPC Encode", interval)
+
+        var dict = XPCDictionary()
+        dict[kMessageTypeKey] = String(describing: Message.self)
+        dict[kMessageBodyKey] = xpc_data
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let replyLock = NSLock()
+            let interval = Signposter.signposter.beginInterval(
+                "Send encoded",
+                "bb \(self.connection.name) \(type(of: message))"
+            )
+            self.connection.sendMessageWithReply(dict, self.connectionQueue) { object in
+                Signposter.signposter.endInterval("Send encoded", interval)
+                do {
+                    // NSLock life-time is limited to individual send method call,
+                    // thus the lock in never unlocked once it's locked. It's a replacement for
+                    // swift-atomics boolean that used to be here.
+                    if replyLock.try() {
+                        let result = try self.getReply(object: object, from: Message.self)
+                        continuation.resume(returning: result)
+                    } else {
+                        self.logger.error("Dropping unexpected reply on \(self.name, privacy: .public) connection")
+                    }
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Extract return value for a specific message type from an xpc reply message
+    private func getReply<Message: CloudBoardAsyncXPCByteBufferMessage>(
+        object: XPCObject,
+        from: Message.Type
+    ) throws -> Message.Success {
+        let encodedReply = try getEncodedReply(object: object, from: from)
+        var buffer = ByteBuffer(from: encodedReply)
+        let reply = try Message.Reply(from: &buffer)
+        return try reply.get()
+    }
+}
+
+extension CloudBoardAsyncXPCConnection.MessageHandlerStore {
+    /// Register non-posted message handler.
+    ///
+    /// Specialized for ByteBufferCodable message and response
+    package mutating func register<Message: CloudBoardAsyncXPCMessage>(
+        _: Message.Type,
+        handler: @Sendable @escaping (Message) async throws -> Message.Success
+    ) where Message: ByteBufferCodable, Message.Reply: ByteBufferCodable {
+        self.handlers[String(describing: Message.self)] = { encodedMessage in
+            let message = try Signposter.signposter.withIntervalSignpost(
+                "XPC handler decode",
+                "bb \(Message.Type.self)"
+            ) {
+                var buffer = ByteBuffer(from: encodedMessage)
+                return try Message(from: &buffer)
+            }
+
+            let reply: Message.Reply
+            do {
+                let result = try await handler(message)
+                reply = .success(result)
+            } catch let error as Message.Failure {
+                reply = .failure(error)
+            }
+
+            let interval = Signposter.signposter.beginInterval(
+                "XPC handler response encode",
+                "bb \(Message.Reply.Type.self)"
+            )
+            var byteBuffer = ByteBuffer()
+            try reply.encode(to: &byteBuffer)
+            let encodedReply = byteBuffer.withUnsafeReadableBytes {
+                xpc_data_create($0.baseAddress, $0.count)
+            }
+            Signposter.signposter.endInterval("XPC handler response encode", interval)
+            return encodedReply
+        }
+    }
+
+    /// Register posted message handler.
+    package mutating func register<Message: CloudBoardAsyncXPCByteBufferMessage>(
+        _: Message.Type,
+        handler: @Sendable @escaping (Message) -> Void
+    ) where Message.Success == Never, Message.Failure == Never {
+        self.postedHandlers[String(describing: Message.self)] = { encodedMessage in
+            let message = Signposter.signposter.withIntervalSignpost(
+                "XPC handler decode",
+                "bb \(Message.Type.self)"
+            ) {
+                var buffer = ByteBuffer(from: encodedMessage)
+                return try? Message(from: &buffer)
+            }
+
+            guard let message else {
+                Self.logger
+                    .error("Dropping response that failed to deserialize as ByteBufferCodable \(Message.Type.self)")
+                return
+            }
+            handler(message)
+        }
     }
 }

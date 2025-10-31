@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -194,19 +194,19 @@ extension HeartbeatHTTPClient {
 }
 
 /// The application or daemon on the sender.
-public enum HealthSource {
+public enum HealthSource: Sendable {
     /// The CloudBoard daemon.
     case cloudboardd
 }
 
 /// The type of the sender node.
-public enum HealthSenderType {
+public enum HealthSenderType: Sendable {
     /// A worker node.
     case node
 }
 
 /// A snapshot of the current state of the sender.
-public struct Heartbeat {
+public struct Heartbeat: Sendable {
     /// The identifier of the sender.
     public var identifier: String
 
@@ -226,7 +226,7 @@ public struct Heartbeat {
     public var timestamp: Date
 
     /// The metadata values sent with the heartbeat.
-    public struct Metadata {
+    public struct Metadata: Sendable {
         /// The cloudOS release type.
         public var cloudOSReleaseType: String?
 
@@ -311,15 +311,13 @@ extension HeartbeatHTTPClient {
     /// Sends the provided heartbeat to the upstream service.
     /// - Parameter heartbeat: The information about the sender.
     public func sendHeartbeat(_ heartbeat: Heartbeat) async throws {
-        let mappedSource: Components.Schemas.Source
-        switch heartbeat.source {
+        let mappedSource: Components.Schemas.Source = switch heartbeat.source {
         case .cloudboardd:
-            mappedSource = .CLOUDBOARDD
+            .CLOUDBOARDD
         }
-        let mappedAssetType: Components.Schemas.AssetType
-        switch heartbeat.senderType {
+        let mappedAssetType: Components.Schemas.AssetType = switch heartbeat.senderType {
         case .node:
-            mappedAssetType = .NODE
+            .NODE
         }
         let metadata = heartbeat.metadata
         let response = try await healthClient.heartbeat(
@@ -381,7 +379,7 @@ extension Components.Schemas.ResponseError {
 }
 
 extension Heartbeat {
-    public enum Status: Equatable, Hashable, CustomStringConvertible {
+    public enum Status: Equatable, Hashable, CustomStringConvertible, Sendable {
         case uninitialized
         case initializing
         case waitingForFirstAttestationFetch

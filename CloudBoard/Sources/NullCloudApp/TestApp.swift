@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -56,7 +56,6 @@ struct TestApp {
                 } else {
                     // fairly arbitrary sampling of logs - too high a frequency of events causes the process
                     // to be quarantined by libtrace.
-                    // https://confluence.sd.apple.com/pages/viewpage.action?spaceKey=DarwinSystemTools&title=logd+Configuration+Preferences
                     if tokenNumber % 100 == 0 {
                         NullCloudApp.log.log("""
                         request.uuid=\(requestID, privacy: .public)
@@ -102,7 +101,15 @@ struct TestApp {
                     throw RequestedCrashError.crashOnResponse
                 }
             }
+            NullCloudApp.log.log("""
+            request.uuid=\(requestID, privacy: .public)
+            message=TestApp data finished
+            """)
         }
+        NullCloudApp.log.log("""
+        request.uuid=\(requestID, privacy: .public)
+        message=TestApp finished
+        """)
     }
 }
 

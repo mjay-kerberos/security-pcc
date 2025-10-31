@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -25,6 +25,9 @@ private let logger: os.Logger = .init(
     subsystem: "com.apple.cloudos.cloudboard",
     category: "cloudboardmetrics"
 )
+
+public let gaugeMetricPublishInterval: Duration = .seconds(30)
+public let workloadParameterInferenceIDKey: String = "inference-id"
 
 public struct MetricLabel: RawRepresentable, Hashable, Sendable {
     public var rawValue: String
@@ -573,14 +576,23 @@ extension MetricsSystem where Self == NoOpMetricsSystem {
     public static var noOp: Self { Self() }
 }
 
-extension Duration {
-    var milliseconds: Double {
+// This is a sufficiently common operation and it's easy to think seconds() is precise
+package extension Duration {
+    package var milliseconds: Double {
         let (seconds, attoseconds) = components
         return Double(seconds) * 1000 + Double(attoseconds) * 1e-15
     }
 
-    var seconds: Double {
+    package var seconds: Double {
         let (seconds, attoseconds) = components
         return Double(seconds) + Double(attoseconds) * 1e-18
+    }
+
+    package static func minutes(_ minutes: Int) -> Duration {
+        return .seconds(minutes * 60)
+    }
+
+    package static func hours(_ hours: Int) -> Duration {
+        return .minutes(hours * 60)
     }
 }

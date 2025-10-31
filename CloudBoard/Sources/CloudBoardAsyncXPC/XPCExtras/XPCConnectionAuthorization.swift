@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -38,7 +38,7 @@ internal struct XPCConnectionPassthroughAuthorization {
     }
 }
 
-extension XPCConnectionPassthroughAuthorization: @unchecked Sendable {}
+extension XPCConnectionPassthroughAuthorization: Sendable {}
 
 extension XPCConnectionPassthroughAuthorization: XPCConnectionAuthorization {
     internal func isAuthorized(connection: XPCConnection) -> Bool {
@@ -62,7 +62,7 @@ internal struct XPCConnectionEntitlementAuthorization {
     }
 }
 
-extension XPCConnectionEntitlementAuthorization: @unchecked Sendable {}
+extension XPCConnectionEntitlementAuthorization: Sendable {}
 
 extension XPCConnectionEntitlementAuthorization: XPCConnectionAuthorization {
     internal func isAuthorized(connection: XPCConnection) -> Bool {

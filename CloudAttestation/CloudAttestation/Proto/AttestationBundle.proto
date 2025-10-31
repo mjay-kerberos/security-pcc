@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -15,6 +15,7 @@
 syntax = "proto3";
 
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/any.proto";
 
 import "ATServiceApi.proto";
 
@@ -24,9 +25,17 @@ message AttestationBundle {
     bytes sep_attestation = 1; // DER encoded SEP attestation blob.
     bytes ap_ticket = 2; // Image4 Manifest DER blob.
     SealedHashLedger sealed_hashes = 3;
-    repeated bytes provisioning_certificate_chain = 4;
-    google.protobuf.Timestamp key_expiration = 6; // Unix timestamp of the key's epxiration, as hinted by the attested device
+    repeated bytes provisioning_certificate_chain = 4; // DCIK certificate for Private Cloud Compute
+    bytes app_data = 5; // Use-case specific data. sha256 digest of this is included in the nonce
+    google.protobuf.Timestamp key_expiration = 6; // Unix timestamp of the key's expiration, as hinted by the attested device
     TransparencyProofs transparency_proofs = 8;
+}
+
+message AppData {
+    uint32 version = 1; // 1
+    string domain = 2; // com.apple.PrivateCloudCompute
+    string name = 3; // Proxy Node vs Compute Node
+    google.protobuf.Any metadata = 4; // Empty for Compute Node, PrivateCloudCompute_ProxyNodeMetadata for Proxy Node
 }
 
 message SealedHashLedger {
@@ -46,6 +55,8 @@ message SealedHash {
         // A tagged union of different payloads that are written to a Software Sealed Hash Register.
         // Each payload should have enough information in of itself to reconstruct the above `digest` value.
         oneof info {
+            // Generic unknown bytes
+            bytes generic = 7;
             // Information over a cryptex that result to `digest` when hashed canonically using `alg`
             Cryptex cryptex = 3;
             // A libCryptex defined magic value that serves as and END marker for a register. Typically should have FLAG_RATCHET_LOCKED
@@ -53,6 +64,7 @@ message SealedHash {
             // A SecureConfig Entry
             SecureConfig secure_config = 5;
         }
+        map<string, bytes> metadata = 6;
 
         enum Flags {
             FLAG_NONE = 0;
@@ -71,8 +83,10 @@ message Cryptex {
 }
 
 message SecureConfig {
-    bytes entry = 1;
-    map<string, string> metadata = 2;
+    bytes entry = 1 [deprecated=true];
+    map<string, string> metadata = 2 [deprecated=true];
+    // contains the full entry data (.metadata + \n + .entry)
+    bytes data = 3;
 }
 
 enum HashAlg {
@@ -82,5 +96,5 @@ enum HashAlg {
 }
 
 message TransparencyProofs {
-    ATLogProofs proofs = 1;
+    PrivateCloudCompute.TransparencyLog.ATLogProofs proofs = 1;
 }

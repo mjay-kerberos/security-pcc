@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -26,7 +26,6 @@ extension CLI.InstanceCmd {
         )
 
         @OptionGroup var globalOptions: CLI.globalOptions
-        @OptionGroup var instanceOptions: CLI.InstanceCmd.options
 
         @Option(name: [.customLong("name"), .customShort("N")], help: "VRE name.",
                 transform: { try CLI.validateVREName($0) })
@@ -41,93 +40,29 @@ extension CLI.InstanceCmd {
         var cloudremotediagSubcommandArgs: [String]
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
             CLI.logger.log("make diagnostic request [\(cloudremotediagSubcommandArgs.first!, privacy: .public)] to VRE \(vreName, privacy: .public)")
 
-            var vreRSDname = "none"
+            let vre = try VRE.Instance(name: vreName)
 
-            guard VRE.exists(vreName) else {
-                throw CLIError("VRE '\(vreName)' not found.")
-            }
-
-            let vre = try VRE(
-                name: vreName,
-                vrevmPath: instanceOptions.vrevmPath
-            )
-
-            var toolsDir: URL
-            var unmountCallback: (() -> Void)?
-
-            if let toolsDMGPath {
-                // caller-provided image: mount and use in place (don't unpack)
-                CLI.logger.log("caller-provided tools DMG: \(toolsDMGPath, privacy: .public)")
-                (toolsDir, unmountCallback) = try CLI.mountPCHostTools(vre: vre, dmgFile: toolsDMGPath)
-            } else {
-                toolsDir = try CLI.unpackPCTools(vre: vre)
-            }
-
+            let (toolsDir, unmountCallback) = try CLI.setupPCHostTools(vre, toolsDMGPath: toolsDMGPath)
             defer {
+                // if provided a DMG path to use for the diag call, don't copy it in, but unmount it once finished
                 if let unmountCallback {
                     unmountCallback()
                 }
             }
 
-            // if cloudremotediag subcommand is "help", don't require VM running/have RSD access
-            if cloudremotediagSubcommandArgs.first != "help" {
-                guard vre.vm.isRunning else {
-                    throw CLIError("VRE \(vreName) is not running")
-                }
-
-                guard let _vreRSDname = try vre.status().rsdname else {
-                    throw CLIError("unable to determine RSD name of VRE \(vreName)")
-                }
-                vreRSDname = _vreRSDname
+            guard vre.isRunning else {
+                throw CLIError("VRE \(vreName) is not running")
             }
 
             do {
-                try performDiag(
-                    toolsDir: toolsDir,
-                    rsdName: vreRSDname,
-                    commandArgs: cloudremotediagSubcommandArgs
-                )
+                let diagOutput = try vre.runCloudRemoteDiag(toolsDir: toolsDir,
+                                                            commandArgs: cloudremotediagSubcommandArgs)
+                print(diagOutput)
             } catch {
-                throw CLIError("cloudremotediagctl call reported failed: \(error)")
+                throw CLIError("\(error)")
             }
-        }
-
-        private func performDiag(
-            toolsDir: URL,
-            rsdName: String,
-            commandArgs: [String]
-        ) throws {
-            let envvars = [
-                "DYLD_FRAMEWORK_PATH": "\(toolsDir.path)/System/Library/PrivateFrameworks/",
-            ]
-
-            let diagCMD = "cloudremotediagctl"
-            let diagCLI = "\(toolsDir.path)/usr/local/bin/\(diagCMD)"
-            guard FileManager.isRegularFile(diagCLI) else {
-                throw CLIError("unable to find diag tool")
-            }
-
-            let commandLine = [diagCLI, "--device=\(rsdName)"] + commandArgs // required even for "help"
-            let logMsg = "cloudremotediagctl call: [env: \(envvars)] \(commandLine.joined(separator: " "))"
-            CLI.logger.log("\(logMsg, privacy: .public)")
-
-            let (exitCode, stdOutput, stdError) = try ExecCommand(commandLine, envvars: envvars).run(
-                outputMode: .tee,
-                queue: DispatchQueue(label: "\(applicationName).ExecCommand")
-            )
-
-            guard exitCode == 0 else {
-                if !stdError.isEmpty {
-                    CLI.logger.error("cloudremotediagctl error: \(stdError, privacy: .public)")
-                }
-
-                throw CLIError("exitCode=\(exitCode)")
-            }
-
-            CLI.logger.log("cloudremotediagctl result: \(stdOutput, privacy: .public)")
         }
     }
 }

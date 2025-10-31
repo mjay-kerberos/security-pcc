@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -27,9 +27,6 @@ extension CLI.TransparencyLogCmd {
         )
 
         @OptionGroup var transparencyLogOptions: CLI.TransparencyLogCmd.options
-
-        @Option(name: [.customLong("storage")], help: "Where to store checkpoint of transparency log.")
-        var storage: String = VRE.applicationDir.appending(path: "transparency-log").path(percentEncoded: false)
 
         @Flag(name: [.customLong("continuous"), .customShort("c")],
               help: "Continuously audit the transparency log.")
@@ -67,11 +64,11 @@ extension CLI.TransparencyLogCmd {
         func runCancellable() async throws {
             let log = try await TransparencyLog(
                 environment: transparencyLogOptions.environment,
-                altKtInitEndpoint: transparencyLogOptions.ktInitEndpoint,
-                tlsInsecure: transparencyLogOptions.tlsInsecure
+                altKtInitEndpoint: transparencyLogOptions.ktInitEndpoint
             )
 
-            let storageURL = URL(filePath: storage).appending(path: transparencyLogOptions.environment.rawValue)
+            let storageURL = FileManager.fileURL(transparencyLogOptions.storage)
+                .appending(path: transparencyLogOptions.environment.rawValue)
 
             var auditor = try Auditor(for: log, storageURL: storageURL)
             auditor.delegate = self

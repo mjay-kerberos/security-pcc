@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -16,31 +16,36 @@
 
 import CryptoKit
 import Foundation
-@_implementationOnly import ObliviousX
+internal import ObliviousX
 
-public struct OHTTPClientStateMachine {
+package struct OHTTPClientStateMachine {
     private let requestContentType = "application/protobuf chunked request"
     private let responseContentType = "application/protobuf chunked response"
 
-    let key: SymmetricKey
-    var nonce: AES.GCM.Nonce
-    var counter: UInt64
-    var responseDecapsulator: OHTTPEncapsulation.StreamingResponseDecapsulator?
+    /// This matches the keyID (in the encapsulatedDEK) that the private cloud compute clients use
+    /// *everything* should use this keyID as we enforce it on receipt
+    package static let defaultKeyID: UInt8 = 0
 
-    public init() {
-        self.key = SymmetricKey(size: .bits128)
+    let key: SymmetricKey
+    let nonce: AES.GCM.Nonce
+
+    /// The counter of messages received, used for creating the nonce for each message.
+    /// This mutating counter makes the struct unsendable and requires the caller to use it safely.
+    var counter: UInt64
+
+    public init(key: SymmetricKey = SymmetricKey(size: .bits128)) {
+        precondition(key.bitCount == SymmetricKeySize.bits128.bitCount)
+        self.key = key
         self.nonce = .init()
         self.counter = 0
-        self.responseDecapsulator = nil
     }
 
-    /// Wraps the DEK, produces a sender.
+    /// Wraps the DEK, produces a decapsulator.
     public mutating func encapsulateKey(
-        keyID: UInt8,
+        keyID: UInt8 = OHTTPClientStateMachine.defaultKeyID,
         publicKey: Curve25519.KeyAgreement.PublicKey,
         ciphersuite: HPKE.Ciphersuite
-    ) throws -> Data {
-        precondition(self.responseDecapsulator == nil)
+    ) throws -> (Data, OHTTPStreamingResponseDecapsulator) {
         var req = try OHTTPEncapsulation.StreamingRequest(
             keyID: keyID,
             publicKey: publicKey,
@@ -49,12 +54,43 @@ public struct OHTTPClientStateMachine {
         )
         var data = req.header
         try data.append(req.encapsulate(content: Data(self.key), final: true))
-        self.responseDecapsulator = OHTTPEncapsulation.StreamingResponseDecapsulator(
+        let responseDecapsulator = OHTTPEncapsulation.StreamingResponseDecapsulator(
             mediaType: self.responseContentType,
             context: req.sender,
             ciphersuite: ciphersuite
         )
-        return data
+        return (data, OHTTPStreamingResponseDecapsulator(responseDecapsulator: responseDecapsulator))
+    }
+
+    /// Wraps the DEK, produces the required AEAD information for another instance to receive it
+    public mutating func encapsulateKeyForResponseBypass(
+        keyID: UInt8 = OHTTPClientStateMachine.defaultKeyID,
+        workerPublicKey: Curve25519.KeyAgreement.PublicKey,
+        ciphersuite: HPKE.Ciphersuite
+    ) throws -> (Data, ResponseBypassCapability) {
+        var req = try OHTTPEncapsulation.StreamingRequest(
+            keyID: keyID,
+            publicKey: workerPublicKey,
+            ciphersuite: ciphersuite,
+            mediaType: self.requestContentType
+        )
+        var data = req.header
+        try data.append(req.encapsulate(content: Data(self.key), final: true))
+
+        // In response bypass the entity which will _receive_ the response is the client
+        // however from the point of view of the worker the recipient is still the proxy,
+        // the proxy just passes on sufficient information to allow the client to decapsulate this
+        // without actually passing the private key itself (which it can't anyway, it's in the SEP)
+        // The worker will also force the response nonce in the same way, thus using generating the
+        // same AEAD key and AEAD nonce as this helper does
+        let bypass = try StreamingResponseBypassDecapsulator.pregenerateAeadKeyAndNonce(
+            context: req.sender,
+            encapsulatedKey: req.sender.encapsulatedKey,
+            mediaType: self.responseContentType,
+            ciphersuite: ciphersuite
+        )
+
+        return (data, bypass)
     }
 
     public mutating func encapsulateMessage(
@@ -79,12 +115,46 @@ public struct OHTTPClientStateMachine {
         self.counter += 1
         return response
     }
+}
+
+@available(*, unavailable)
+extension OHTTPClientStateMachine: Sendable {}
+
+/// OHTTP response decapsulator.
+///
+/// The purpose of this is to hide the ObliviousX dependency underneath and only expose the tiny API for it.
+/// In addition it allows the reponse bypass mode (which requires some functionality not exposed by OBliviousX)
+/// to be injected as needed
+public protocol OHTTPStreamingResponseDecapsulatorProtocol {
+    mutating func decapsulateResponseMessage(_ message: Data, isFinal: Bool) throws -> Data
+}
+
+// simply wraps the normal ObliviousX decapsulator and transforms to the desired protocol
+public struct OHTTPStreamingResponseDecapsulator: OHTTPStreamingResponseDecapsulatorProtocol {
+    private var responseDecapsulator: OHTTPEncapsulation.StreamingResponseDecapsulator
+
+    internal init(responseDecapsulator: OHTTPEncapsulation.StreamingResponseDecapsulator) {
+        self.responseDecapsulator = responseDecapsulator
+    }
 
     public mutating func decapsulateResponseMessage(_ message: Data, isFinal: Bool) throws -> Data {
-        // Two force-unwraps: the first detects an error in the test, the latter detects mismanaged message boundaries.
-        try self.responseDecapsulator!.decapsulate(message, final: isFinal)!
+        // Force unwrap detects mismanaged message boundaries.
+        return try self.responseDecapsulator.decapsulate(message, final: isFinal)!
     }
 }
+
+/// If the proxy indicated response bypass it is terminal to receive a response from the worker
+/// It must go to the client only and we treat anydiscrepancy from that as a failure
+/// without ever attempting to decapsulate the data
+public struct OHTTPStreamingResponseIsFatal: OHTTPStreamingResponseDecapsulatorProtocol, Sendable {
+    public init() {}
+    public mutating func decapsulateResponseMessage(_: Data, isFinal _: Bool) throws -> Data {
+        fatalError("This session should be using Response Bypass, but a response chunk was sent to it")
+    }
+}
+
+@available(*, unavailable)
+extension OHTTPStreamingResponseDecapsulator: Sendable {}
 
 extension Data {
     fileprivate init(_ key: SymmetricKey) {
@@ -112,5 +182,28 @@ extension AES.GCM.Nonce {
         asBytes.xorLast8Bytes(with: value)
         // try! is safe here, this cannot invalidate the data.
         return try! AES.GCM.Nonce(data: asBytes)
+    }
+}
+
+extension OHTTPClientStateMachine {
+    /// This exists to make testing easier, it generates legal values to put into
+    /// the `Parameters` `encryptedPayload` field.
+    /// Each instance made will be different, unless the callee specifies the ``publicKey``
+    public func encapsulateKeyForTesting(
+        keyID: UInt8 = OHTTPClientStateMachine.defaultKeyID,
+        // mint a new one each time
+        publicKey: Curve25519.KeyAgreement.PublicKey = Curve25519.KeyAgreement.PrivateKey().publicKey,
+        // this is Curve25519_SHA256_AES_GCM_128 used elsewhere
+        ciphersuite: HPKE.Ciphersuite = .init(kem: .Curve25519_HKDF_SHA256, kdf: .HKDF_SHA256, aead: .AES_GCM_128)
+    ) throws -> Data {
+        var req = try OHTTPEncapsulation.StreamingRequest(
+            keyID: keyID,
+            publicKey: publicKey,
+            ciphersuite: ciphersuite,
+            mediaType: self.requestContentType
+        )
+        var data = req.header
+        try data.append(req.encapsulate(content: Data(self.key), final: true))
+        return data
     }
 }

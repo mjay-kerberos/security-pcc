@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -19,10 +19,18 @@
 //  Copyright © 2024 Apple Inc. All rights reserved.
 //
 
+import CryptoKit
 import Foundation
 
 extension Data {
     var hexString: String {
         self.compactMap { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Returns the digest.
+    /// - Parameter using: The hash function.
+    @inlinable
+    func digest<Hash: HashFunction>(using: Hash.Type = SHA256.self) -> Hash.Digest {
+        return Hash.hash(data: self)
     }
 }

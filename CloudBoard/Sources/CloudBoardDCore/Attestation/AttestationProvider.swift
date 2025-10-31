@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,13 +14,22 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
+internal import CloudBoardAsyncXPC
 import CloudBoardAttestationDAPI
 import CloudBoardCommon
+import CloudBoardLogging
 import CloudBoardMetrics
+import CloudBoardPlatformUtilities
 import Foundation
 import os
 
 private typealias AttestationTimeToExpiryGauge = Metrics.AttestationProvider.AttestationTimeToExpiryGauge
+
+public enum AttestationError: Error {
+    case attestationExpired
+    case unavailableWithinTimeout
+    case unknownOrExpiredKeyID(_ keyID: Data)
+}
 
 /// Obtains and manages attestations provided by cb_attestationd
 final actor AttestationProvider: CloudBoardAttestationAPIClientDelegateProtocol {
@@ -36,33 +45,115 @@ final actor AttestationProvider: CloudBoardAttestationAPIClientDelegateProtocol 
     private let metricsSystem: MetricsSystem
     private var connectionStateMachine: ConnectionStateMachine
     private var attestationStateMachine: AttestationStateMachine
+    // maintained as an efficient lookup for the proxy
+    // Only required by the proxy, but harmless to maintain anyway
+    private var keyIDToTransitivelyTrustedReleases: [Data: [String]] = .init()
 
-    init(attestationClient: CloudBoardAttestationAPIClientProtocol, metricsSystem: MetricsSystem) {
+    private var attestationExpiredFlag: Bool
+    private var healthMonitor: ServiceHealthMonitor
+
+    init(
+        attestationClient: CloudBoardAttestationAPIClientProtocol,
+        metricsSystem: MetricsSystem,
+        healthMonitor: ServiceHealthMonitor
+    ) {
         self.attestationClient = attestationClient
         self.metricsSystem = metricsSystem
         self.connectionStateMachine = ConnectionStateMachine()
         self.attestationStateMachine = AttestationStateMachine()
+        self.attestationExpiredFlag = false
+        self.healthMonitor = healthMonitor
     }
 
     func run() async throws {
+        try await self.runLoop()
+    }
+
+    /// exposed for testing only
+    internal func runLoop(once: Bool = false) async throws {
         await self.attestationClient.set(delegate: self)
         // Request attestation bundle to make it available as soon as possible
         _ = try await self.currentAttestationSet()
 
-        while true {
-            self.emitAttestationTimeToExpiry()
-            try await Task.sleep(for: Self.metricsRecordingInterval)
+        if once {
+            await self.validateAttestationExpiryAndEmitTimeToExpiry()
+        } else {
+            while true {
+                await self.validateAttestationExpiryAndEmitTimeToExpiry()
+                try await Task.sleep(for: Self.metricsRecordingInterval)
+            }
+        }
+    }
+
+    private func onNewAttestation(_ attestationSet: AttestationSet) {
+        // If any old key is not longer supported by attestationd it's useless anyway, and this avoids
+        // trying to manage expiry to avoid a slow memory leak
+        self.keyIDToTransitivelyTrustedReleases.removeAll()
+        for attestation in attestationSet.allAttestations {
+            self.keyIDToTransitivelyTrustedReleases[attestation.keyID] = attestation.proxiedReleaseDigests
         }
     }
 
     func attestationRotated(newAttestationSet: CloudBoardAttestationDAPI.AttestationSet) async throws {
         Self.logger
             .notice("Received new attestation set from attestation daemon: \(newAttestationSet, privacy: .public)")
+        self.onNewAttestation(newAttestationSet)
         self.attestationStateMachine.attestationRotated(attestationSet: newAttestationSet)
     }
 
+    func keyRotated(newKeySet _: CloudBoardAttestationDAPI.AttestedKeySet) async throws {
+        // attestationRotated covers us
+    }
+
+    /// Used to force an attestation to be dropped entirely - this may trigger a new attestation
+    func forceRevocation(keyIDs: [NodeKeyID]) async throws {
+        try await self.attestationClient.forceRevocation(keyIDs: keyIDs)
+    }
+
     func surpriseDisconnect() async {
-        Self.logger.error("XPC connection to CloudBoard attestation daemon terminated unexpectedly")
+        Self.logger
+            .error("XPC connection to CloudBoard attestation daemon terminated unexpectedly. Attempting to reconnect")
+        self.connectionStateMachine.resetConnectionStateOnSurpriseDisconnect()
+        self.attestationStateMachine.resetAttestationStateOnSurpriseDisconnect()
+        // Until we get a reconnect we cannot trust any already seen attestations.
+        // The reasonable assumption is that the attestationd has crashed, and is (hopefully) restarting.
+        // Even if we cached them here then requests that passed the session store based on that may
+        // just end up in jobhelper which does not know about the attestation and fails anyway.
+        // it is simpler and safer to just become unhealthy and block new requests to us until
+        // this is resolved, which hopefully is quickly (but possibly in a way the invalidates all previously
+        // published attestations)
+        // After this the next successful attestation message will trigger
+        // validateAttestationExpiryAndEmitTimeToExpiry and set us healthy
+        self.sendHealthMonitorStateUpdate(state: .error)
+        do {
+            try await self.ensureConnectionToAttestationDaemon()
+        } catch {
+            Self.logger.error("Unable to connect to CloudBoard attestation daemon after surprise disconnect.")
+        }
+
+        // Request a new attestation set to handle a possible race between reconnecting and a broadcast by
+        // cb_attestationd
+        do {
+            _ = try await self.currentAttestationSet()
+        } catch {
+            Self.logger.error("Failed to refetch attestation set after surprise disconnect: \(error)")
+        }
+    }
+
+    /// Find the transitively trusted release set associated to the attestation with key `keyID`
+    /// If no such attestation is known (wherether through loss, or expiry) this throws
+    func findProxiedReleaseDigests(keyID: Data) async throws -> [String] {
+        // this really only covers unit tests where the system is assumed to always
+        // have had one successful call (because cloudboard daemon does this)
+        if !self.attestationStateMachine.hasCompletedSuccessfullyAtLeastOnce {
+            // this is called on the hotpath, so don't block forever if this
+            // assumption was wrong
+            _ = try await self.currentAttestationSetWithTimeout()
+        }
+        guard let releases = self.keyIDToTransitivelyTrustedReleases[keyID] else {
+            throw AttestationError.unknownOrExpiredKeyID(keyID)
+        }
+        return releases
     }
 
     func currentAttestationSet() async throws -> AttestationSet {
@@ -73,8 +164,12 @@ final actor AttestationProvider: CloudBoardAttestationAPIClientDelegateProtocol 
                 Self.logger.info("requesting attestation set from cb_attestationd")
                 let attestationSet = try await self.attestationClient.requestAttestationSet()
                 Self.logger.log("successfully obtained current attested set: \(attestationSet, privacy: .public)")
+                self.onNewAttestation(attestationSet)
                 return self.attestationStateMachine.attestationReceived(attestationSet: attestationSet)
             } catch {
+                // We do not invalidate keyIDToTransitivelyTrustedReleases.
+                // There might be an issue generating new attestations, attestation daemon might have crashed
+                // but there's a reasonable chance aan inflight request will still work
                 Self.logger
                     .error("failed to request attestation bundle: \(String(unredacted: error), privacy: .public)")
                 return try self.attestationStateMachine.attestationRequestFailed(error: error)
@@ -83,6 +178,30 @@ final actor AttestationProvider: CloudBoardAttestationAPIClientDelegateProtocol 
             return try await future.valueWithCancellation
         case .continueWithAttestation(let attestationSet):
             return attestationSet
+        }
+    }
+
+    /// Performs the same operation as ``currentAttestationSet()`` but with a timeout
+    /// so that a failure to get the attestation on a request hot path can be timely.
+    /// If there is a problem generating a new attestion, or the attestation daemon is not recovering
+    /// it's better to fail this fast.
+    func currentAttestationSetWithTimeout(
+        // This is used on the hot path for a request.
+        // We have worst case heuristics putting a full recycle of the attestationd as < 100ms
+        // therefore that's how long we are willing to wait by default.
+        timeout: Duration = .milliseconds(100)
+    ) async throws -> AttestationSet {
+        return try await withThrowingTaskGroup(of: AttestationSet.self) { group in
+            group.addTask {
+                return try await self.currentAttestationSet()
+            }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw AttestationError.unavailableWithinTimeout
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
         }
     }
 
@@ -100,16 +219,52 @@ final actor AttestationProvider: CloudBoardAttestationAPIClientDelegateProtocol 
         }
     }
 
-    internal func emitAttestationTimeToExpiry() {
-        let attestationAction = try? self.attestationStateMachine.obtainAttestation()
-        switch attestationAction {
-        case .continueWithAttestation(let attestationSet):
+    func registerForUpdates() -> AsyncStream<AttestationSet> {
+        let (stream, continuation) = AsyncStream<AttestationSet>.makeStream()
+        self.attestationStateMachine.registerWatcher(continuation)
+        return stream
+    }
+
+    internal func validateAttestationExpiryAndEmitTimeToExpiry() async {
+        do {
+            let attestationSet = try await self.currentAttestationSet()
             self.metricsSystem.emit(
                 AttestationTimeToExpiryGauge(expireAt: attestationSet.currentAttestation.expiry)
             )
-        default:
+            if attestationSet.currentAttestation.expiry.timeIntervalSince(Date.now) > 0 {
+                self.sendHealthMonitorStateUpdate(state: .valid)
+            } else {
+                self.sendHealthMonitorStateUpdate(state: .expired)
+            }
+        } catch {
+            self.sendHealthMonitorStateUpdate(state: .error)
             Self.logger.log("Attestation set not available yet. Skip emitting expiry metrics")
             return
+        }
+    }
+}
+
+extension AttestationProvider {
+    enum ExpiryState {
+        case valid
+        case expired
+        case error
+    }
+
+    internal func sendHealthMonitorStateUpdate(state: ExpiryState) {
+        switch state {
+        case .valid:
+            if self.attestationExpiredFlag {
+                self.healthMonitor.setAttestationValid()
+                self.attestationExpiredFlag = false
+                Self.logger.info("CloudBoard attestation active")
+            }
+        case .error, .expired:
+            if !self.attestationExpiredFlag {
+                self.healthMonitor.setAttestationExpired()
+                self.attestationExpiredFlag = true
+                Self.logger.error("CloudBoard attestation expired")
+            }
         }
     }
 }
@@ -117,7 +272,7 @@ final actor AttestationProvider: CloudBoardAttestationAPIClientDelegateProtocol 
 private struct ConnectionStateMachine {
     internal enum ConnectionState: CustomStringConvertible {
         case initialized
-        case connecting(Promise<Void, Never>)
+        case connecting(Promise<Void, Error>)
         case connected
 
         var description: String {
@@ -140,14 +295,24 @@ private struct ConnectionStateMachine {
 
     enum ConnectAction {
         case connect
-        case waitForConnection(Future<Void, Never>)
+        case waitForConnection(Future<Void, Error>)
         case `continue`
+    }
+
+    mutating func resetConnectionStateOnSurpriseDisconnect() {
+        let connectionState = self.state
+        if case .connecting(let promise) = connectionState {
+            // fulfill any outstanding promises with failure
+            promise.fulfil(with: .failure(CloudBoardAsyncXPCError.connectionInterrupted))
+        }
+
+        self.state = .initialized
     }
 
     mutating func checkConnection() -> ConnectAction {
         switch self.state {
         case .initialized:
-            self.state = .connecting(Promise<Void, Never>())
+            self.state = .connecting(Promise<Void, Error>())
             return .connect
         case .connecting(let promise):
             return .waitForConnection(Future(promise))
@@ -172,6 +337,12 @@ private struct ConnectionStateMachine {
 }
 
 private struct AttestationStateMachine {
+    private struct State {
+        public var hasCompletedSuccessfullyAtLeastOnce: Bool = false
+        public var attestationState: AttestationState
+        public var watchers: [AsyncStream<AttestationSet>.Continuation]
+    }
+
     internal enum AttestationState: CustomStringConvertible {
         case initialized
         case awaitingAttestation(Promise<AttestationSet, Error>)
@@ -185,17 +356,21 @@ private struct AttestationStateMachine {
             case .awaitingAttestation:
                 return "awaitingAttestation"
             case .attestationAvailable(let attestationSet):
-                return "attestationAvailable(publicationExpiry: \(attestationSet.currentAttestation.publicationExpiry))"
+                return "attestationAvailable(keyExpiry: \(attestationSet.currentAttestation.expiry))"
             case .attestationUnavailable(let error):
                 return "attestationUnavailable(error: \(error)"
             }
         }
     }
 
-    private var state: AttestationState
+    private var state: OSAllocatedUnfairLock<State>
 
     init() {
-        self.state = .initialized
+        self.state = .init(initialState: .init(attestationState: .initialized, watchers: []))
+    }
+
+    var hasCompletedSuccessfullyAtLeastOnce: Bool {
+        return self.state.withLock(\.hasCompletedSuccessfullyAtLeastOnce)
     }
 
     enum AttestationAction {
@@ -204,69 +379,119 @@ private struct AttestationStateMachine {
         case continueWithAttestation(AttestationSet)
     }
 
+    mutating func resetAttestationStateOnSurpriseDisconnect() {
+        self.state.withLock { state in
+            if case .awaitingAttestation(let promise) = state.attestationState {
+                // fulfill any outstanding promises with failure
+                promise.fulfil(with: .failure(CloudBoardAsyncXPCError.connectionInterrupted))
+            }
+            state.attestationState = .initialized
+            state.hasCompletedSuccessfullyAtLeastOnce = false
+        }
+    }
+
     mutating func obtainAttestation() throws -> AttestationAction {
-        switch self.state {
-        case .initialized:
-            self.state = .awaitingAttestation(Promise<AttestationSet, Error>())
-            return .requestAttestation
-        case .awaitingAttestation(let promise):
-            return .waitForAttestation(Future(promise))
-        case .attestationAvailable(let attestationSet):
-            return .continueWithAttestation(attestationSet)
-        case .attestationUnavailable(let error):
-            throw error
+        try self.state.withLock { state in
+            switch state.attestationState {
+            case .initialized:
+                state.attestationState = .awaitingAttestation(Promise<AttestationSet, Error>())
+                return .requestAttestation
+            case .awaitingAttestation(let promise):
+                return .waitForAttestation(Future(promise))
+            case .attestationAvailable(let attestationSet):
+                return .continueWithAttestation(attestationSet)
+            case .attestationUnavailable(let error):
+                throw error
+            }
         }
     }
 
     mutating func attestationReceived(attestationSet: AttestationSet) -> AttestationSet {
         // We might have gotten additional requests or the key might have rotated and has been updated in the meantime
-        switch self.state {
-        case .awaitingAttestation(let promise):
-            promise.succeed(with: attestationSet)
-            self.state = .attestationAvailable(attestationSet)
-            return attestationSet
-        case .attestationAvailable(let attestationSet):
-            // Key set has rotated in the meantime. Use the rotated set.
-            return attestationSet
-        case .initialized, .attestationUnavailable:
-            // We should never get into any other state
-            let state = self.state
-            AttestationProvider.logger
-                .error("unexpected state: \(state, privacy: .public) after requesting attestation set")
-            preconditionFailure("unexpected state: \(state) after requesting attestation set")
+        self.state.withLock { state in
+            switch state.attestationState {
+            case .awaitingAttestation(let promise):
+                promise.succeed(with: attestationSet)
+                state.hasCompletedSuccessfullyAtLeastOnce = true
+                state.attestationState = .attestationAvailable(attestationSet)
+                for watcher in state.watchers {
+                    watcher.yield(attestationSet)
+                }
+                return attestationSet
+            case .attestationAvailable(let attestationSet):
+                // Key set has rotated in the meantime. Use the rotated set.
+                return attestationSet
+            case .initialized, .attestationUnavailable:
+                // We should never get into any other state
+                let currentState = state.attestationState
+                AttestationProvider.logger
+                    .error("unexpected state: \(currentState, privacy: .public) after requesting attestation set")
+                preconditionFailure("unexpected state: \(currentState) after requesting attestation set")
+            }
         }
     }
 
     mutating func attestationRequestFailed(error: Error) throws -> AttestationSet {
-        switch self.state {
-        case .awaitingAttestation(let promise):
-            promise.fail(with: error)
-            self.state = .attestationUnavailable(error)
-        case .attestationAvailable(let attestationSet):
-            // Key has successfully rotated in the meantime. Use the rotated key and ignore error.
-            AttestationProvider.logger.notice(
-                "failed to request attestation set but attestation set has successfully rotated in the meantime. Continuing with rotated attestation set."
-            )
-            return attestationSet
-        case .initialized, .attestationUnavailable:
-            // We should never get into any other state
-            let state = self.state
-            AttestationProvider.logger
-                .error("unexpected state: \(state, privacy: .public) when handling attestation request error")
-            preconditionFailure("unexpected state: \(state) when handling attestation request error")
+        try self.state.withLock { state in
+            switch state.attestationState {
+            case .awaitingAttestation(let promise):
+                promise.fail(with: error)
+                state.attestationState = .attestationUnavailable(error)
+            case .attestationAvailable(let attestationSet):
+                // Key has successfully rotated in the meantime. Use the rotated key and ignore error.
+                AttestationProvider.logger.notice(
+                    "failed to request attestation set but attestation set has successfully rotated in the meantime. Continuing with rotated attestation set."
+                )
+                return attestationSet
+            case .initialized, .attestationUnavailable:
+                // We should never get into any other state
+                let currentState = state.attestationState
+                AttestationProvider.logger
+                    .error(
+                        "unexpected state: \(currentState, privacy: .public) when handling attestation request error"
+                    )
+                preconditionFailure("unexpected state: \(currentState) when handling attestation request error")
+            }
+            // Rethrow if we couldn't recover from the error
+            throw error
         }
-        // Rethrow if we couldn't recover from the error
-        throw error
     }
 
     mutating func attestationRotated(attestationSet: AttestationSet) {
-        switch self.state {
-        case .awaitingAttestation(let promise):
-            promise.succeed(with: attestationSet)
-        case .initialized, .attestationAvailable, .attestationUnavailable:
-            // Nothing to do
-            ()
+        self.state.withLock { state in
+            switch state.attestationState {
+            case .awaitingAttestation(let promise):
+                promise.succeed(with: attestationSet)
+            case .initialized, .attestationAvailable, .attestationUnavailable:
+                // Nothing to do
+                ()
+            }
+            state.attestationState = .attestationAvailable(attestationSet)
+            for watcher in state.watchers {
+                watcher.yield(attestationSet)
+            }
         }
-        self.state = .attestationAvailable(attestationSet)
+    }
+
+    mutating func registerWatcher(_ continuation: AsyncStream<AttestationSet>.Continuation) {
+        self.state.withLock { state in
+            state.watchers.append(continuation)
+            switch state.attestationState {
+            case .attestationAvailable(let attestationSet):
+                continuation.yield(attestationSet)
+            default: ()
+            }
+        }
+    }
+}
+
+extension AttestationError: ReportableError {
+    public var publicDescription: String {
+        return switch self {
+        case .attestationExpired: "attestationExpired"
+        case .unavailableWithinTimeout: "unavailableWithinTimeout"
+        // the keyID is visible in the request parameters
+        case .unknownOrExpiredKeyID(let keyID): "unknownOrExpiredKeyID \(keyID.base64EncodedString())"
+        }
     }
 }

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -12,138 +12,56 @@
 // EA1937
 // 10/02/2024
 
-//  Copyright © 2024 Apple, Inc. All rights reserved.
+//  Copyright © 2024-2025 Apple, Inc. All rights reserved.
 //
 
 import Foundation
 import os
-import System
 
 // DarwinInitHelper provides a high-level interface to a darwin-init.json configuration file
 // Selected "providers" available for common settings made for a VRE (such as cryptex spec and SSH)
 
 struct DarwinInitHelper {
+    var configJSON: String
     let sourcePath: String?
-    var loaded: [String: Any]
+    let pccvreHelper: PCCVREHelper
 
     static let logger = os.Logger(subsystem: applicationName, category: "DarwinInitHelper")
 
-    // retrieve and store ["cryptex"] block as [DarwinInit.Cryptex]
-    var cryptexes: [DarwinInitHelper.Cryptex] {
-        get {
-            var _cryptexes: [DarwinInitHelper.Cryptex] = []
-            if let cryptexArray = loaded["cryptex"] as? [[String: Any]] {
-                for c in cryptexArray {
-                    guard let cryptex = Cryptex(c) else {
-                        continue
-                    }
-
-                    _cryptexes.append(cryptex)
-                }
-            }
-
-            return _cryptexes
-        }
-
-        set(newValue) {
-            var _new: [[String: Any]] = []
-            for c in newValue {
-                _new.append(c.asDictionary())
-            }
-
-            setKey("cryptex", value: _new)
-        }
-    }
-
-    // retrieve and store various settings related to [the] ssh user
-    var sshConfig: DarwinInitHelper.SSH {
-        get {
-            var sshUser: DarwinInitHelper.SSH.User
-            if let user = loaded["user"] as? [String: Any] {
-                sshUser = DarwinInitHelper.SSH.User(
-                    uid: UInt(user["uid"] as? String ?? "0") ?? 0,
-                    gid: UInt(user["gid"] as? String ?? "0") ?? 0,
-                    name: user["root"] as? String ?? "root",
-                    sshPubKey: SSH.validateSSHPubKey(user["ssh_authorized_key"] as? String ?? "") ?? ""
-                )
-            } else {
-                sshUser = DarwinInitHelper.SSH.User()
-            }
-
-            return DarwinInitHelper.SSH(
-                enabled: loaded["ssh"] as? Bool ?? false,
-                pwAuthEnabled: loaded["ssh_pwauth"] as? Bool ?? false,
-                user: sshUser
-            )
-        }
-
-        set(newValue) {
-            setKey("ssh", value: newValue.enabled)
-
-            if newValue.sshPWAuth {
-                setKey("ssh_pwauth", value: newValue.sshPWAuth)
-            } else {
-                removeKey("ssh_pwauth") // remove if false
-            }
-
-            if let userDef = newValue.userDef {
-                setKey("user", value: [
-                    "uid": userDef.uid,
-                    "gid": userDef.gid,
-                    "name": userDef.name,
-                    "ssh_authorized_key": userDef.sshPubKey,
-                ])
-            } else {
-                removeKey("user")
-            }
-        }
-    }
-
-    init(fromFile: String) throws {
-        do {
-            let src = try NSData(contentsOfFile: fromFile) as Data
-            self.loaded = try JSONSerialization.jsonObject(with: src, options: []) as! [String: Any]
-        } catch {
-            throw DarwinInitHelperError("darwin-init load from \(fromFile): \(error)")
-        }
-
-        self.sourcePath = fromFile
-    }
-
-    init(data: Data) throws {
-        do {
-            self.loaded = try JSONSerialization.jsonObject(with: data, options: []) as! [String: Any]
-        } catch {
-            throw DarwinInitHelperError("darwin-init create from provided data: \(error)")
-        }
-
+    init(config: String, pccvreHelper: PCCVREHelper) throws {
+        self.configJSON = config
         self.sourcePath = nil
+        self.pccvreHelper = pccvreHelper
     }
 
-    init() {
-        self.sourcePath = nil
-        self.loaded = [:]
+    init(configFile: String, pccvreHelper: PCCVREHelper) throws {
+        self.configJSON = try String(contentsOfFile: configFile, encoding: .utf8)
+        self.sourcePath = configFile
+        self.pccvreHelper = pccvreHelper
     }
 
-    // encode returns json representation as base64 blob
-    func encode() -> String {
-        return json(pretty: false).data(using: .utf8)!.base64EncodedString()
-    }
-
-    // json returns string representing darwin-init in json form; pretty sets whether to
-    // include newlines and indentation for readability or compact form
-    func json(pretty: Bool = false) -> String {
-        var jsonOpts: JSONSerialization.WritingOptions = [.fragmentsAllowed, .withoutEscapingSlashes]
-        if pretty {
-            jsonOpts = [.fragmentsAllowed, .prettyPrinted, .withoutEscapingSlashes, .sortedKeys]
-        }
-
+    func read<T>(command: (PCCVREHelper.DarwinInit) throws -> T, v1Fallback: ((DarwinInitConfigV1) throws -> T)? = nil) throws -> T {
         do {
-            let jsonData = try JSONSerialization.data(withJSONObject: loaded as NSDictionary, options: jsonOpts)
-            let jsonString = String(decoding: jsonData, as: UTF8.self)
-            return jsonString
+            return try command(pccvreHelper.darwinInit(configJSON))
         } catch {
-            return "{}"
+            guard let v1Fallback, case PCCVREHelperError.notSupported(_) = error else {
+                throw error
+            }
+            return try v1Fallback(DarwinInitConfigV1(jsonString: configJSON))
+        }
+    }
+
+    mutating func modify(command: (PCCVREHelper.DarwinInit) throws -> String,
+                         v1Fallback: ((inout DarwinInitConfigV1) throws -> Void)? = nil) throws {
+        do {
+            configJSON = try command(pccvreHelper.darwinInit(configJSON))
+        } catch {
+            guard let v1Fallback, case PCCVREHelperError.notSupported(_) = error else {
+                throw error
+            }
+            var v1 = try DarwinInitConfigV1(jsonString: configJSON)
+            try v1Fallback(&v1)
+            configJSON = v1.json(pretty: true)
         }
     }
 
@@ -153,176 +71,41 @@ struct DarwinInitHelper {
             throw DarwinInitHelperError("darwin-init write: no destination provided")
         }
 
-        var jsonStr = json(pretty: true)
         do {
-            try jsonStr.write(toFile: toFile, atomically: true, encoding: .utf8)
+            try configJSON.write(toFile: toFile, atomically: true, encoding: .utf8)
         } catch {
             throw DarwinInitHelperError("darwin-init write to \(toFile): \(error)")
         }
 
-        jsonStr = json(pretty: false)
         DarwinInitHelper.logger.debug("wrote darwin-init to: \(toFile, privacy: .public)")
-        DarwinInitHelper.logger.debug("darwin-init: \(jsonStr, privacy: .public)")
+        DarwinInitHelper.logger.debug("darwin-init: \(configJSON, privacy: .public)")
     }
+}
 
-    // getKey returns value from in-core darwin-init or nil if not found; value type may otherwise be
-    //  String, Integer, Double, Bool, or another dictionary - for bare tokens/assertions, an empty
-    //  String ("") is returned
-    func getKey(_ key: String) -> Any? {
-        return loaded[key]
-    }
-
-    // removeKey deletes item from in-core darwin-init
-    mutating func removeKey(_ key: String) {
-        loaded[key] = nil
-    }
-
-    // setKey adds/replaces key to in-core darwin-init
-    mutating func setKey(_ key: String, value: Any) {
-        loaded.updateValue(value, forKey: key)
-    }
-
-    // disableKey renames a key within in-core darwin-init using a prefix (effectively disabling it)
-    //  such that it allows it to be easily "re-enabled". Returns true if update applied, false if
-    //  original key isn't found.
-    @discardableResult
-    mutating func disableKey(_ key: String, prefix: String = "DISABLED-") -> Bool {
-        if let val = getKey(key) {
-            removeKey(key)
-            setKey(prefix+key, value: val)
-            return true
-        }
-
-        return false
-    }
-
-    // enableKey renames a key within in-core darwin-init using a prepended prefix (such as by
-    //  disableKey) back to the (original) key to enable it again - existing key (if present) is
-    //  overwritten. Returns true if update applied, false if original key isn't found.
-    @discardableResult
-    mutating func enableKey(_ key: String, prefix: String = "DISABLED-") -> Bool {
-        if let val = getKey(prefix+key) {
-            removeKey(prefix+key)
-            setKey(key, value: val)
-            return true
-        }
-
-        return false
-    }
-
-    // lookupCryptex returns cryptex entry matching variant (nil if not found)
-    func lookupCryptex(variant: String) -> Cryptex? {
-        for c in cryptexes where c.variant == variant {
-            return c
-        }
-
-        return nil
-    }
-
-    // addCryptex replaces existing (with matching variant) or otherwise introduces new cryptex entry
-    mutating func addCryptex(_ new: DarwinInitHelper.Cryptex) {
-        // preserve the order of cryptexes if replacing
-        var replaced = false
-        let updatedCryptexes = cryptexes.map {
-            if $0.variant == new.variant {
-                replaced = true
-                return new
-            } else {
-                return $0
-            }
-        }
-        if replaced {
-            cryptexes = updatedCryptexes
-            DarwinInitHelper.logger.log("replaced cryptex '\(new.variant, privacy: .public)' (\(new.url, privacy: .public))")
-        } else {
-            cryptexes.append(new)
-            DarwinInitHelper.logger.log("added cryptex '\(new.variant, privacy: .public)' (\(new.url, privacy: .public))")
+extension DarwinInitHelper {
+    func localHostname() throws -> String? {
+        try read {
+            let localHostname = try $0.localHostname()
+            return localHostname == "" ? nil : localHostname
+        } v1Fallback: {
+            $0.localHostname
         }
     }
 
-    // removeCryptex deletes existing cryptex entry with matching variant; returns true if updated
-    @discardableResult
-    mutating func removeCryptex(variant: String) -> Bool {
-        var updated = false
-        var loaded = cryptexes
-
-        loaded = loaded.filter {
-            if $0.variant == variant {
-                updated = true
-                return false
-            }
-
-            return true
+    mutating func setLocalHostname(_ localHostname: String) throws {
+        try modify {
+            try $0.setLocalHostname(localHostname)
+        } v1Fallback: {
+            $0.localHostname = localHostname
         }
-
-        if updated {
-            cryptexes = loaded
-            DarwinInitHelper.logger.log("removed cryptex variant '\(variant, privacy: .public)'")
-        }
-
-        return updated
     }
+}
 
-    //  populateReleaseCryptexes fills in cryptex entries of darwinInit from releaseAssets provided.
-    //  Cryptex entries in darwinInit whose -variant- name matches AssetType (ASSET_TYPE_XX) in
-    //  releaseMeta are substituted in.
-    //
-    //  The path location inserted is just the last component (base filename) which will later be
-    //  qualified to reference the local HTTP service when the VRE is started.
-    //
-    //  Example:
-    //    darwin-init contains the following stanza:
-    //      "cryptex": [
-    //          {
-    //            "variant": "ASSET_TYPE_PCS",
-    //            "url": "/"
-    //          },
-    //          {
-    //            "variant": "ASSET_TYPE_MODEL",
-    //            "url": "/"
-    //          },
-    //          ...
-    //      ]
-    //
-    //   Assets associated with ASSET_TYPE_PCS and ASSET_TYPE_MODEL in the metadata will be filled
-    //   into the corresponding entry (variant and url), as well as link/copied into the instance
-    //   folder alongside the final darwin-init.json file.
-    //
-    mutating func populateReleaseCryptexes(
-        assets: [CryptexSpec]
-    ) throws {
-        let populatedCryptexes = try cryptexes.map { diCryptex in
-            guard let asset = findAsset(label: diCryptex.variant, assets: assets) else {
-                return diCryptex
-            }
-
-            let assetVariant = asset.variant
-            guard let assetBasename = asset.path.lastComponent?.string else {
-                throw VREError("derive basename from asset path: \(asset.path)")
-            }
-
-            return DarwinInitHelper.Cryptex(
-                url: assetBasename,
-                variant: assetVariant
-            )
+extension DarwinInitHelper {
+    mutating func mergeConfig(overrideDarwinInit: String) throws {
+        try modify {
+            try $0.mergeConfig(overrideDarwinInit: overrideDarwinInit)
         }
-        cryptexes = populatedCryptexes
-    }
-
-    func findAsset(label: String, assets: [CryptexSpec]) -> CryptexSpec? {
-        guard let _ = SWReleaseMetadata.AssetType(label: label) else {
-            return nil
-        }
-        let assetsOfType = assets.filter { $0.assetType == label }
-        guard assetsOfType.count == 1 else {
-            if assetsOfType.count == 0 {
-                AssetHelper.logger.error("'\(label, privacy: .public)' from darwin-init in release assets not found")
-            } else {
-                AssetHelper.logger.error("count of \(label, privacy: .public) in darwin-init != 1 (\(assetsOfType.count, privacy: .public))")
-            }
-            return nil
-        }
-        return assetsOfType[0]
     }
 }
 

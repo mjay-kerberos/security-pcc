@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -27,39 +27,88 @@ public enum CloudBoardWorkloadControllerPrefsError: Error {
     case preferencesDomainUnavailable
 }
 
-public struct CloudBoardWorkloadControllerPrefs: Codable, Hashable {
+public struct CloudBoardWorkloadControllerPrefs: Codable, Hashable, Sendable {
     enum CodingKeys: String, CodingKey {
         case _enabled = "Enabled"
-        case _maxBatchSize = "MaxBatchSize"
-        case _optimalBatchSize = "OptimalBatchSize"
         case _enforceMaxBatchSize = "EnforceMaxBatchSize"
+        @available(*, deprecated, message: "Use 'WorkloadTags' instead")
         case _tags = "Tags"
+        @available(*, deprecated, message: "Use 'WorkloadTags' instead")
+        case _routingTags = "RoutingTags"
+        case _workloadTags = "WorkloadTags"
+        case maxBatchSize = "MaxBatchSize"
+        case optimalBatchSize = "OptimalBatchSize"
+        case serviceName = "ServiceName"
+    }
+
+    public enum WorkloadTagDecodingError: Error {
+        case unknownType(String)
+    }
+
+    public enum WorkloadTagValue: Codable, Hashable, Sendable {
+        case string(String)
+        case stringList([String])
+
+        private enum CodingKeys: String, CodingKey {
+            case type
+            case value
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let typeKey = try container.decode(String.self, forKey: .type)
+            switch typeKey {
+            case "string":
+                let value = try container.decode(String.self, forKey: .value)
+                self = .string(value)
+            case "stringList":
+                let value = try container.decode([String].self, forKey: .value)
+                self = .stringList(value)
+            default:
+                throw WorkloadTagDecodingError.unknownType(typeKey)
+            }
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            switch self {
+            case .string(let value):
+                try container.encode("string", forKey: .type)
+                try container.encode(value, forKey: .value)
+            case .stringList(let value):
+                try container.encode("stringList", forKey: .type)
+                try container.encode(value, forKey: .value)
+            }
+        }
     }
 
     private var _enabled: Bool?
-    private var _maxBatchSize: Int?
-    private var _optimalBatchSize: Int?
     private var _enforceMaxBatchSize: Bool?
+
     private var _tags: [String: String]?
+    private var _routingTags: [String: [String]]?
+    private var _workloadTags: [String: WorkloadTagValue]?
+
+    public var maxBatchSize: Int?
+    public var optimalBatchSize: Int?
+    public var serviceName: String?
 
     public var enabled: Bool {
         self._enabled ?? false
-    }
-
-    public var maxBatchSize: Int {
-        self._maxBatchSize ?? 1000
-    }
-
-    public var optimalBatchSize: Int {
-        self._optimalBatchSize ?? self.maxBatchSize
     }
 
     public var enforceMaxBatchSize: Bool {
         self._enforceMaxBatchSize ?? false
     }
 
-    public var tags: [String: [String]] {
-        self._tags?.mapValues { [$0] } ?? [:]
+    public var workloadTags: [String: WorkloadTagValue] {
+        // Merge tags specified via Tags, RoutingTags, and WorkloadTags preferences, preferring RoutingTags over Tags
+        // and WorkloadTags over RoutingTags for conflicting keys
+        let tags = self._tags?.mapValues { WorkloadTagValue.stringList([$0]) } ?? [:]
+        let routingTags = self._routingTags?.mapValues { WorkloadTagValue.stringList($0) } ?? [:]
+        return tags
+            .merging(routingTags, uniquingKeysWith: { $1 })
+            .merging(self._workloadTags ?? [:], uniquingKeysWith: { $1 })
     }
 
     static func fromPreferences() throws -> CloudBoardWorkloadControllerPrefs {

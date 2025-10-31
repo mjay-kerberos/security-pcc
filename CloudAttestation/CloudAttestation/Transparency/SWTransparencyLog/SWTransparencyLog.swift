@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -24,6 +24,11 @@ import CryptoKit
 @_weakLinked import libnarrativecert
 import Security
 
+typealias ATLogProofs = PrivateCloudCompute_TransparencyLog_ATLogProofs
+typealias ATLogProofRequest = PrivateCloudCompute_TransparencyLog_ATLogProofRequest
+typealias ATLogProofResponse = PrivateCloudCompute_TransparencyLog_ATLogProofResponse
+typealias LogConsistency = PrivateCloudCompute_TransparencyLog_LogConsistency
+
 public struct SWTransparencyLog: TransparencyLog {
     static let logger = Logger(subsystem: "com.apple.CloudAttestation", category: "SWTransparencyLog")
 
@@ -42,7 +47,7 @@ public struct SWTransparencyLog: TransparencyLog {
         return true
     }
 
-    public func proveInclusion(of release: Release) async throws -> TransparencyLogProofs {
+    public func proveInclusion(of digest: Data) async throws -> TransparencyLogProofs {
         let url: URL
         let urlSessionDelegate: URLSessionDelegate?
 
@@ -77,7 +82,7 @@ public struct SWTransparencyLog: TransparencyLog {
         req.setValue("application/protobuf", forHTTPHeaderField: "Content-Type")
         let proofReq = ATLogProofRequest.with { builder in
             builder.version = .v3
-            builder.identifier = Data(release.digest())
+            builder.dataHash = digest
             builder.application = self.environment.transparencyPrimaryTree ? .privateCloudCompute : .privateCloudComputeInternal
         }
         req.httpBody = try proofReq.serializedData()
@@ -87,6 +92,11 @@ public struct SWTransparencyLog: TransparencyLog {
             urlSession = URLSession(configuration: .default, delegate: urlSessionDelegate, delegateQueue: nil)
         } else {
             urlSession = URLSession.shared
+        }
+        defer {
+            if urlSessionDelegate != nil {
+                urlSession.finishTasksAndInvalidate()
+            }
         }
 
         let (data, response) = try await urlSession.data(for: req)
@@ -134,8 +144,8 @@ public struct SWTransparencyLog: TransparencyLog {
         }
     }
 
-    public func verifyExpiringInclusion(of release: Release, proofs: TransparencyLogProofs) async throws -> Date {
-        return try await self.verifier.verifyExpiringInclusion(of: release, proofs: proofs)
+    public func verifyExpiringInclusion(of digest: Data, proofs: TransparencyLogProofs) async throws -> Date {
+        return try await self.verifier.verifyExpiringInclusion(of: digest, proofs: proofs)
     }
 
     func loadNarrativeCredential() throws -> URLCredential {

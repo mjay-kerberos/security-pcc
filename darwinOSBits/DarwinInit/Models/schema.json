@@ -1,4 +1,4 @@
-Copyright © 2024 Apple Inc. All Rights Reserved.
+Copyright © 2025 Apple Inc. All Rights Reserved.
 
 APPLE INC.
 PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,7 +14,6 @@ EA1937
 
 {
 	"$schema": "https://json-schema.org/draft/2020-12/schema",
-	"$id": "https://stashweb.sd.apple.com/projects/COREOS/repos/darwinosbits/raw/DarwinInit/Models/schema.json",
 	"title": "darwin-init JSON Schema",
 	"description": "Schema describing darwin-init JSON configuration structure",
 	"type": "object",
@@ -118,6 +117,20 @@ EA1937
 					"cacheable": {
 						"description": "Enable or disable caching of this cryptex into the preboot volume. If enabled, the downloaded cryptex will persist across reboots in the cache. If unset, the downloaded cryptex will be cached by default if a valid \"sha256\" is provided, if the cryptex comes from a knox:// url, or if a valid \"aea_archive_id\" is provided.",
 						"type": "boolean"
+					},
+					"max_active_tasks": {
+						"description": "Maximum active tasks for performing parallel range request downloads. Intended for debugging.",
+						"default": 4,
+						"type": "integer"
+					},
+					"chunk_size": {
+						"description": "Chunk size (in bytes) to use when performing parallel range request downloads. If set, darwin-init will assume range requests are supported without verifying via a HEAD request. Note: If unspecified, but darwin-init detects range requests are supported a default of 16 MiB is used.",
+						"type": "integer"
+					},
+					"original_knox_url": {
+						"description": "Stashes the equivalent knox:// url for non-production use cases (e.g. VRE). This key is ignored by darwin-init and not actually used to download the cryptex.",
+						"type": "string",
+						"format": "uri-template"
 					}
 				},
 				"required": ["url"]
@@ -387,8 +400,8 @@ EA1937
 						}
 					},
 					"tailspin_enabled": {
-					 "description": "Enable or disable tailspin daemon by setting to 'true' or 'false'.",
-					 "type": "boolean"
+						"description": "Enable or disable tailspin daemon by setting to 'true' or 'false'.",
+						"type": "boolean"
 					},
 					"required": ["tailspin_enabled"]
 				}
@@ -512,9 +525,9 @@ EA1937
 			"type": "object"
 		},
 		"config-security-policy": {
-			"description": "Policy for security and privacy validation of the darwin-init config. If not set, no security/privacy validation is performed. Included in the attestation bundle.",
+			"description": "Policy for security and privacy validation of the darwin-init config. If not set or if \"none\" is specified, no security/privacy validation is performed. Included in the attestation bundle.",
 			"type": "string",
-			"enum": ["customer", "carry"]
+			"enum": ["customer", "customerProxy", "carry", "none"]
 		},
 		"diagnostics-submission-enabled": {
 			"description": "Enables diagnostics submission. Defaults to true, if unset.",
@@ -523,6 +536,72 @@ EA1937
 		"config-security-policy-version": {
 			"description": "Version number to use when validating darwin-init config against the config-security-policy. Each time new policy enforcement logic is deployed for a darwin-init key, we will increment the version number. Clients may override this and use an older version so that they only receive a warning but can still apply their config.",
 			"type": "integer"
+		},
+		"usage-label": {
+			"description": "Usage label for tagging log messages forwarded by splunkloggingd and emitted by OSAnalytics.",
+			"type": "string"
+		},
+		"retain-previously-cached-cryptexes-unsafely": {
+			"description": "On internal builds, retains cryptexes not specified in the darwin-init rather than removing them after initialization. Defaults to false, if unset.",
+			"type": "boolean"
+		},
+		"cryptex-cache-max-total-size": {
+			"description": "Sets the maximum storage space that the cryptex cache should occupy (in bytes).",
+			"minimum": 0,
+			"type": "integer"
+		},
+		"apply-timeout": {
+			"description": "Set the timeout to enforce when applying this config.",
+			"type": "string"
+		},
+		"feature_flags": {
+			"description": "Configuration for feature flags updates. Definitions must be provided via OS or cryptex. Note that `config-security-policy` imposes requirements on feature flag attributes.",
+			"type": "array",
+			"items": {
+				"type": "object",
+				"oneOf": [
+					{
+						"description": "Specific enabling or disabling of a feature.",
+						"properties": {
+							"domain": {
+								"description": "The domain the feature is present within.",
+								"type": "string"
+							},
+							"feature": {
+								"description": "The name of the feature.",
+								"type": "string"
+							},
+							"enable": {
+								"description": "The feature matching the domain and feature_name will be enabled or disabled based on the feature phase.",
+								"type": "boolean"
+							}
+						},
+						"required": ["domain", "feature", "enable"]
+					},
+					{
+						"properties": {
+							"attribute_name": {
+								"description": "Name of attribute to be searched for.",
+								"type": "string"
+							},
+							"attribute_value": {
+								"description": "Value of attribute to be matched against.",
+								"type": "string"
+							},
+							"feature_phase": {
+								"description": "Any features matching the attribute name and value will be compared to the phase & enabled based on the feature phase.",
+								"type": "string",
+								"enum": ["UnderDevelopment", "CodeComplete", "PreviewReady", "FeatureComplete"]
+							},
+							"enable": {
+								"description": "Any features matching the attribute name and value will be enabled or disabled based on the value of this key.",
+								"type": "boolean"
+							}
+						},
+						"required": ["attribute_name", "attribute_value"]
+					}
+				]
+			}
 		}
 	}
 }

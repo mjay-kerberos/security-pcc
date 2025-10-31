@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,6 +14,7 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
+import CloudBoardCommon
 import CloudBoardJob
 import CloudBoardLogging
 import CloudBoardMetrics
@@ -57,10 +58,14 @@ actor NullCloudApp: CloudBoardApp {
         case .none, .some("echo"):
             self.metrics.emit(Metrics.LaunchCounter(action: .increment, serviceName: .echoApp))
             do {
-                try await NullAppRequestSummary(app: .echoApp, from: environment)
-                    .loggingRequestSummary(logger: NullCloudApp.log) {
-                        return try await EchoApp().run(input: input, responder: responder, environment: environment)
-                    }
+                try await NullAppRequestSummary(
+                    app: .echoApp,
+                    from: environment,
+                    spanID: TraceContextCache.singletonCache.generateNewSpanID()
+                )
+                .loggingRequestSummary(logger: NullCloudApp.log) {
+                    return try await EchoApp().run(input: input, responder: responder, environment: environment)
+                }
             } catch {
                 self.metrics.emit(Metrics.OverallErrorCounter.Factory().make(error))
                 if error is RequestedCrashError {
@@ -71,16 +76,37 @@ actor NullCloudApp: CloudBoardApp {
         case .some("test"):
             self.metrics.emit(Metrics.LaunchCounter(action: .increment, serviceName: .testApp))
             do {
-                try await NullAppRequestSummary(app: .testApp, from: environment)
-                    .loggingRequestSummary(logger: NullCloudApp.log) {
-                        return try await TestApp().run(input: input, responder: responder, environment: environment)
-                    }
+                try await NullAppRequestSummary(
+                    app: .testApp,
+                    from: environment,
+                    spanID: TraceContextCache.singletonCache.generateNewSpanID()
+                )
+                .loggingRequestSummary(logger: NullCloudApp.log) {
+                    return try await TestApp().run(input: input, responder: responder, environment: environment)
+                }
             } catch {
                 self.metrics.emit(Metrics.OverallErrorCounter.Factory().make(error))
                 if error is RequestedCrashError {
                     // Rethrow
                     throw error
                 }
+            }
+        case .some("proxy"):
+            self.metrics.emit(Metrics.LaunchCounter(action: .increment, serviceName: .testApp))
+            do {
+                let spanID = TraceContextCache.singletonCache.generateNewSpanID()
+                try await NullAppRequestSummary(app: .proxyApp, from: environment, spanID: spanID)
+                    .loggingRequestSummary(logger: NullCloudApp.log) {
+                        return try await ProxyApp(configuration: self.config?.proxyConfiguration).run(
+                            input: input,
+                            responder: responder,
+                            environment: environment,
+                            spanID: spanID
+                        )
+                    }
+            } catch {
+                self.metrics.emit(Metrics.OverallErrorCounter.Factory().make(error))
+                throw error
             }
         default:
             self.metrics.emit(Metrics.LaunchCounter(action: .increment, serviceName: .unknown))
@@ -97,6 +123,7 @@ actor NullCloudApp: CloudBoardApp {
 enum NullAppServiceName: String {
     case testApp = "TestApp"
     case echoApp = "EchoApp"
+    case proxyApp = "ProxyApp"
     case unknown
 }
 

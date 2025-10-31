@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -13,6 +13,7 @@
 // 10/02/2024
 
 import CloudBoardJobAPI
+import Foundation
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 import os
@@ -23,7 +24,7 @@ public struct CloudAppMetrics: Sendable {
         category: "CloudAppMetrics"
     )
 
-    private var initialCBMetrics: WarmupDetails.InitialMetrics
+    private var initialCBMetrics: WarmupDetails
 
     /// Time from receiving the initial request parameters in cloudboard to invoking `run` on the cloud app.
     public var timeToCloudAppInvoke: ContinuousClock.Duration
@@ -34,19 +35,23 @@ public struct CloudAppMetrics: Sendable {
     /// a long time warming up.
     public var timeToReceiveParameters: ContinuousClock.Duration
 
-    internal init(_ builder: Builder, buildTime: ContinuousClock.Instant) {
+    internal init(_ builder: Builder, buildTime: Date) {
         if let value = builder.initialMetrics {
             self.initialCBMetrics = value
         } else {
-            Self.log.fault("Building metrics without receiving initial metrics, setting to default values")
-            self.initialCBMetrics = .init(setupMessageReceived: .now)
+            Self.log.error("Building metrics without receiving initial metrics, setting to default values")
+            self.initialCBMetrics = .init()
         }
 
         if let parameters = builder.parameters, let parametersReceivedTime = builder.parametersReceivedTime {
-            self.timeToCloudAppInvoke = buildTime - parameters.parametersReceived
-            self.timeToReceiveParameters = parametersReceivedTime - parameters.parametersReceived
+            self.timeToCloudAppInvoke = .seconds(buildTime.timeIntervalSince(parameters.parametersReceived))
+            self
+                .timeToReceiveParameters = .seconds(
+                    parametersReceivedTime
+                        .timeIntervalSince(parameters.parametersReceived)
+                )
         } else {
-            Self.log.fault("Building metrics without receiving parameters, setting associated metrics to zero")
+            Self.log.error("Building metrics without receiving parameters, setting associated metrics to zero")
             self.timeToCloudAppInvoke = .zero
             self.timeToReceiveParameters = .zero
         }
@@ -60,16 +65,16 @@ extension CloudAppMetrics {
             CloudAppMetrics.log
         }
 
-        fileprivate var initialMetrics: WarmupDetails.InitialMetrics?
+        fileprivate var initialMetrics: WarmupDetails?
 
         fileprivate var parameters: ParametersData?
 
-        fileprivate var parametersReceivedTime: ContinuousClock.Instant?
+        fileprivate var parametersReceivedTime: Date?
 
         package init() {}
 
         mutating func receivedJobHelperMetricDelivery(
-            initialMetrics: WarmupDetails.InitialMetrics
+            initialMetrics: WarmupDetails
         ) {
             if let oldValue = self.initialMetrics {
                 Self.log.fault(

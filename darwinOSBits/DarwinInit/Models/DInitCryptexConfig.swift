@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -33,6 +33,9 @@ struct DInitCryptexConfig {
     var cacheable: Bool?
     var identifier: String?
     var aeaDecryptionParams: DInitAEADecryptionParams?
+    var maxActiveTasks: Int?
+    var chunkSize: UInt64?
+    var originalKnoxUrl: URL?
 }
 
 extension DInitCryptexConfig {
@@ -52,6 +55,9 @@ extension DInitCryptexConfig {
         case cacheable
         case identifier
         case aeaDecryptionParams = "aea_decryption_params"
+        case maxActiveTasks = "max_active_tasks"
+        case chunkSize = "chunk_size"
+        case originalKnoxUrl = "original_knox_url"
     }
 }
 

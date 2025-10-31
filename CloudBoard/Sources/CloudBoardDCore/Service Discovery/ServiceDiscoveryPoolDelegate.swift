@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -20,7 +20,7 @@ import InternalGRPC
 import Logging
 import os
 
-extension ServiceDiscoveryPublisher {
+extension ServiceDiscoveryComms {
     final class PoolDelegate: GRPCConnectionPoolDelegate, Sendable {
         private static let logger: os.Logger = .init(
             subsystem: "com.apple.cloudos.cloudboard",

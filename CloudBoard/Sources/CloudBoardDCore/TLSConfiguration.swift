@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -34,7 +34,7 @@ extension GRPCTLSConfiguration {
         category: "TLSValidator"
     )
 
-    typealias IdentityCallback = () -> IdentityManager.ResolvedIdentity?
+    typealias IdentityCallback = @Sendable () -> IdentityManager.ResolvedIdentity?
 
     private static let supportedAPRNDomains = ["sdr", "aci-kube"]
 

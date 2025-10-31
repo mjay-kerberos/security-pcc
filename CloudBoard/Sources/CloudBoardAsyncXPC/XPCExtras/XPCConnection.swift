@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,6 +14,7 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
+import CloudBoardOSActivity
 import Dispatch
 import XPC
 import XPCPrivate
@@ -23,7 +24,7 @@ import XPCPrivate
 internal func XPCConnectionCreate(
     connection: XPCConnection,
     object: XPCObject
-) throws -> XPCConnection {
+) throws -> XPCLocalConnection {
     if object.type == XPC_TYPE_CONNECTION {
         return XPCLocalConnection(object.rawValue)
     }
@@ -68,29 +69,30 @@ internal protocol XPCConnection: CustomStringConvertible, Sendable {
 
 // MARK: - Local Connection
 
-internal struct XPCLocalConnection {
+internal class XPCLocalConnection {
     internal var events: AsyncStream<XPCObject>
+    internal var eventsContinuation: AsyncStream<XPCObject>.Continuation
     internal let rawValue: xpc_connection_t
 
-    internal init(_ connection: xpc_connection_t) {
+    internal required init(_ connection: xpc_connection_t) {
         self.rawValue = connection
-        self.events = AsyncStream { continuation in
-            xpc_connection_set_event_handler(connection) { event in
-                continuation.yield(XPCObject(rawValue: event))
-            }
+        (self.events, self.eventsContinuation) = AsyncStream.makeStream()
+        xpc_connection_set_event_handler(connection) { [weak self] event in
+            guard let self else { return }
+            self.eventsContinuation.yield(XPCObject(rawValue: event))
         }
     }
 }
 
 extension XPCLocalConnection {
     /// Connect to an endpoint.
-    internal init(endpoint: CloudBoardAsyncXPCEndpoint) {
+    convenience init(endpoint: CloudBoardAsyncXPCEndpoint) {
         let connection = xpc_connection_create_from_endpoint(endpoint.rawValue)
         self.init(connection)
     }
 
     /// Connect to a mach service by name.
-    internal init(machService: String) {
+    convenience init(machService: String) {
         let connection = xpc_connection_create_mach_service(machService, nil, 0)
         self.init(connection)
     }
@@ -156,6 +158,7 @@ extension XPCLocalConnection: XPCConnection {
 
     internal func cancel() {
         xpc_connection_cancel(self.rawValue)
+        self.eventsContinuation.finish()
     }
 
     // MARK: Event Handling

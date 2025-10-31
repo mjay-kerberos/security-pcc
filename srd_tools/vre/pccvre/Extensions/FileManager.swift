@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -105,6 +105,12 @@ extension FileManager {
         } catch {
             return false
         }
+    }
+
+    // isExecutable returns true if path appears to be executable
+    static func isExecutable<T: Path>(_ path: T) -> Bool {
+        let path = fileURL(path)
+        return FileManager.default.isExecutableFile(atPath: path.path)
     }
 
     // isWritableDirectory returns true if path exists as directory and is writable by caller

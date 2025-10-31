@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -15,6 +15,13 @@
 // Copyright © 2023 Apple. All rights reserved.
 
 /// Defines shared constants that are relevant for users of the CloudBoardAttestationDAPI
-public enum CloudBoardAttestation {
+public enum CloudBoardAttestation: Sendable {
     public static let keychainAccessGroup = "com.apple.cloudos.cloudboard"
+
+    /// Prior to the revised in memory attestation format the release digest was simply not present
+    /// This leads to unpleasant code checking for nil value when in the proper customer path
+    /// it is not valid to be unaware of this value.
+    /// Therefore this magic value is passed around in all cases where it would have been simply nil
+    /// *only* when in the test mode (which is only allowed to happen outside of customer operating modes)
+    package static let neverKnownReleaseDigest: String = "0x50FFC001"
 }

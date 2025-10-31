@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -176,9 +176,10 @@ package actor CloudMetricsXPCClient: Sendable {
             throw CloudMetricsXPCError.invalidStateTransition
         case (.reconfiguring(let existingConnection, let promise), _, true):
             if let configurationMessage {
-                logger.info("Resending configuration message post-interruption")
+                logger.log("Resending configuration message post-interruption")
                 do {
                     try await existingConnection.send(configurationMessage)
+                    promise.succeed(with: existingConnection)
                 } catch {
                     self.logger.error("Unable to send configuration message on interruption: \(error, privacy: .public)")
                     // Set state back to interrupted so we try again.
@@ -186,6 +187,8 @@ package actor CloudMetricsXPCClient: Sendable {
                     promise.fail(with: CloudMetricsXPCError.cannotConfigureDaemon)
                     throw CloudMetricsXPCError.cannotConfigureDaemon
                 }
+            } else {
+                promise.succeed(with: existingConnection)
             }
             connection = existingConnection
         case (.reconfiguring(_, let promise), _, false):

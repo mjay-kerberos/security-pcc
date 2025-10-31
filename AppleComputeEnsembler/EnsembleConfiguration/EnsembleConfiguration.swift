@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -21,7 +21,7 @@
 
 import Foundation
 
-@_spi(Daemon) import Ensemble // Helper functions
+@_spi(Daemon) import AppleComputeEnsembler // Helper functions
 
 let kEnsembleConfigurationPreferenceKey = "EnsembleConfiguration"
 
@@ -34,21 +34,49 @@ enum Rank: Int, Decodable {
 	case Rank5 = 5
 	case Rank6 = 6
 	case Rank7 = 7
+	case Rank8 = 8
+	case Rank9 = 9
+	case Rank10 = 10
+	case Rank11 = 11
+	case Rank12 = 12
+	case Rank13 = 13
+	case Rank14 = 14
+	case Rank15 = 15
+	case Rank16 = 16
+	case Rank17 = 17
+	case Rank18 = 18
+	case Rank19 = 19
+	case Rank20 = 20
+	case Rank21 = 21
+	case Rank22 = 22
+	case Rank23 = 23
+	case Rank24 = 24
+	case Rank25 = 25
+	case Rank26 = 26
+	case Rank27 = 27
+	case Rank28 = 28
+	case Rank29 = 29
+	case Rank30 = 30
+	case Rank31 = 31
 }
 
 struct NodeConfiguration: CustomStringConvertible, Decodable, ReportableString {
 	let chassisID: String
 	private let _rank: Rank
 	let hostName: String?
+	// port is needed for unit tests on desk, since we are running on same mac. Otherwise we will use
+	// default port.
+	let port: UInt16?
 
 	var rank: Int {
 		self._rank.rawValue
 	}
 
-	init(chassisID: String, rank: Rank, hostName: String?) {
+	init(chassisID: String, rank: Rank, hostName: String?, port: UInt16? = nil) {
 		self.chassisID = chassisID
 		self._rank = rank
 		self.hostName = hostName
+		self.port = port
 	}
 
 	// This is OK to log publically because the private fields are obfuscated.
@@ -76,6 +104,7 @@ struct NodeConfiguration: CustomStringConvertible, Decodable, ReportableString {
 		case chassisID
 		case _rank = "rank"
 		case hostName
+		case port
 	}
 }
 

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -19,19 +19,37 @@
 
 import Foundation
 
-private let vrevmCommand = "vrevm"
-private let envExitOnPID = "\(vrevmCommand)_EXIT_ON_PID".uppercased()
+private let vrevmCommandName = "vrevm"
+private let envExitOnPID = "\(vrevmCommandName)_EXIT_ON_PID".uppercased()
 
 extension VRE {
+    /// <#Description#>
     struct VM {
-        // Config encapsulates (in-core) settings for an instance VM
+        static var vrevmCmd: String = CLI.commandDir.appending(vrevmCommandName).string
+
+        /// Config encapsulates (in-core) settings for creating an instance VM
         struct Config {
+            struct Network {
+                enum Mode: String {
+                    case none
+                    case nat
+                    case hostOnly
+                }
+
+                let mode: Mode
+                var macAddr: String? = nil
+            }
+
             var osImage: String?
             var osVariant: String?
             var osVariantName: String?
             var fusing: String?
             var darwinInitPath: String?
-            var macAddr: String?
+            var networks: [Network] = [Network(mode: .nat)]
+            /// Designate number of CPUs for guest
+            var ncpu: UInt?
+            /// Designate memory (GiB) for guest
+            var nramGB: UInt?
             var bootArgs: VRE.NVRAMArgs?
             var nvramArgs: VRE.NVRAMArgs?
             var romImagePath: String?
@@ -46,6 +64,7 @@ extension VRE {
             var bundlepath: String?
             var state: String?
             var ecid: String?
+            var udid: String?
             var cpumem: String?
             var netmode: String?
             var macaddr: String?
@@ -53,10 +72,13 @@ extension VRE {
             var rsdname: String?
 
             var isRunning: Bool { state ?? "" == "running" }
+
+            var memoryGB: Int? {
+                cpumem?.replacingOccurrences(of: "GiB", with: "").split(separator: "/").dropFirst().first.flatMap { Int($0) }
+            }
         }
 
         let name: String
-        let vrevmPath: String // path to "vrevm" command
 
         // isRunning returns true if "vrevm list" shows VM running
         var isRunning: Bool {
@@ -69,14 +91,12 @@ extension VRE {
 
         init(
             name: String,
-            vrevmPath: String = CLI.commandDir.appending(vrevmCommand).string
-        ) throws {
-            guard FileManager.default.isExecutableFile(atPath: vrevmPath) else {
-                throw VREError("\(vrevmPath) executable not found")
-            }
-
+            vrevmPath: String? = nil
+        ) {
             self.name = name
-            self.vrevmPath = vrevmPath
+            if let vrevmPath, FileManager.default.isExecutableFile(atPath: vrevmPath) {
+                VRE.VM.vrevmCmd = vrevmPath
+            }
         }
 
         // create executes a "vrevm create" operation using settings in config
@@ -90,7 +110,7 @@ extension VRE {
             cmdline.append(contentsOf: vmConfigArgs(config))
 
             do {
-                try vmCmd(cmdline)
+                try Self.vmCmd(cmdline)
             } catch {
                 throw VREError("error creating VRE instance: \(error)")
             }
@@ -101,7 +121,7 @@ extension VRE {
             let cmdline: [String] = ["remove", "-f", "--name=\(name)"]
 
             do {
-                try vmCmd(cmdline, outMode: .none)
+                try Self.vmCmd(cmdline, outMode: .none)
             } catch {
                 throw VREError("error removing VRE instance: \(error)")
             }
@@ -122,7 +142,11 @@ extension VRE {
             }
 
             do {
-                try vmCmd(cmdline, outMode: .terminal)
+                if quietMode {
+                    try Self.vmCmd(cmdline, outMode: .nostdin)
+                } else {
+                    try Self.vmCmd(cmdline, outMode: .terminal)
+                }
             } catch {
                 throw VREError("error starting VRE instance: \(error)")
             }
@@ -134,7 +158,7 @@ extension VRE {
 
             let listOutput: String
             do {
-                listOutput = try vmCmd(cmdline, outMode: .capture)
+                listOutput = try Self.vmCmd(cmdline, outMode: .capture)
             } catch {
                 throw VREError("error listing VRE instances: \(error)")
             }
@@ -147,6 +171,51 @@ extension VRE {
             }
 
             return vmstatus[0]
+        }
+        
+        // assign virtmesh rank id and plugin path
+        func assignVirtMesh(rank: Int, pluginPath: URL) throws {
+            let cmdline = [
+                "modify",
+                "--name=\(name)",
+                "--virt-mesh-rank=\(rank)",
+                "--virt-mesh-plugin",
+                pluginPath.path(percentEncoded: false),
+            ]
+            do {
+                try Self.vmCmd(cmdline, outMode: .terminal)
+            } catch {
+                throw VREError("error assigning virtmesh to VRE instance: \(error)")
+            }
+        }
+
+        static func status() throws -> [Status] {
+            let cmdline = ["list", "--json"]
+
+            let listOutput: String
+            do {
+                listOutput = try vmCmd(cmdline, outMode: .capture)
+            } catch {
+                throw VREError("error listing VRE instances: \(error)")
+            }
+
+            guard let vmstatus = try? JSONDecoder().decode(
+                [Status].self,
+                from: listOutput.data(using: .utf8)!
+            ) else {
+                throw VREError("failed to obtain status")
+            }
+            return vmstatus
+        }
+
+        /// Adds up the amount of memory requested by all the running VMs
+        /// - Returns: total memory in GB
+        static func totalRunningVMMemory() throws -> Int {
+            let vmStatus = try VRE.VM.status()
+            let runningVMMemory = vmStatus
+                .filter { $0.isRunning }
+                .reduce(0) { (sum, vm) in sum + (vm.memoryGB ?? 0) }
+            return runningVMMemory
         }
 
         // vmConfigArgs populates a command-line for "vrevm" from Config
@@ -171,8 +240,24 @@ extension VRE {
                 cmdline.append("--darwin-init=\(darwinInit)")
             }
 
-            if let macAddr = config.macAddr {
-                cmdline.append("--macaddr=\(macAddr)")
+            if let ncpu = config.ncpu {
+                cmdline.append("--ncpu=\(ncpu)")
+            }
+
+            for network in config.networks {
+                var netargs: [String] = [network.mode.rawValue]
+                if let mac = network.macAddr {
+                    netargs.append("macaddr=\(mac)")
+                }
+                cmdline.append("--network=\(netargs.joined(separator: ","))")
+            }
+
+            if let ncpu = config.ncpu {
+                cmdline.append("--ncpu=\(ncpu)")
+            }
+
+            if let nramGB = config.nramGB {
+                cmdline.append("--nram=\(nramGB)")
             }
 
             if let bootArgs = config.bootArgs {
@@ -225,13 +310,13 @@ extension VRE {
         //  printCmd can be provided to display a different command-line from what's actually provided.
         //  outMode determines where command output should be collected (passed to ExecCommand)
         @discardableResult
-        private func vmCmd(
+        private static func vmCmd(
             _ commandArgs: [String],
             printCmd: String? = nil,
             outMode: ExecCommand.OutputMode = .terminal
         ) throws -> String {
             var commandLine = commandArgs
-            commandLine.insert(vrevmPath, at: 0)
+            commandLine.insert(VRE.VM.vrevmCmd, at: 0)
 
             VRE.logger.debug("\(printCmd ?? commandLine.joined(separator: " "), privacy: .public)")
 
@@ -256,3 +341,6 @@ extension VRE {
         }
     }
 }
+
+extension VRE.VM.Config.Network.Mode: Codable {}
+extension VRE.VM.Config.Network: Codable {}

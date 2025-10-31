@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,6 +14,7 @@
 
 //  Copyright © 2024 Apple Inc. All rights reserved.
 
+import CloudBoardCommon
 import CloudBoardMetrics
 import Foundation
 @_weakLinked import libnarrativecert
@@ -64,7 +65,7 @@ public final class IdentityManager: Sendable {
         self.cached.withLock { $0 }
     }
 
-    public var identityCallback: () -> ResolvedIdentity? {
+    public var identityCallback: @Sendable () -> ResolvedIdentity? {
         { self.identity }
     }
 
@@ -160,13 +161,13 @@ public final class IdentityManager: Sendable {
         }
     }
 
-    public struct ResolvedIdentity {
+    public struct ResolvedIdentity: Sendable {
         public var base: SecIdentity
         public var chain: [SecCertificate]
         public var details: IdentityDetails?
         public var credential: URLCredential
 
-        public struct IdentityDetails {
+        public struct IdentityDetails: Sendable {
             public var refreshedNotificationName: String
             public var domain: NarrativeDomain
             public var type: NarrativeIdentityType
@@ -251,6 +252,10 @@ public enum IdentityManagerError: Error {
     case unableToParseChainCert(NarrativeDomain, NarrativeIdentityType, String)
     case unimplementedFunctionality
 }
+
+// rdar://142404105 (Make NarrativeDomain and NarrativeIdentityType etc Sendable)
+extension NarrativeDomain: @unchecked @retroactive Sendable {}
+extension NarrativeIdentityType: @unchecked @retroactive Sendable {}
 
 extension SecCertificate {
     var commonName: String {

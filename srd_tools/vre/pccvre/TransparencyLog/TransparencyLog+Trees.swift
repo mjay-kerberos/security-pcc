@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -46,18 +46,16 @@ extension TransparencyLog {
         // init performs the request and parses response
         init(
             endpoint: URL, // KTInitBag: at-researcher-list-trees
-            tlsInsecure: Bool = false,
             useIdentity: Bool = false,
             requestUUID: UUID = UUID()
         ) async throws {
             let listTreesReq = TxPB_ListTreesRequest.with { builder in
-                builder.version = .v3
+                builder.version = TransparencyLog.protocolVersion
                 builder.requestUuid = requestUUID.uuidString
             }
 
             let (respData, _) = try await TransparencyLog.urlPostProtbuf(
                 url: endpoint,
-                tlsInsecure: tlsInsecure,
                 useIdentity: useIdentity,
                 requestBody: listTreesReq.serializedData(),
                 headers: [TransparencyLog.requestUUIDHeader: requestUUID.uuidString]

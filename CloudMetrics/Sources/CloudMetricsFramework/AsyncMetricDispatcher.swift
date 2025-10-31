@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -89,7 +89,7 @@ internal final class AsyncMetricDispatcher: Sendable {
                     try await xpcClient.recordQuantiles(message: recordSummaryQuantilesMessage)
                 }
             } catch {
-                logger.debug("Can't update metric. error=\(error, privacy: .private)")
+                logger.error("Can't update metric. error=\(error, privacy: .private)")
             }
         }
     }

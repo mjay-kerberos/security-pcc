@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -15,7 +15,31 @@
 //  Copyright © 2024 Apple Inc. All rights reserved.
 import CloudBoardController
 
+public struct ServiceDiscoveryWorkloadConfig: CustomStringConvertible {
+    public var workloadType: WorkloadConfig.WorkloadType
+    public var workloadTags: [String: WorkloadConfig.RoutingTagValue]
+
+    public init(workloadType: WorkloadConfig.WorkloadType, workloadTags: [String: WorkloadConfig.RoutingTagValue]) {
+        self.workloadType = workloadType
+        self.workloadTags = workloadTags
+    }
+
+    public init(from workloadConfig: WorkloadConfig) {
+        self.workloadType = workloadConfig.workloadType
+        self.workloadTags = workloadConfig.workloadTags
+    }
+
+    public var description: String {
+        """
+        \(String(describing: Self.self))(
+        workloadType: \(self.workloadType), \
+        workloadTags: \(self.workloadTags))
+        """
+    }
+}
+
 public protocol ServiceDiscoveryPublisherProtocol {
-    func announceService(name: String, workloadConfig: [String: WorkloadConfig.RoutingTagValue])
+    func announceService(name: String, workloadConfig: ServiceDiscoveryWorkloadConfig)
     func retractService(name: String)
+    func run() async throws
 }

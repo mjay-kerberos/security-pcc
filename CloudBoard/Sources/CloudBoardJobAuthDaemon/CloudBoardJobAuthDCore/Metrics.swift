@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -118,6 +118,18 @@ enum Metrics {
                 self.dimensions = [.keyType: keyType.metricValue]
                 self.value = expireAt.timeIntervalSince(Date())
             }
+        }
+    }
+
+    enum CloudBoardJobAuthDaemon {
+        struct PhysicalMemoryFootprintGauge: Gauge {
+            static let label: MetricLabel = "\(prefix)_physical_memory_footprint_bytes"
+            var value: Int
+        }
+
+        struct LifetimeMaxPhysicalMemoryFootprintGauge: Gauge {
+            static let label: MetricLabel = "\(prefix)_lifetime_max_physical_memory_footprint_bytes"
+            var value: Int
         }
     }
 }

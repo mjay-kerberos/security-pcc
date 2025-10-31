@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,10 +14,10 @@
 
 //  Copyright © 2024 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+internal import CloudBoardAsyncXPC
 
 internal enum CloudBoardHealthAPIXPCClientToServerMessage {
-    internal struct GetHealthState: CloudBoardAsyncXPCMessage {
+    internal struct GetHealthState: CloudBoardAsyncXPCCodableMessage {
         internal typealias Success = CloudBoardHealthState
         internal typealias Failure = CloudBoardHealthAPIError
     }

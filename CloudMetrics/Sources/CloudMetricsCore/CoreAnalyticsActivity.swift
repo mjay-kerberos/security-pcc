@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -41,7 +41,7 @@ internal final class CoreAnalyticsActivity: NSObject, Sendable {
                     self.logger.log("CoreAnalyticsActivity state: RUN")
                     self.runInternal(activity: activity)
                 default:
-                    self.logger.log("Unexpected CoreAnalyticsActivity state:\(state, privacy: .public)")
+                    self.logger.log("Unexpected CoreAnalyticsActivity state. state=\(state, privacy: .public)")
                 }
             }
         } else {
@@ -74,7 +74,7 @@ internal final class CoreAnalyticsActivity: NSObject, Sendable {
             client.submit()
             self.logger.debug("Finished flushing CoreAnalytics.")
         } else {
-            self.logger.info("OSASubmissionClient not available, skipping CoreAnalytics flush")
+            self.logger.log("OSASubmissionClient not available, skipping CoreAnalytics flush")
         }
     }
 }

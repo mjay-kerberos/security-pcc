@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -23,12 +23,14 @@ extension CFPreferences {
     }
 }
 
-struct NullCloudAppConfig: Codable, Hashable {
+struct NullCloudAppConfig: Codable, Hashable, Sendable {
     enum CodingKeys: String, CodingKey {
         case nullAppRole = "NullAppRole"
+        case proxyConfiguration = "ProxyConfiguration"
     }
 
     internal var nullAppRole: String?
+    internal var proxyConfiguration: ProxyConfiguration?
 
     static func fromPreferences() throws -> NullCloudAppConfig {
         NullCloudApp.log
@@ -45,5 +47,21 @@ struct NullCloudAppConfig: Codable, Hashable {
     static func fromPreferences(_ preferences: CFPreferences) throws -> NullCloudAppConfig {
         let decoder = CFPreferenceDecoder()
         return try decoder.decode(NullCloudAppConfig.self, from: preferences)
+    }
+}
+
+extension NullCloudAppConfig {
+    public struct ProxyConfiguration: Codable, Hashable, Sendable {
+        enum CodingKeys: String, CodingKey {
+            case serviceName = "ServiceName"
+            case routingTags = "RoutingTags"
+            case responseBypass = "ResponseBypass"
+        }
+
+        // Service name to proxy requests to
+        public var serviceName: String?
+        // Routing tags to proxy requests to
+        public var routingTags: [String: [String]]?
+        public var responseBypass: Bool?
     }
 }

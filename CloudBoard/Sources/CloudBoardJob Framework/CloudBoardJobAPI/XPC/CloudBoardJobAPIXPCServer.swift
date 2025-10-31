@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -12,9 +12,8 @@
 // EA1937
 // 10/02/2024
 
-import CloudBoardAsyncXPC
-
 //  Copyright © 2023 Apple Inc. All rights reserved.
+package import CloudBoardAsyncXPC
 import Foundation
 import os
 
@@ -52,35 +51,80 @@ extension CloudBoardJobAPIXPCServer {
     }
 }
 
-extension CloudBoardJobAPIXPCServer:
-CloudBoardJobAPIServerToClientProtocol {
-    package func provideResponseChunk(_ data: Data) async throws {
-        let chunk = ResponseChunk(data: data)
-        try await self.sendWorkloadResponse(.responseChunk(chunk))
+extension CloudBoardJobAPIXPCServer: CloudBoardJobAPIServerToClientProtocol {
+    package func provideResponseChunk(_ data: Data) async {
+        await self.listener.broadcast(DataMessage(data))
     }
 
-    package func endJob() async throws {
-        try await self.listener.broadcast(CloudBoardJobAPIXPCServerToClientMessage.EndJob())
+    package func endOfResponse() async {
+        await self.listener.broadcast(EndOfResponse())
     }
 
-    package func findHelper(helperID: UUID) async throws {
-        let findHelper = FindHelper(helperID: helperID)
-        try await self.sendWorkloadResponse(.findHelper(findHelper))
+    package func internalError() async {
+        await self.listener.broadcast(InternalErrorMessage())
     }
 
-    package func sendHelperMessage(helperID: UUID, data: Data) async throws {
-        let sendHelperMessage = SendHelperMessage(helperID: helperID, message: data)
-        try await self.sendWorkloadResponse(.sendHelperMessage(sendHelperMessage))
+    package func endJob() async {
+        await self.listener.broadcast(EndJob())
     }
 
-    package func sendHelperEOF(helperID: UUID) async throws {
-        let sendHelperEOF = SendHelperEOF(helperID: helperID)
-        try await self.sendWorkloadResponse(.sendHelperEOF(sendHelperEOF))
+    package func findWorker(
+        workerID: UUID,
+        serviceName: String,
+        routingParameters: [String: [String]],
+        responseBypass: Bool,
+        forwardRequestChunks: Bool,
+        isFinal: Bool,
+        spanID: String
+    ) async throws {
+        let requestForWorker = WorkerConstraints(
+            workerID: workerID,
+            serviceName: serviceName,
+            routingParameters: routingParameters,
+            responseBypass: responseBypass,
+            forwardRequestChunks: forwardRequestChunks,
+            isFinal: isFinal,
+            spanID: spanID
+        )
+        await self.listener.broadcast(requestForWorker)
     }
 
-    // Common helper for the functions above that send a WorkloadResponse.
-    private func sendWorkloadResponse(_ response: CloudAppResponse) async throws {
-        try await self.listener.broadcast(CloudBoardJobAPIXPCServerToClientMessage.ProvideOutput(response: response))
+    package func sendWorkerRequestMessage(workerID: UUID, _ data: Data) async {
+        await self.listener.broadcast(
+            WorkerRequestMessage(workerID: workerID, message: data)
+        )
+    }
+
+    package func sendWorkerEOF(workerID: UUID, isError: Bool) async {
+        let workerEOF = WorkerEOF(workerID: workerID, isError: isError)
+        await self.listener.broadcast(workerEOF)
+    }
+
+    package func finalizeRequestExecutionLog() async {
+        await self.listener.broadcast(FinalizeRequestExecutionLog())
+    }
+
+    package func distributeEnsembleKey(
+        info: String,
+        distributionType: CloudBoardJobAPIEnsembleKeyDistributionType
+    ) async throws -> UUID {
+        // We can use sendToAny as we know there is only one listener (cb_jobhelper)
+        return try await self.listener.sendToAny(CloudAppToJobHelperDeriveKeyMessage.distributeEnsembleKey(
+            info: info,
+            distributionType: distributionType
+        ))
+    }
+
+    package func distributeSealedEnsembleKey(
+        info: String,
+        distributionType: CloudBoardJobAPIEnsembleKeyDistributionType
+    ) async throws -> CloudBoardJobAPIEnsembleKeyInfo {
+        // We can use sendToAny as we know there is only one listener (cb_jobhelper)
+        return try await self.listener
+            .sendToAny(CloudAppToJobHelperDeriveSealedKeyMessage.distributeSealedEnsembleKey(
+                info: info,
+                distributionType: distributionType
+            ))
     }
 }
 
@@ -101,7 +145,7 @@ extension CloudBoardJobAPIXPCServer: CloudBoardJobAPIServerProtocol {
         ) { warmupMessage in
             Self.logger.debug("Received Warmup XPC message")
             let delegate = try await self.ensureDelegate(for: CloudBoardJobAPIXPCClientToServerMessage.Warmup.self)
-            try await delegate.warmup(details: warmupMessage.details)
+            try await delegate.warmup(details: warmupMessage)
             return ExplicitSuccess()
         }
 
@@ -110,25 +154,32 @@ extension CloudBoardJobAPIXPCServer: CloudBoardJobAPIServerProtocol {
         ) { parametersMessage in
             Self.logger.debug("Received Parameters XPC message")
             let delegate = try await self.ensureDelegate(for: CloudBoardJobAPIXPCClientToServerMessage.Warmup.self)
-            try await delegate.receiveParameters(parametersData: parametersMessage.parametersData)
+            try await delegate.receiveParameters(parametersData: parametersMessage)
             return ExplicitSuccess()
         }
 
         handlers.register(
             CloudBoardJobAPIXPCClientToServerMessage.InvokeWorkload.self
         ) { message in
-            Self.logger.debug("Received InvokeWorkload XPC message")
+            Self.logger.debug("Received InvokeWorkload XPC message in cloud app")
             let delegate = try await self
                 .ensureDelegate(for: CloudBoardJobAPIXPCClientToServerMessage.InvokeWorkload.self)
-            switch message.request {
+            switch message {
             case .requestChunk(let message):
                 try await delegate.provideInput(message.data, isFinal: message.isFinal)
-            case .helperInvocation(let invocation):
-                try await delegate.helperInvocation(invocationID: invocation.invocationID)
-            case .receiveHelperMessage(let message):
-                try await delegate.receiveHelperMessage(invocationID: message.invocationID, data: message.data)
-            case .receiveHelperEOF(let eof):
-                try await delegate.receiveHelperEOF(invocationID: eof.invocationID)
+            case .receiveWorkerFoundEvent(let workerFound):
+                try await delegate.receiveWorkerFoundEvent(
+                    workerID: workerFound.workerID, releaseDigest: workerFound.releaseDigest
+                )
+            case .receiveWorkerMessage(let response):
+                try await delegate.receiveWorkerMessage(workerID: response.workerID, response.message)
+            case .receiveWorkerResponseSummary(let summary):
+                try await delegate.receiveWorkerResponseSummary(
+                    workerID: summary.workerID,
+                    succeeded: summary.succeeded
+                )
+            case .receiveWorkerEOF(let eof):
+                try await delegate.receiveWorkerEOF(workerID: eof.workerID)
             }
             return ExplicitSuccess()
         }

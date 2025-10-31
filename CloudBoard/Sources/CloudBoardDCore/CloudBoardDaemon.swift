@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,10 +14,12 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
+import CFPreferenceCoder
 import CloudBoardAttestationDAPI
 import CloudBoardCommon
 import CloudBoardIdentity
 import CloudBoardJobAuthDAPI
+import CloudBoardJobHelperAPI
 import CloudBoardLogging
 import CloudBoardMetrics
 import CloudBoardPlatformUtilities
@@ -38,32 +40,23 @@ import Tracing
 /// to signal readiness of the workload and to provide service discovery registration metadata that cloudboardd
 /// announces to Service Discovery.
 public actor CloudBoardDaemon {
-    enum InitializationError: Error {
-        case missingAuthTokenSigningKeys
-    }
-
     public static let logger: os.Logger = .init(
         subsystem: "com.apple.cloudos.cloudboard",
         category: "cloudboardd"
     )
 
-    @TaskLocal
-    public static var rpcID: UUID = .zero
-
-    @TaskLocal
-    public static var requestTrackingID: String = ""
-
     static let metricsClientName = "cloudboardd"
     private static let watchdogProcessName = "cloudboardd"
     private let metricsSystem: MetricsSystem
-    private let tracer: any Tracer
+    private let tracer: RequestSummaryTracer
 
     private let healthMonitor: ServiceHealthMonitor
     private let heartbeatPublisher: HeartbeatPublisher?
+    private let launchdJobFinder: LaunchdJobFinderProtocol
     private let jobHelperInstanceProvider: JobHelperInstanceProvider?
     private let jobHelperClientProvider: CloudBoardJobHelperClientProvider
     private let jobHelperResponseDelegateProvider: CloudBoardJobHelperResponseDelegateProvider
-    private let serviceDiscovery: ServiceDiscoveryPublisher?
+    private let serviceDiscoverySetup: ServiceDiscoverySetup
     private let healthServer: HealthServer?
     private let attestationProvider: AttestationProvider?
     private let config: CloudBoardDConfiguration
@@ -77,6 +70,7 @@ public actor CloudBoardDaemon {
     private let statusMonitor: StatusMonitor
     private let jobAuthClient: CloudBoardJobAuthAPIClientProtocol?
     private var exitContinuation: CheckedContinuation<Void, Never>?
+    private let convergenceTracing: ConvergenceTracing?
 
     public init(configPath: String?, metricsSystem: MetricsSystem? = nil) throws {
         let nodeInfo = NodeInfo.load()
@@ -92,7 +86,9 @@ public actor CloudBoardDaemon {
         let config: CloudBoardDConfiguration
         if let configPath {
             Self.logger.info("Loading configuration from \(configPath, privacy: .public)")
-            config = try CloudBoardDConfiguration.fromFile(path: configPath, secureConfigLoader: .real)
+            config = try CloudBoardDConfiguration.fromFile(
+                path: configPath, secureConfigLoader: .real
+            )
         } else {
             Self.logger.info("Loading configuration from preferences")
             config = try CloudBoardDConfiguration.fromPreferences()
@@ -112,13 +108,22 @@ public actor CloudBoardDaemon {
         self.metricsSystem = metricsSystem
         self.statusMonitor = .init(metrics: metricsSystem)
         self.tracer = RequestSummaryTracer(metrics: metricsSystem)
+        self.convergenceTracing = ConvergenceTracing(
+            linkSpanID: config.secureConfig.convergenceSpanID,
+            linkTraceID: config.secureConfig.convergenceTraceID,
+            tracer: self.tracer
+        )
+        self.convergenceTracing?.startSummary()
         self.healthMonitor = ServiceHealthMonitor()
         self.healthServer = HealthServer()
+        self.launchdJobFinder = LaunchdJobFinder(metrics: self.metricsSystem)
         self.jobHelperInstanceProvider = try JobHelperInstanceProvider(
-            prewarmedPoolSize: config.prewarming?.prewarmedPoolSize ?? 3,
-            maxProcessCount: config.prewarming?.maxProcessCount ?? 3,
+            prewarmedPoolSize: config.prewarming.prewarmedPoolSize ?? (config.secureConfig.isProxy ? 55 : 3),
+            maxProcessCount: config.prewarming.maxProcessCount ?? (config.secureConfig.isProxy ? 55 : 3),
             metrics: self.metricsSystem,
-            tracer: self.tracer
+            tracer: self.tracer,
+            launchdJobFinder: self.launchdJobFinder,
+            jobHelperXPCClientFactory: CloudBoardJobHelperAPIXPCClientFactory()
         )
         self.jobHelperClientProvider = try CloudBoardJobHelperXPCClientProvider(
             instanceProvider: self.jobHelperInstanceProvider!
@@ -129,7 +134,7 @@ public actor CloudBoardDaemon {
         self.hotProperties = hotProperties
         self.nodeInfo = nodeInfo
         self.insecureListener = false
-        self.serviceDiscovery = nil
+        self.serviceDiscoverySetup = ServiceDiscoverySetup.standard
         self.jobAuthClient = nil
 
         self.attestationProvider = nil
@@ -155,24 +160,27 @@ public actor CloudBoardDaemon {
 
         let lifecycleManagerConfig = config.lifecycleManager ?? CloudBoardDConfiguration.LifecycleManager()
         self.lifecycleManager = LifecycleManager(
-            config: .init(timeout: lifecycleManagerConfig.drainTimeout)
+            config: .init(
+                timeout: lifecycleManagerConfig.drainTimeout,
+                enforceAllStateChecks: lifecycleManagerConfig.enforceAllStateChecks
+            )
         )
         self.watchdogService = CloudBoardWatchdogService(processName: Self.watchdogProcessName, logger: Self.logger)
     }
 
     // Test entry point to allow dependency injection.
     //
-    // This variant explicitly _disables_ having a service discovery integration, as
+    // This variant explicitly _disables_ having a service discovery integration by default, as
     // typically that won't be working properly in unit test scenarios unless it has
     // been deliberately set up.
     internal init(
         group: NIOTSEventLoopGroup = NIOTSEventLoopGroup(),
         healthMonitor: ServiceHealthMonitor = ServiceHealthMonitor(),
         heartbeatPublisher: HeartbeatPublisher? = nil,
-        serviceDiscoveryPublisher: ServiceDiscoveryPublisher? = nil,
+        serviceDiscoverySetup: ServiceDiscoverySetup = .notPresent,
         jobHelperClientProvider: CloudBoardJobHelperClientProvider? = nil,
         jobHelperResponseDelegateProvider: CloudBoardJobHelperResponseDelegateProvider? = nil,
-        cloudboardHealthServerInstance: HealthServer? = nil,
+        healthServer: HealthServer? = nil,
         lifecycleManager: LifecycleManager? = nil,
         attestationProvider: AttestationProvider? = nil,
         config: CloudBoardDConfiguration,
@@ -182,27 +190,44 @@ public actor CloudBoardDaemon {
         insecureListener: Bool,
         metricsSystem: MetricsSystem? = nil,
         statusMonitor: StatusMonitor? = nil,
-        tracer: (any Tracer)? = nil,
-        jobAuthClient: CloudBoardJobAuthAPIClientProtocol? = nil
+        tracer: RequestSummaryTracer? = nil,
+        jobAuthClient: CloudBoardJobAuthAPIClientProtocol?,
+        launchdJobFinder: LaunchdJobFinderProtocol? = nil,
+        jobHelperXPCClientFactory: (any CloudBoardJobHelperAPIClientFactoryProtocol)? = nil
     ) throws {
         let metricsSystem = metricsSystem ?? CloudMetricsSystem(clientName: CloudBoardDaemon.metricsClientName)
         self.metricsSystem = metricsSystem
         let statusMonitor = statusMonitor ?? StatusMonitor(metrics: metricsSystem)
         self.statusMonitor = statusMonitor
         self.tracer = tracer ?? RequestSummaryTracer(metrics: metricsSystem)
+        self.convergenceTracing = nil
         self.group = group
         self.healthMonitor = healthMonitor
         self.heartbeatPublisher = heartbeatPublisher
-        self.serviceDiscovery = serviceDiscoveryPublisher
+        self.serviceDiscoverySetup = serviceDiscoverySetup
+        self.launchdJobFinder = launchdJobFinder ?? LaunchdJobFinder(metrics: self.metricsSystem)
+        // This is a legacy of there being two different approaches to mocking the jobhelpers out.
+        // One is high level, directly replacing the jobHelperClientProvider,
+        // the other allows for mocking out the launchd and local XPC parts but still
+        // using the normal code paths around them.
+        // The former is simpler, but doesn't exercise as much code
         if let jobHelperClientProvider {
+            // providing both would indicate a flawed understanding of the mocking
+            precondition(
+                jobHelperXPCClientFactory == nil,
+                "provided jobHelperClientProvider but jobHelperXPCClientFactory was also provided"
+            )
             self.jobHelperClientProvider = jobHelperClientProvider
             self.jobHelperInstanceProvider = nil
         } else {
+            let jobHelperXPCClientFactory = jobHelperXPCClientFactory ?? CloudBoardJobHelperAPIXPCClientFactory()
             self.jobHelperInstanceProvider = try JobHelperInstanceProvider(
-                prewarmedPoolSize: config.prewarming?.prewarmedPoolSize ?? 0,
-                maxProcessCount: config.prewarming?.maxProcessCount ?? 0,
+                prewarmedPoolSize: config.prewarming.prewarmedPoolSize ?? 0,
+                maxProcessCount: config.prewarming.maxProcessCount ?? 0,
                 metrics: self.metricsSystem,
-                tracer: self.tracer
+                tracer: self.tracer,
+                launchdJobFinder: self.launchdJobFinder,
+                jobHelperXPCClientFactory: jobHelperXPCClientFactory
             )
             self.jobHelperClientProvider = try CloudBoardJobHelperXPCClientProvider(
                 instanceProvider: self.jobHelperInstanceProvider!
@@ -218,10 +243,13 @@ public actor CloudBoardDaemon {
         } else {
             let lifecycleManagerConfig = config.lifecycleManager ?? CloudBoardDConfiguration.LifecycleManager()
             self.lifecycleManager = LifecycleManager(
-                config: .init(timeout: lifecycleManagerConfig.drainTimeout)
+                config: .init(
+                    timeout: lifecycleManagerConfig.drainTimeout,
+                    enforceAllStateChecks: lifecycleManagerConfig.enforceAllStateChecks
+                )
             )
         }
-        self.healthServer = cloudboardHealthServerInstance
+        self.healthServer = healthServer
         self.attestationProvider = attestationProvider
         self.config = config
         self.hotProperties = hotProperties
@@ -233,14 +261,40 @@ public actor CloudBoardDaemon {
     }
 
     public func start() async throws {
-        try await self.start(portPromise: nil, allowExit: false)
+        do {
+            try await self.start(
+                portPromise: nil,
+                allowExit: false,
+                customSearchPath: .fromPreferences
+            )
+        } catch {
+            self.convergenceTracing?.stopSummary(error: error)
+            throw error
+        }
     }
 
-    // expose more control for testing purposes
-    // - a way of surfacing the GRPC server port
-    // - a way to allow CloudBoardDaemon to exit
-    func start(portPromise: Promise<Int, Error>?, allowExit: Bool) async throws {
-        CloudBoardDaemon.logger.log("hello from cloudboardd")
+    /// expose more control for testing purposes
+    /// - a way of surfacing the GRPC server port
+    /// - a way to allow CloudBoardDaemon to exit
+    /// - a way of configuring the search paths
+    func start(
+        portPromise: Promise<Int, Error>?,
+        allowExit: Bool,
+        // any test using this should be isolated by default
+        customSearchPath: CustomSearchPathDirectory = .explictCompleteIsolation()
+    ) async throws {
+        Self.logger.log("hello from cloudboardd")
+        switch customSearchPath {
+        case .systemNormal:
+            () // do nothing
+        case .fromPreferences:
+            configureTemporaryDirectory(suffix: CFPreferences.cloudboardPreferencesDomain, logger: Self.logger)
+        case .explicit:
+            Self.logger.log("using an explicit custom search path")
+            if self.config.secureConfig.shouldEnforceAppleInfrastructureSecurityConfig {
+                fatalError("Attempt to set explicit search paths which should only be used for testing")
+            }
+        }
         self._allowExit = allowExit
 
         let hotProperties = self.hotProperties
@@ -252,7 +306,7 @@ public actor CloudBoardDaemon {
 
         self.statusMonitor.initializing()
         let jobQuiescenceMonitor: JobQuiescenceMonitor
-        await LaunchdJobHelper.cleanupManagedLaunchdJobs(logger: CloudBoardDaemon.logger)
+        await self.launchdJobFinder.cleanupManagedLaunchdJobs(logger: CloudBoardDaemon.logger)
         do {
             jobQuiescenceMonitor = JobQuiescenceMonitor(lifecycleManager: self.lifecycleManager)
             try await jobQuiescenceMonitor.startQuiescenceMonitor()
@@ -285,28 +339,6 @@ public actor CloudBoardDaemon {
                 }
 
                 let serviceAddress = try await self.resolveServiceAddress()
-                let serviceDiscovery: ServiceDiscoveryPublisher?
-                if let injectedSD = self.serviceDiscovery {
-                    CloudBoardDaemon.logger.info("Using service discovery injected for testing")
-                    serviceDiscovery = injectedSD
-                } else if let sdConfig = self.config.serviceDiscovery {
-                    CloudBoardDaemon.logger.info("Enabling service discovery")
-                    serviceDiscovery = try ServiceDiscoveryPublisher(
-                        group: self.group,
-                        configuration: sdConfig,
-                        serviceAddress: serviceAddress,
-                        localIdentityCallback: identityManager.identityCallback,
-                        hotProperties: hotProperties,
-                        nodeInfo: nodeInfo,
-                        cellID: self.config.serviceDiscovery?.cellID,
-                        statusMonitor: self.statusMonitor,
-                        metrics: self.metricsSystem
-                    )
-                } else {
-                    CloudBoardDaemon.logger.warning("Service discovery not enabled")
-                    serviceDiscovery = nil
-                }
-
                 let healthProvider = HealthProvider(monitor: self.healthMonitor)
                 let healthServer = self.healthServer
                 let attestationProvider: AttestationProvider
@@ -316,11 +348,23 @@ public actor CloudBoardDaemon {
                 } else {
                     attestationProvider = await AttestationProvider(
                         attestationClient: CloudBoardAttestationAPIXPCClient.localConnection(),
-                        metricsSystem: self.metricsSystem
+                        metricsSystem: self.metricsSystem,
+                        healthMonitor: self.healthMonitor
                     )
                 }
 
+                let sessionsFileDirectory: URL = try customSearchPath
+                    .lookup(for: .cachesDirectory, in: .userDomainMask)
+                    .appending(components: CFPreferences.cloudboardPreferencesDomain, "sessions")
+                let sessionStore = try SessionStore(
+                    attestationProvider: attestationProvider,
+                    metrics: self.metricsSystem,
+                    sessionStorage: OnDiskSessionStorage(fileDirectory: sessionsFileDirectory)
+                )
+
                 let cloudboardProvider = CloudBoardProvider(
+                    isProxy: self.config.secureConfig.isProxy,
+                    enforceRequestBypass: self.config.secureConfig.enforceRequestBypass,
                     jobHelperClientProvider: self.jobHelperClientProvider,
                     jobHelperResponseDelegateProvider: self.jobHelperResponseDelegateProvider,
                     healthMonitor: self.healthMonitor,
@@ -328,7 +372,8 @@ public actor CloudBoardDaemon {
                     tracer: self.tracer,
                     attestationProvider: attestationProvider,
                     loadConfiguration: self.config.load,
-                    hotProperties: hotProperties
+                    hotProperties: hotProperties,
+                    sessionStore: sessionStore
                 )
                 cloudBoardProvider.withLock { $0 = cloudboardProvider }
 
@@ -340,54 +385,107 @@ public actor CloudBoardDaemon {
                 }
 
                 try await withErrorLogging(operation: "cloudboardDaemon task group", sensitiveError: false) {
-                    try await withThrowingTaskGroup(of: Void.self) { group in
+                    try await withThrowingTaskGroup(of: String.self) { group in
                         if let jobHelperInstanceProvider = self.jobHelperInstanceProvider {
                             group.addTask {
                                 try await jobHelperInstanceProvider.run()
+                                return "jobHelperInstanceProvider"
                             }
                         }
 
                         group.addTask {
                             try await attestationProvider.run()
+                            return "attestationProvider"
+                        }
+
+                        group.addTask {
+                            try await sessionStore.run()
+                            return "sessionStore"
+                        }
+
+                        if let hotProperties = self.hotProperties {
+                            group.addTaskWithLogging(operation: "Hot properties task", sensitiveError: false) {
+                                try await hotProperties.run(metrics: self.metricsSystem)
+                                return "Hot properties task"
+                            }
+                        }
+
+                        try await withErrorLogging(operation: "Verify hot property update received", level: .default) {
+                            self.convergenceTracing?.checkpoint(
+                                operationName: DaemonStatus.waitingForFirstHotPropertyUpdate.metricDescription
+                            )
+                            self.statusMonitor.waitingForFirstHotPropertyUpdate()
+                            try await self.hotProperties?.waitForFirstUpdate()
+                        }
+
+                        group.addTaskWithLogging(operation: "healthMonitor", sensitiveError: false) {
+                            await withLifecycleManagementHandlers(label: "healthMonitor") {
+                                await healthProvider.run()
+                            } onDrain: {
+                                self.healthMonitor.drain()
+                            }
+                            return "healthMonitor"
+                        }
+
+                        if let healthServer {
+                            group.addTaskWithLogging(operation: "healthServer", sensitiveError: false) {
+                                await healthServer.run(healthPublisher: self.healthMonitor)
+                                return "healthServer"
+                            }
+                        }
+
+                        if let heartbeatPublisher {
+                            group.addTaskWithLogging(operation: "heartbeat", sensitiveError: false) {
+                                try await heartbeatPublisher.run()
+                                return "heartbeat"
+                            }
                         }
 
                         // Block service announce until we are sure we are able to fetch attestations
                         try await withErrorLogging(operation: "Verify attestation fetch", level: .default) {
+                            self.convergenceTracing?.checkpoint(
+                                operationName: DaemonStatus.waitingForFirstAttestationFetch.metricDescription
+                            )
                             self.statusMonitor.waitingForFirstAttestationFetch()
                             _ = try await attestationProvider.currentAttestationSet()
                         }
 
-                        // Block service announce until we have at least one set of signing keys in cb_jobauthd
+                        // Block service announce until we have obtained signing keys from cb_jobauthd
                         try await withErrorLogging(
                             operation: "Verify presence of auth token signing keys",
                             level: .default
                         ) {
-                            if self.config.blockHealthinessOnAuthSigningKeysPresence {
-                                self.statusMonitor.waitingForFirstKeyFetch()
-                                try await self.checkAuthTokenSigningKeysPresence()
-                                CloudBoardDaemon.logger.log("Signing key verification passed")
-                            } else {
-                                Self.logger
-                                    .log(
-                                        "Skipping verification due to config's blockHealthinessOnAuthSigningKeysPresence"
-                                    )
-                            }
+                            self.statusMonitor.waitingForFirstKeyFetch()
+
+                            self.convergenceTracing?.checkpoint(
+                                operationName: DaemonStatus.waitingForFirstKeyFetch.metricDescription
+                            )
+
+                            try await self.checkAuthTokenSigningKeysPresence()
+                            CloudBoardDaemon.logger.log("Signing key verification passed")
                         }
-                        self.statusMonitor.waitingForFirstHotPropertyUpdate()
 
                         group.addTask {
                             await cloudboardProvider.run()
+                            return "cloudboardProvider"
                         }
 
                         group.addTaskWithLogging(operation: "certificate refresh", sensitiveError: false) {
                             await identityManager.identityUpdateLoop()
+                            return "certificate refresh"
                         }
+
+                        let serviceDiscovery = try await self.setupServiceDiscovery(
+                            attestationProvider: attestationProvider,
+                            identityManager: identityManager,
+                            serviceAddress: serviceAddress
+                        )
 
                         if let serviceDiscovery {
                             group.addTaskWithLogging(operation: "serviceDiscovery", sensitiveError: false) {
-                                try await hotProperties?.waitForFirstUpdate()
                                 self.statusMonitor.waitingForWorkloadRegistration()
                                 do {
+                                    self.convergenceTracing?.stopSummary()
                                     try await serviceDiscovery.run()
                                 } catch let error as CancellationError {
                                     throw error
@@ -395,27 +493,7 @@ public actor CloudBoardDaemon {
                                     self.statusMonitor.serviceDiscoveryRunningFailed()
                                     throw error
                                 }
-                            }
-                        }
-
-                        group.addTaskWithLogging(operation: "healthMonitor", sensitiveError: false) {
-                            try await hotProperties?.waitForFirstUpdate()
-                            await withLifecycleManagementHandlers(label: "healthMonitor") {
-                                await healthProvider.run()
-                            } onDrain: {
-                                self.healthMonitor.drain()
-                            }
-                        }
-
-                        if let healthServer {
-                            group.addTaskWithLogging(operation: "healthServer", sensitiveError: false) {
-                                await healthServer.run(healthPublisher: self.healthMonitor)
-                            }
-                        }
-
-                        if let heartbeatPublisher {
-                            group.addTaskWithLogging(operation: "heartbeat", sensitiveError: false) {
-                                try await heartbeatPublisher.run()
+                                return "serviceDiscovery"
                             }
                         }
 
@@ -443,6 +521,7 @@ public actor CloudBoardDaemon {
                                     portPromise: portPromise,
                                     metricsSystem: self.metricsSystem
                                 )
+                                return "gRPC server"
                             } catch {
                                 self.statusMonitor.grpcServerRunningFailed()
                                 throw error
@@ -476,17 +555,51 @@ public actor CloudBoardDaemon {
                                             )
                                     }
                                 }
+                                return "workloadController"
                             }
                         }
 
-                        if let hotProperties = self.hotProperties {
-                            group.addTaskWithLogging(operation: "Hot properties task", sensitiveError: false) {
-                                try await hotProperties.run(metrics: self.metricsSystem)
+                        group.addTaskWithLogging(
+                            operation: "Publish nodeReleaseDigest metrics task",
+                            sensitiveError: false,
+                            logger: Self.logger,
+                            level: .debug
+                        ) {
+                            let nodeReleaseDigest = try await attestationProvider.currentAttestationSet()
+                                .currentAttestation.releaseDigest
+                            while true {
+                                self.metricsSystem.emit(Metrics.CloudBoardDaemon.ActiveNodeReleaseDigestGauge(
+                                    value: 1,
+                                    nodeReleaseDigestValue: nodeReleaseDigest
+                                ))
+                                Self.logger.log("publishing nodeReleaseDigest metrics \(nodeReleaseDigest)")
+                                try await Task.sleep(for: gaugeMetricPublishInterval)
                             }
+                            return "Publish nodeReleaseDigest metrics task"
+                        }
+
+                        group.addTaskWithLogging(
+                            operation: "Emit daemon memory usage metrics",
+                            sensitiveError: false,
+                            logger: Self.logger,
+                            level: .debug
+                        ) {
+                            try await runEmitMemoryUsageMetricsLoop(
+                                logger: Self.logger,
+                                metricsSystem: self.metricsSystem,
+                                physicalMemoryFootprintGauge: {
+                                    Metrics.CloudBoardDaemon.PhysicalMemoryFootprintGauge(value: $0)
+                                },
+                                lifetimeMaxPhysicalMemoryFootprintGauge: {
+                                    Metrics.CloudBoardDaemon.LifetimeMaxPhysicalMemoryFootprintGauge(value: $0)
+                                }
+                            )
+                            return "Emit daemon memory usage metrics"
                         }
 
                         // When any of these tasks exit, they all do.
-                        _ = try await group.next()
+                        let name = try await group.next()
+                        Self.logger.log("\(name ?? "nil", privacy: .public) exited - cancelling everything else")
                         group.cancelAll()
                     }
                 }
@@ -522,6 +635,7 @@ public actor CloudBoardDaemon {
 
         self.statusMonitor.daemonDrained()
         await jobQuiescenceMonitor.quiesceCompleted()
+        self.convergenceTracing?.stopSummary()
 
         // once drained do not exit, JobQuiescence Framework will take care of exiting
         // stash continuation for use in tests where we may want to exit
@@ -535,6 +649,54 @@ public actor CloudBoardDaemon {
 
     private var _allowExit = false
 
+    private func setupServiceDiscovery(
+        attestationProvider: AttestationProvider,
+        identityManager: IdentityManager,
+        serviceAddress: SocketAddress
+    ) async throws -> (any ServiceDiscoveryPublisherProtocol)? {
+        var serviceDiscovery: (any ServiceDiscoveryPublisherProtocol)?
+        switch self.serviceDiscoverySetup {
+        case .notPresent:
+            CloudBoardDaemon.logger.warning("Service discovery not enabled due to setup")
+            serviceDiscovery = nil
+        case .predefined(let publisher):
+            CloudBoardDaemon.logger.info("Using service discovery injected for testing")
+            serviceDiscovery = publisher
+        case .fromConfiguration(let comms):
+            if let sdConfig = self.config.serviceDiscovery {
+                CloudBoardDaemon.logger.info("Enabling service discovery")
+                let serviceDiscoveryComms: any ServiceDiscoveryCommsProtocol
+                if let comms {
+                    CloudBoardDaemon.logger.info("Using service discovery comms injected for testing")
+                    serviceDiscoveryComms = comms
+                } else {
+                    serviceDiscoveryComms = try ServiceDiscoveryComms(
+                        group: self.group,
+                        configuration: sdConfig,
+                        localIdentityCallback: identityManager.identityCallback,
+                        metrics: self.metricsSystem,
+                    )
+                }
+                let attestationSet = try await attestationProvider.currentAttestationSet()
+                serviceDiscovery = try ServiceDiscoveryPublisher(
+                    serviceDiscoveryComms: serviceDiscoveryComms,
+                    configuration: sdConfig,
+                    serviceAddress: serviceAddress,
+                    hotProperties: self.hotProperties,
+                    nodeInfo: self.nodeInfo,
+                    cellID: self.config.serviceDiscovery?.cellID,
+                    statusMonitor: self.statusMonitor,
+                    metrics: self.metricsSystem,
+                    nodeReleaseDigest: attestationSet.currentAttestation.releaseDigest
+                )
+            } else {
+                CloudBoardDaemon.logger.warning("Service discovery not enabled due to config")
+                serviceDiscovery = nil
+            }
+        }
+        return serviceDiscovery
+    }
+
     private func checkAuthTokenSigningKeysPresence() async throws {
         let jobAuthClient: CloudBoardJobAuthAPIClientProtocol = if let _ = self.jobAuthClient {
             self.jobAuthClient!
@@ -542,12 +704,16 @@ public actor CloudBoardDaemon {
             await CloudBoardJobAuthAPIXPCClient.localConnection()
         }
         await jobAuthClient.connect()
-        let tgtSigningPublicKeyDERs = try await jobAuthClient.requestTGTSigningKeys()
-        let ottSigningPublicKeyDERs = try await jobAuthClient.requestOTTSigningKeys()
+        // This will wait until we successfully obtain the keys from cb_jobauthd. We deliberately block on this since
+        // cb_jobhelper instances will do the same and we shouldn't register with Service Discovery if we know
+        // cb_jobhelper instances won't come up.
+        _ = try await jobAuthClient.requestTGTSigningKeys()
+        _ = try await jobAuthClient.requestOTTSigningKeys()
 
-        guard !tgtSigningPublicKeyDERs.isEmpty, !ottSigningPublicKeyDERs.isEmpty else {
-            throw InitializationError.missingAuthTokenSigningKeys
-        }
+        // We do not check that the signing key sets are non-empty as that is a valid configuration in non-prod
+        // environments. cb_jobauthd itself enforces that the key rotation service configuration is provided for
+        // customer configurations.
+        await jobAuthClient.disconnect()
     }
 
     private static func runServer(
@@ -667,12 +833,23 @@ struct CloudBoardDaemonLogMetadata: CustomStringConvertible {
     var rpcID: UUID?
     var requestTrackingID: String?
     var remotePID: Int?
+    var workerID: UUID?
+    var spanID: String?
 
-    init(jobID: UUID? = nil, rpcID: UUID? = nil, requestTrackingID: String? = nil, remotePID: Int? = nil) {
+    init(
+        jobID: UUID? = nil,
+        rpcID: UUID? = nil,
+        requestTrackingID: String? = nil,
+        remotePID: Int? = nil,
+        workerID: UUID? = nil,
+        spanID: String? = nil,
+    ) {
         self.jobID = jobID
         self.rpcID = rpcID
         self.requestTrackingID = requestTrackingID
         self.remotePID = remotePID
+        self.workerID = workerID
+        self.spanID = spanID
     }
 
     var description: String {
@@ -690,6 +867,13 @@ struct CloudBoardDaemonLogMetadata: CustomStringConvertible {
         }
         if let remotePID = self.remotePID {
             text.append("remotePid=\(remotePID) ")
+        }
+        if let workerID = self.workerID {
+            text.append("workerID=\(workerID) ")
+        }
+
+        if let spanID = self.spanID {
+            text.append("spanID=\(spanID)")
         }
 
         text.removeLast(1)

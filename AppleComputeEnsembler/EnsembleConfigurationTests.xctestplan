@@ -1,0 +1,25 @@
+{
+  "configurations" : [
+    {
+      "id" : "CF42EBD1-2702-4DAE-8894-F53028197E22",
+      "name" : "Test Scheme Action",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "codeCoverage" : false
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:AppleComputeEnsembler.xcodeproj",
+        "identifier" : "0D9CEF992CEC0EE000578B95",
+        "name" : "EnsembleConfigurationTests"
+      }
+    }
+  ],
+  "version" : 1
+}

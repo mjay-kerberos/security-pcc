@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -36,6 +36,7 @@ public enum Environment: String, Sendable, Codable {
     case qa2Internal
 
     @_spi(Private)
+    @available(*, deprecated)
     public static var override: Self? = nil
 
     public static var `default`: Self {
@@ -67,10 +68,6 @@ public enum Environment: String, Sendable, Codable {
     }
 
     public static var current: Self {
-        if let override {
-            return override
-        }
-
         return Self.default
     }
 

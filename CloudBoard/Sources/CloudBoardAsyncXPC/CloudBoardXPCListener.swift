@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -18,11 +18,11 @@ import Foundation
 import OSLog
 import XPC
 
-public protocol CloudBoardAsyncXPCListenerDelegate: Actor {
+package protocol CloudBoardAsyncXPCListenerDelegate: Actor {
     func invalidatedConnection(_ connection: CloudBoardAsyncXPCConnection) async
 }
 
-public actor CloudBoardAsyncXPCListener {
+package actor CloudBoardAsyncXPCListener {
     private typealias XPCResult = Result<XPCConnection, CloudBoardAsyncXPCError>
 
     private let name: String
@@ -31,8 +31,10 @@ public actor CloudBoardAsyncXPCListener {
     private var connections: [CloudBoardAsyncXPCConnection.ID: CloudBoardAsyncXPCConnection]
     private var logger: Logger
     private var listenerQueue: DispatchQueue
+    private var postedMessageHandlers: [String: CloudBoardAsyncXPCConnection.XPCPostedMessageHandler]
     private var nonPostedMessageHandlers: [String: CloudBoardAsyncXPCConnection.XPCNonPostedMessageHandler]
     private weak var delegate: CloudBoardAsyncXPCListenerDelegate?
+    private let onListening: ((CloudBoardAsyncXPCEndpoint) -> Void)?
 
     public var endpoint: CloudBoardAsyncXPCEndpoint? {
         self.listener.endpoint
@@ -43,8 +45,12 @@ public actor CloudBoardAsyncXPCListener {
     }
 
     /// Initialize an anonymous local listener
-    public init() {
-        self.init(localService: nil, entitlement: nil)
+    /// - Parameters:
+    /// - onListening: A callback for testing use cases where access to the underlying endpoint is required
+    public init(
+        onListening: ((CloudBoardAsyncXPCEndpoint) -> Void)? = nil
+    ) {
+        self.init(localService: nil, entitlement: nil, onListening: onListening)
     }
 
     /// Initialize xpc listener with an optional mach service name and an
@@ -56,7 +62,12 @@ public actor CloudBoardAsyncXPCListener {
     /// unit-testing.
     /// CloudBoardAsyncXPCEndpoint can be used to establish a connection to an anonymous listener.
     /// - entitlement: entitlement to check an incoming connection for, when nil, all connections are allowed.
-    public init(localService name: String?, entitlement: String?) {
+    /// - onListening: A callback for testing use cases where access to the underlying endpoint is required
+    public init(
+        localService name: String?,
+        entitlement: String?,
+        onListening: ((CloudBoardAsyncXPCEndpoint) -> Void)? = nil
+    ) {
         let connection: XPCConnection = if let name {
             // Named local mach xpc listener
             XPCLocalConnection(
@@ -71,21 +82,27 @@ public actor CloudBoardAsyncXPCListener {
             XPCLocalConnection(xpc_connection_create(nil, nil))
         }
 
-        self.init(connection: connection, entitlement: entitlement)
+        self.init(connection: connection, entitlement: entitlement, onListening: onListening)
     }
 
     public func set(delegate: CloudBoardAsyncXPCListenerDelegate?) async {
         self.delegate = delegate
     }
 
-    internal init(connection: XPCConnection, entitlement: String?) {
+    internal init(
+        connection: XPCConnection,
+        entitlement: String?,
+        onListening: ((CloudBoardAsyncXPCEndpoint) -> Void)? = nil
+    ) {
         self.logger = Logger(subsystem: "com.apple.CloudBoardAsyncXPC", category: "CloudBoardXPCListener")
         self.connections = [:]
+        self.postedMessageHandlers = [:]
         self.nonPostedMessageHandlers = [:]
         self.listener = connection
         self.name = connection.name
         self.listenerQueue = DispatchQueue(label: "com.apple.CloudBoardAsyncXPC.CloudBoardXPCListener.queue")
         self.listener.setTargetQueue(self.listenerQueue)
+        self.onListening = onListening
 
         if let entitlement {
             self.auth = XPCConnectionEntitlementAuthorization(
@@ -101,7 +118,7 @@ public actor CloudBoardAsyncXPCListener {
         await self.delegate?.invalidatedConnection(connection)
     }
 
-    private func handleNewConnection(connection: XPCConnection) async {
+    private func handleNewConnection(connection: XPCLocalConnection) async {
         guard self.auth.isAuthorized(connection: connection) else {
             connection.cancel()
             return
@@ -126,6 +143,7 @@ public actor CloudBoardAsyncXPCListener {
 
         self.connections[authorizedConnection.id] = authorizedConnection
         await authorizedConnection.activate(
+            postedMessageHandlers: self.postedMessageHandlers,
             messageHandlers: self.nonPostedMessageHandlers
         )
     }
@@ -164,13 +182,14 @@ public actor CloudBoardAsyncXPCListener {
         var store = CloudBoardAsyncXPCConnection.MessageHandlerStore()
         buildMessageHandlerStore(&store)
 
-        self.listen(messageHandlers: store.handlers)
+        self.listen(postedMessageHandlers: store.postedHandlers, messageHandlers: store.handlers)
         return self
     }
 
     @discardableResult
     public func listen(messageHandlerStore: CloudBoardAsyncXPCConnection.MessageHandlerStore) -> Self {
         self.listen(
+            postedMessageHandlers: messageHandlerStore.postedHandlers,
             messageHandlers: messageHandlerStore.handlers
         )
         return self
@@ -178,8 +197,10 @@ public actor CloudBoardAsyncXPCListener {
 
     @discardableResult
     internal func listen(
+        postedMessageHandlers: [String: CloudBoardAsyncXPCConnection.XPCPostedMessageHandler],
         messageHandlers: [String: CloudBoardAsyncXPCConnection.XPCNonPostedMessageHandler]
     ) -> Self {
+        self.postedMessageHandlers = postedMessageHandlers
         self.nonPostedMessageHandlers = messageHandlers
 
         // NOTE: We should pass a weak reference to self,
@@ -198,6 +219,11 @@ public actor CloudBoardAsyncXPCListener {
         }
 
         self.listener.activate()
+        if let onListening {
+            // The only usage of onListening is to get to the endpoint to use it locally
+            // extracting it here simplifies calling code outside the isolation domain considerably
+            onListening(self.listener.endpoint!)
+        }
 
         return self
     }
@@ -212,7 +238,11 @@ public actor CloudBoardAsyncXPCListener {
     }
 
     /// Send a message with no reply to all open connections
-    public func broadcast(_ message: some CloudBoardAsyncXPCMessage, requiringEntitlement: String? = nil) async throws {
+    public func broadcast<Message: CloudBoardAsyncXPCCodableMessage>(
+        _ message: Message,
+        requiringEntitlement: String? = nil
+    ) async
+    where Message.Success == ExplicitSuccess {
         await withThrowingTaskGroup(of: Void.self) { group in
             for (_, connection) in self.connections {
                 if let requiringEntitlement,
@@ -220,7 +250,79 @@ public actor CloudBoardAsyncXPCListener {
                     continue
                 }
                 group.addTask {
-                    try await connection.send(message)
+                    _ = try await connection.send(message)
+                }
+            }
+        }
+    }
+
+    /// Send a message with no reply to all open connections
+    public func broadcast(
+        _ message: some CloudBoardAsyncXPCByteBufferMessage,
+        requiringEntitlement: String? = nil
+    ) async {
+        await withThrowingTaskGroup(of: Void.self) { group in
+            for (_, connection) in self.connections {
+                if let requiringEntitlement,
+                   await !connection.hasEntitlement(requiringEntitlement) {
+                    continue
+                }
+                group.addTask {
+                    _ = try await connection.send(message)
+                }
+            }
+        }
+    }
+
+    /// This sends the message to the first connection. This is primarily intended to be used in a client-server setting
+    /// where it is known to be a 1:1 relationship.
+    public func sendToAny<Message: CloudBoardAsyncXPCCodableMessage>(
+        _ message: Message,
+        requiringEntitlement: String? = nil
+    ) async throws -> Message.Success {
+        guard let connection = self.connections.values.first else {
+            throw CloudBoardAsyncXPCError.noConnection
+        }
+        if let requiringEntitlement, await !connection.hasEntitlement(requiringEntitlement) {
+            throw CloudBoardAsyncXPCError.missingEntitlement
+        }
+        return try await connection.send(message)
+    }
+
+    /// Send a message with no reply to all open connections
+    public func broadcast<Message: CloudBoardAsyncXPCCodableMessage>(
+        _ message: Message,
+        requiringEntitlement: String? = nil
+    ) async
+    where Message.Success == Never, Message.Failure == Never {
+        await withThrowingTaskGroup(of: Void.self) { group in
+            for (_, connection) in self.connections {
+                if let requiringEntitlement,
+                   await !connection.hasEntitlement(requiringEntitlement) {
+                    continue
+                }
+                group.addTask {
+                    try await connection.post(message)
+                }
+            }
+        }
+    }
+
+    /// Send a message with no reply to all open connections
+    public func broadcast<Message: CloudBoardAsyncXPCByteBufferMessage>(
+        _ message: Message,
+        requiringEntitlement: String? = nil
+    ) async
+        where Message.Success == Never,
+        Message.Failure == Never {
+        await withThrowingTaskGroup(of: Void.self) { group in
+            for (_, connection) in self.connections {
+                if let requiringEntitlement,
+                   await !connection.hasEntitlement(requiringEntitlement) {
+                    continue
+                }
+                group.addTask {
+                    try await connection.post(message)
                 }
             }
         }

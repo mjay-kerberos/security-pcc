@@ -1,0 +1,4 @@
+SUPPORTED_PLATFORMS = macosx
+SDKROOT = macosx.internal
+
+PRODUCT_NAME = $(TARGET_NAME)

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,36 +14,40 @@
 
 // Copyright © 2024 Apple. All rights reserved.
 
+import CloudBoardCommon
 import CloudBoardJobAPI
 import CloudBoardLogging
+import CloudBoardMetrics
 import Foundation
 import os
 
 struct CloudBoardJobHelperRequestSummary: RequestSummary {
-    let operationName: String = "cb_jobhelper response summary"
-    let type: String = "RequestSummary"
-    let serviceName: String = "cb_jobhelper"
-    let namespace: String = "cloudboard"
+    var operationName: String = "cb_jobhelper response summary"
+    var type: String = "RequestSummary"
+    var serviceName: String = "cb_jobhelper"
+    var namespace: String = "cloudboard"
     var requestPlaintextMetadata: ParametersData.PlaintextMetadata?
-    var jobUUID: UUID
+    var jobUUID: String?
     var remotePID: Int?
     var requestMessageCount: Int = 0
     var responseMessageCount: Int = 0
+    var requestFinalChunkSeen: Bool = false
+    var responseFinalChunkSeen: Bool = false
     var error: Error?
     var startTimeNanos: Int64?
     var endTimeNanos: Int64?
+    var automatedDeviceGroup: String?
+    var requestWorkload: String?
+    var requestBundleID: String?
+    var requestFeatureID: String?
+    var receivedSetup: Bool = false
+    var receivedParameters: Bool = false
+    var requestID: String?
+    var spanID: String?
+    var parentSpanID: String?
+    var isNack: Bool = false
 
-    init(jobUUID: UUID) {
-        self.jobUUID = jobUUID
-    }
-
-    var requestID: String? {
-        return self.requestPlaintextMetadata?.requestID
-    }
-
-    var automatedDeviceGroup: String? {
-        return self.requestPlaintextMetadata?.automatedDeviceGroup
-    }
+    init() {}
 
     mutating func populateRequestMetadata(_ requestMetadata: ParametersData.PlaintextMetadata) {
         self.requestPlaintextMetadata = requestMetadata
@@ -53,15 +57,17 @@ struct CloudBoardJobHelperRequestSummary: RequestSummary {
     public func log(to logger: Logger) {
         logger.log("""
         ttl=\(self.type, privacy: .public)
-        jobID=\(self.jobUUID.uuidString, privacy: .public)
+        jobID=\(self.jobUUID ?? "UNKNOWN", privacy: .public)
         remotePid=\(self.remotePID.map { String(describing: $0) } ?? "", privacy: .public)
         request.uuid=\(self.requestID ?? "UNKNOWN", privacy: .public)
-        client.feature_id=\(self.requestPlaintextMetadata?.featureID ?? "", privacy: .public)
-        client.bundle_id=\(self.requestPlaintextMetadata?.bundleID ?? "", privacy: .public)
+        client.feature_id=\(self.requestFeatureID ?? "", privacy: .public)
+        client.bundle_id=\(self.requestBundleID ?? "", privacy: .public)
         client.automated_device_group=\(self.automatedDeviceGroup ?? "", privacy: .public)
         tracing.name=\(self.operationName, privacy: .public)
         tracing.type=\(self.type, privacy: .public)
         tracing.trace_id=\(self.requestID?.replacingOccurrences(of: "-", with: "").lowercased() ?? "", privacy: .public)
+        tracing.span_id=\(self.spanID ?? "", privacy: .public)
+        tracing.parent_span_id=\(self.parentSpanID ?? "", privacy: .public)
         tracing.start_time_unix_nano=\(self.startTimeNanos ?? 0, privacy: .public)
         tracing.end_time_unix_nano=\(self.endTimeNanos ?? 0, privacy: .public)
         service.name=\(self.serviceName, privacy: .public)
@@ -74,11 +80,175 @@ struct CloudBoardJobHelperRequestSummary: RequestSummary {
         responseMessageCount=\(self.responseMessageCount, privacy: .public)
         """)
     }
+
+    mutating func populate(invokeWorkloadSpan: RequestSummaryJobHelperTracer.Span?) {
+        if let span = invokeWorkloadSpan {
+            if self.isNack {
+                self.operationName = OperationNames.nackRequest
+            } else {
+                self.operationName = span.operationName
+            }
+            self.spanID = span.attributes.requestSummary.pipelinePayloadRequestAttributes.spanID
+            self.parentSpanID = span.attributes.requestSummary.pipelinePayloadRequestAttributes.parentSpanID
+            self.jobUUID = span.attributes.requestSummary.pipelinePayloadRequestAttributes.jobUUID
+            self.remotePID = span.attributes.requestSummary.pipelinePayloadRequestAttributes.remotePID
+
+            self.startTimeNanos = Int64(span.startTimeNanos)
+            self.endTimeNanos = Int64(span.endTimeNanos)
+
+            if let error = span.errors.first {
+                self.populate(error: error)
+            }
+        }
+    }
+
+    mutating func populate(invokeWorkloadRequestSpans: [RequestSummaryJobHelperTracer.Span]) {
+        var invokeWorkloadRequestFinalChunkSeen = false
+        var receivedSetup = false
+        var receivedParameters = false
+
+        for span in invokeWorkloadRequestSpans {
+            self.isNack = span.attributes.requestSummary.pipelinePayloadRequestAttributes.isNack ?? false
+            if span.attributes.requestSummary.pipelinePayloadRequestAttributes.isFinal ?? false {
+                invokeWorkloadRequestFinalChunkSeen = true
+            }
+            if span.attributes.requestSummary.pipelinePayloadRequestAttributes.receivedSetup ?? false {
+                receivedSetup = true
+            }
+            if span.attributes.requestSummary.pipelinePayloadRequestAttributes.receivedParameters ?? false {
+                receivedParameters = true
+            }
+            if let workload = span.attributes.requestSummary.pipelinePayloadRequestAttributes.workload {
+                self.requestWorkload = workload
+            }
+            if let featureID = span.attributes.requestSummary.pipelinePayloadRequestAttributes.featureID {
+                self.requestFeatureID = featureID
+            }
+            if let bundleID = span.attributes.requestSummary.pipelinePayloadRequestAttributes.bundleID {
+                self.requestBundleID = bundleID
+            }
+            if let requestID = span.attributes.requestSummary.pipelinePayloadRequestAttributes.requestID {
+                self.requestID = requestID
+            }
+            if let remotePID = span.attributes.requestSummary.pipelinePayloadRequestAttributes.remotePID {
+                self.remotePID = remotePID
+            }
+            if let automatedDeviceGroup = span.attributes.requestSummary.pipelinePayloadRequestAttributes
+                .automatedDeviceGroup {
+                self.automatedDeviceGroup = automatedDeviceGroup
+            }
+            if let requestMessageCount = span.attributes.requestSummary.pipelinePayloadRequestAttributes
+                .requestMessageCount {
+                self.requestMessageCount = requestMessageCount
+            }
+            if let error = span.errors.first {
+                self.populate(error: error)
+            }
+        }
+
+        self.requestFinalChunkSeen = invokeWorkloadRequestFinalChunkSeen
+        self.receivedSetup = receivedSetup
+        self.receivedParameters = receivedParameters
+    }
+
+    mutating func populate(invokeWorkloadResponseSpans: [RequestSummaryJobHelperTracer.Span]) {
+        // There should be only one
+        let span = invokeWorkloadResponseSpans.first
+        self.responseMessageCount = span?.attributes.requestSummary.responseChunkAttributes
+            .responseMessagesCount ?? 0
+        self.responseFinalChunkSeen = span?.attributes.requestSummary.responseChunkAttributes.isFinal ?? false
+        if let error = span?.errors.first {
+            self.populate(error: error)
+        }
+    }
+
+    func measure(to metrics: any MetricsSystem) {
+        let automatedDeviceGroupDimension = !(
+            self.requestPlaintextMetadata?.automatedDeviceGroup
+                .isEmpty ?? true
+        )
+        let featureID = self.requestPlaintextMetadata?.featureID
+        let bundleID = self.requestPlaintextMetadata?.bundleID
+        let inferenceID = self.requestPlaintextMetadata?.workloadParameters[workloadParameterInferenceIDKey]?.first
+        if self.requestMessageCount > 0 {
+            if self.responseMessageCount > 0 {
+                metrics.emit(Metrics.WorkloadManager.TotalResponsesSentCounter(
+                    action: .increment,
+                    automatedDeviceGroup: automatedDeviceGroupDimension,
+                    featureId: featureID,
+                    bundleId: bundleID,
+                    inferenceId: inferenceID
+                ))
+                if let error = self.error {
+                    metrics.emit(Metrics.WorkloadManager.FailureResponsesSentCounter(
+                        action: .increment,
+                        automatedDeviceGroup: automatedDeviceGroupDimension,
+                        error: error,
+                        featureId: featureID,
+                        bundleId: bundleID,
+                        inferenceId: inferenceID
+                    ))
+
+                    if let durationMicros = self.durationMicros {
+                        metrics.emit(
+                            Metrics.WorkloadManager.WorkloadDurationFromFirstRequestMessage(
+                                duration: .microseconds(durationMicros),
+                                error: error,
+                                automatedDeviceGroup: automatedDeviceGroupDimension
+                            )
+                        )
+                    } else {
+                        RequestSummaryJobHelperTracer.logger.fault("""
+                        WorkloadManagerRequestSummary duration could not be determined. Top-level span likely not closed correctly.
+                        request.uuid=\(self.requestID ?? "UNKNOWN", privacy: .public)
+                        requestId=\(self.requestID ?? "", privacy: .public)
+                        """)
+                    }
+                } else {
+                    metrics.emit(Metrics.WorkloadManager.SuccessResponsesSentCounter(
+                        action: .increment,
+                        automatedDeviceGroup: automatedDeviceGroupDimension,
+                        featureId: featureID,
+                        bundleId: bundleID,
+                        inferenceId: inferenceID
+                    ))
+                    if let durationMicros = self.durationMicros {
+                        metrics.emit(
+                            Metrics.WorkloadManager.WorkloadDurationFromFirstRequestMessage(
+                                duration: .microseconds(durationMicros),
+                                error: nil,
+                                automatedDeviceGroup: automatedDeviceGroupDimension
+                            )
+                        )
+                    } else {
+                        RequestSummaryJobHelperTracer.logger.fault("""
+                        WorkloadManagerRequestSummary duration could not be determined. Top-level span likely not closed correctly.
+                        request.uuid=\(self.requestID ?? "UNKNOWN", privacy: .public)
+                        requestId=\(self.requestID ?? "", privacy: .public)
+                        """)
+                    }
+                }
+            } else { // no response sent, but an error recorded
+                if let error = self.error {
+                    metrics.emit(Metrics.WorkloadManager.OverallErrorCounter.Factory().make(error))
+                } else {
+                    let error = WorkloadJobManagerNoResponseSentError()
+                    metrics.emit(Metrics.WorkloadManager.OverallErrorCounter.Factory().make(error))
+                }
+            }
+        } else {
+            metrics.emit(Metrics.WorkloadManager.UnusedTerminationCounter(action: .increment))
+        }
+    }
 }
 
 struct WorkloadJobManagerCheckpoint: RequestCheckpoint {
     var requestID: String? {
         self.logMetadata.requestTrackingID
+    }
+
+    var spanID: String? {
+        self.logMetadata.spanID
     }
 
     let operationName: StaticString
@@ -118,6 +288,7 @@ struct WorkloadJobManagerCheckpoint: RequestCheckpoint {
         tracing.name=\(self.operationName, privacy: .public)
         tracing.type=\(self.type, privacy: .public)
         tracing.trace_id=\(self.requestID?.replacingOccurrences(of: "-", with: "").lowercased() ?? "", privacy: .public)
+        tracing.span_id=\(self.logMetadata.spanID ?? "", privacy: .public)
         service.name=\(self.serviceName, privacy: .public)
         service.namespace=\(self.namespace, privacy: .public)
         tracing.status=\(status?.rawValue ?? "", privacy: .public)
@@ -126,6 +297,115 @@ struct WorkloadJobManagerCheckpoint: RequestCheckpoint {
         message=\(self.message, privacy: .public)
         requestMessageCount=\(self.requestMessageCount, privacy: .public)
         responseMessageCount=\(self.responseMessageCount, privacy: .public)
+        """)
+    }
+
+    public func log(workerID: UUID, to logger: Logger, level: OSLogType = .default) {
+        logger.log(level: level, """
+        ttl=\(self.type, privacy: .public)
+        jobID=\(self.logMetadata.jobID?.uuidString ?? "", privacy: .public)
+        remotePid=\(self.logMetadata.remotePID.map { String(describing: $0) } ?? "", privacy: .public)
+        request.uuid=\(self.requestID ?? "UNKNOWN", privacy: .public)
+        tracing.name=\(self.operationName, privacy: .public)
+        tracing.type=\(self.type, privacy: .public)
+        tracing.trace_id=\(self.requestID?.replacingOccurrences(of: "-", with: "").lowercased() ?? "", privacy: .public)
+        tracing.span_id=\(self.logMetadata.spanID ?? "", privacy: .public)
+        service.name=\(self.serviceName, privacy: .public)
+        service.namespace=\(self.namespace, privacy: .public)
+        tracing.status=\(status?.rawValue ?? "", privacy: .public)
+        error.type=\(self.error.map { String(describing: Swift.type(of: $0)) } ?? "", privacy: .public)
+        error.description=\(self.error.map { String(reportable: $0) } ?? "", privacy: .public)
+        message=\(self.message, privacy: .public)
+        requestMessageCount=\(self.requestMessageCount, privacy: .public)
+        responseMessageCount=\(self.responseMessageCount, privacy: .public)
+        worker.uuid=\(workerID, privacy: .public)
+        """)
+    }
+
+    public func log(workerID: UUID, pccResponseStatus: Int, to logger: Logger, level: OSLogType = .default) {
+        logger.log(level: level, """
+        ttl=\(self.type, privacy: .public)
+        jobID=\(self.logMetadata.jobID?.uuidString ?? "", privacy: .public)
+        remotePid=\(self.logMetadata.remotePID.map { String(describing: $0) } ?? "", privacy: .public)
+        request.uuid=\(self.requestID ?? "UNKNOWN", privacy: .public)
+        tracing.name=\(self.operationName, privacy: .public)
+        tracing.type=\(self.type, privacy: .public)
+        tracing.trace_id=\(self.requestID?.replacingOccurrences(of: "-", with: "").lowercased() ?? "", privacy: .public)
+        tracing.span_id=\(self.logMetadata.spanID ?? "", privacy: .public)
+        service.name=\(self.serviceName, privacy: .public)
+        service.namespace=\(self.namespace, privacy: .public)
+        tracing.status=\(status?.rawValue ?? "", privacy: .public)
+        error.type=\(self.error.map { String(describing: Swift.type(of: $0)) } ?? "", privacy: .public)
+        error.description=\(self.error.map { String(reportable: $0) } ?? "", privacy: .public)
+        message=\(self.message, privacy: .public)
+        requestMessageCount=\(self.requestMessageCount, privacy: .public)
+        responseMessageCount=\(self.responseMessageCount, privacy: .public)
+        worker.uuid=\(workerID, privacy: .public)
+        worker.pccResponseStatus=\(pccResponseStatus, privacy: .public)
+        """)
+    }
+
+    public func log(
+        workerID: UUID,
+        grpcStatus: Int,
+        grpcMessage: String?,
+        ropesErrorCode: UInt32?,
+        ropesMessage: String?,
+        to logger: Logger,
+        level: OSLogType = .default
+    ) {
+        logger.log(level: level, """
+        ttl=\(self.type, privacy: .public)
+        jobID=\(self.logMetadata.jobID?.uuidString ?? "", privacy: .public)
+        remotePid=\(self.logMetadata.remotePID.map { String(describing: $0) } ?? "", privacy: .public)
+        request.uuid=\(self.requestID ?? "UNKNOWN", privacy: .public)
+        tracing.name=\(self.operationName, privacy: .public)
+        tracing.type=\(self.type, privacy: .public)
+        tracing.trace_id=\(self.requestID?.replacingOccurrences(of: "-", with: "").lowercased() ?? "", privacy: .public)
+        tracing.span_id=\(self.logMetadata.spanID ?? "", privacy: .public)
+        service.name=\(self.serviceName, privacy: .public)
+        service.namespace=\(self.namespace, privacy: .public)
+        tracing.status=\(status?.rawValue ?? "", privacy: .public)
+        error.type=\(self.error.map { String(describing: Swift.type(of: $0)) } ?? "", privacy: .public)
+        error.description=\(self.error.map { String(reportable: $0) } ?? "", privacy: .public)
+        message=\(self.message, privacy: .public)
+        requestMessageCount=\(self.requestMessageCount, privacy: .public)
+        responseMessageCount=\(self.responseMessageCount, privacy: .public)
+        worker.uuid=\(workerID, privacy: .public)
+        worker.grpcStatus=\(grpcStatus, privacy: .public)
+        worker.grpcMessage=\(grpcMessage ?? "", privacy: .public)
+        worker.ropesErrorCode=\(ropesErrorCode ?? 0, privacy: .public)
+        worker.ropesMessage=\(ropesMessage ?? "", privacy: .public)
+        """)
+    }
+
+    public func log(
+        workerID: UUID,
+        serviceName: String,
+        routingParameters: [String: [String]],
+        to logger: Logger,
+        level: OSLogType = .default
+    ) {
+        logger.log(level: level, """
+        ttl=\(self.type, privacy: .public)
+        jobID=\(self.logMetadata.jobID?.uuidString ?? "", privacy: .public)
+        remotePid=\(self.logMetadata.remotePID.map { String(describing: $0) } ?? "", privacy: .public)
+        request.uuid=\(self.requestID ?? "UNKNOWN", privacy: .public)
+        tracing.name=\(self.operationName, privacy: .public)
+        tracing.type=\(self.type, privacy: .public)
+        tracing.trace_id=\(self.requestID?.replacingOccurrences(of: "-", with: "").lowercased() ?? "", privacy: .public)
+        tracing.span_id=\(self.logMetadata.spanID ?? "", privacy: .public)
+        service.name=\(self.serviceName, privacy: .public)
+        service.namespace=\(self.namespace, privacy: .public)
+        tracing.status=\(status?.rawValue ?? "", privacy: .public)
+        error.type=\(self.error.map { String(describing: Swift.type(of: $0)) } ?? "", privacy: .public)
+        error.description=\(self.error.map { String(reportable: $0) } ?? "", privacy: .public)
+        message=\(self.message, privacy: .public)
+        requestMessageCount=\(self.requestMessageCount, privacy: .public)
+        responseMessageCount=\(self.responseMessageCount, privacy: .public)
+        worker.uuid=\(workerID, privacy: .public)
+        worker.serviceName=\(serviceName, privacy: .public)
+        worker.routingParameters=\(routingParameters, privacy: .public)
         """)
     }
 }
@@ -144,6 +424,7 @@ extension WorkloadJobManagerCheckpoint {
         tracing.name=\(self.operationName, privacy: .public)
         tracing.type=\(self.type, privacy: .public)
         tracing.trace_id=\(self.requestID?.replacingOccurrences(of: "-", with: "").lowercased() ?? "", privacy: .public)
+        tracing.span_id=\(self.logMetadata.spanID ?? "", privacy: .public)
         service.name=\(self.serviceName, privacy: .public)
         service.namespace=\(self.namespace, privacy: .public)
         tracing.status=\(status?.rawValue ?? "", privacy: .public)
@@ -163,6 +444,7 @@ extension PipelinePayload {
     /// sensitive data
     public var publicDescription: String {
         switch self {
+        case .chunk(let finalizable) where finalizable.isFinal: return "chunk:final"
         case .chunk: return "chunk"
         case .endOfInput: return "endOfInput"
         case .oneTimeToken: return "oneTimeToken"
@@ -170,11 +452,19 @@ extension PipelinePayload {
         case .abandon: return "abandon"
         case .teardown: return "teardown"
         case .warmup: return "warmup"
+        case .nackAndExit: return "nackAndExit"
+        case .parametersMetaData: return "parametersMetaData"
+        case .workerFound: return "workerFound"
+        case .workerAttestationAndDEK: return "workerAttestationAndDEK"
+        case .workerResponseChunk: return "workerResponseChunk"
+        case .workerResponseSummary: return "workerResponseSummary"
+        case .workerResponseClose: return "workerResponseClose"
+        case .workerResponseEOF: return "workerResponseEOF"
         }
     }
 }
 
-extension PipelinePayload: CustomStringConvertible where T == Data {
+extension PipelinePayload: CustomStringConvertible {
     /// This is a non-public description and must not be logged publicly
     internal var description: String {
         switch self {
@@ -185,6 +475,20 @@ extension PipelinePayload: CustomStringConvertible where T == Data {
         case .abandon: return "abandon"
         case .teardown: return "teardown"
         case .warmup(let warmup): return "warmup \(warmup)"
+        case .nackAndExit: return "nackAndExit"
+        case .parametersMetaData(let keyID): return "parametersMetaData \(keyID)"
+        case .workerFound(let workerID, let releaseDigest, let spanID):
+            return "workerFound (worker: \(workerID), releaseDigest: \(releaseDigest))"
+        case .workerAttestationAndDEK(let info, _):
+            return "workerAttestation (worker: \(info.workerID), keyID: \(info.keyID))"
+        case .workerResponseChunk(let workerID, _): return "workerResponsePayload (worker: \(workerID))"
+        case .workerResponseSummary(let workerID, _): return "workerResponseSummary (worker: \(workerID))"
+        case .workerResponseClose(
+            let workerID,
+            let grpcCode,
+            _, let ropesErrorCode, _
+        ): return "workerResponseClose (worker: \(workerID), grpcCode: \(grpcCode), ropesErrorCode: \(ropesErrorCode)"
+        case .workerResponseEOF(let workerID): return "workerResponseEOF (worker: \(workerID))"
         }
     }
 }
@@ -192,7 +496,7 @@ extension PipelinePayload: CustomStringConvertible where T == Data {
 extension WorkloadJobManagerCheckpoint {
     /// Log sanitised information about messages coming down the receive request pipeline
     public func logReceiveRequestPipelineMessage(
-        pipelineMessage: PipelinePayload<Data>,
+        pipelineMessage: PipelinePayload,
         to logger: Logger,
         level: OSLogType
     ) {
@@ -204,6 +508,7 @@ extension WorkloadJobManagerCheckpoint {
         tracing.name=\(self.operationName, privacy: .public)
         tracing.type=\(self.type, privacy: .public)
         tracing.trace_id=\(self.requestID?.replacingOccurrences(of: "-", with: "").lowercased() ?? "", privacy: .public)
+        tracing.span_id=\(self.logMetadata.spanID ?? "", privacy: .public)
         service.name=\(self.serviceName, privacy: .public)
         service.namespace=\(self.namespace, privacy: .public)
         tracing.status=\(status?.rawValue ?? "", privacy: .public)
@@ -329,6 +634,7 @@ struct CloudboardJobHelperCheckpoint: RequestCheckpoint {
         request.uuid=\(self.requestID ?? "UNKNOWN", privacy: .public)
         tracing.name=\(self.operationName, privacy: .public)
         tracing.type=\(self.type, privacy: .public)
+        tracing.span_id=\(self.logMetadata.spanID ?? "", privacy: .public)
         tracing.trace_id=\(self.requestID?.replacingOccurrences(of: "-", with: "").lowercased() ?? "", privacy: .public)
         service.name=\(self.serviceName, privacy: .public)
         service.namespace=\(self.namespace, privacy: .public)

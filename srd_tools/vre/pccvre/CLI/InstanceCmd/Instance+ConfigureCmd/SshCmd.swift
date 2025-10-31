@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -27,7 +27,6 @@ extension CLI.InstanceCmd.InstanceConfigureCmd {
 
         @OptionGroup var globalOptions: CLI.globalOptions
         @OptionGroup var configureOptions: CLI.InstanceCmd.InstanceConfigureCmd.options
-        @OptionGroup var instanceOptions: CLI.InstanceCmd.options
 
         @Option(name: [.customLong("cryptex"), .customShort("C")],
                 help: "Alternate cryptex image to support ssh (<variant>:<path>).",
@@ -44,19 +43,10 @@ extension CLI.InstanceCmd.InstanceConfigureCmd {
         var publicKeyPath: String?
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
-
             let vreName = configureOptions.instanceName
             CLI.logger.log("\(disable ? "disable" : "configure", privacy: .public) SSH for \(vreName, privacy: .public)")
 
-            guard VRE.exists(vreName) else {
-                throw CLIError("VRE '\(vreName)' not found")
-            }
-
-            let vre = try VRE(
-                name: vreName,
-                vrevmPath: instanceOptions.vrevmPath
-            )
+            let vre = try VRE.Instance(name: vreName)
 
             if disable {
                 do {
@@ -103,7 +93,7 @@ extension CLI.InstanceCmd.InstanceConfigureCmd {
             }
 
             for pubKey in pubKeyContents.components(separatedBy: .newlines) {
-                if let sshPubKey = DarwinInitHelper.SSH.validateSSHPubKey(pubKey.trimmingCharacters(in: .whitespaces)) {
+                if let sshPubKey = DarwinInitHelper.validateSSHPubKey(pubKey.trimmingCharacters(in: .whitespaces)) {
                     return sshPubKey
                 }
             }

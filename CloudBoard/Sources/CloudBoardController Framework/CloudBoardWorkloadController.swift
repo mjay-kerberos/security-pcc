@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -47,7 +47,7 @@ public actor CloudBoardWorkloadController {
     }
 
     public init() async throws {
-        try self.prefs = CloudBoardWorkloadControllerPrefs.fromPreferences()
+        self.prefs = try CloudBoardWorkloadControllerPrefs.fromPreferences()
         self.client = .waitingForConnection([])
     }
 

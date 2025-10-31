@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,17 +14,17 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+internal import CloudBoardAsyncXPC
 
 internal enum CloudBoardControllerAPIXPCServerToClientMessage {
-    internal struct UpdateConfiguration: CloudBoardAsyncXPCMessage {
+    internal struct UpdateConfiguration: CloudBoardAsyncXPCCodableMessage {
         internal typealias Success = ExplicitSuccess
         internal typealias Failure = CloudBoardControllerAPIError
 
         internal var config: WorkloadConfig
     }
 
-    internal struct Shutdown: CloudBoardAsyncXPCMessage {
+    internal struct Shutdown: CloudBoardAsyncXPCCodableMessage {
         internal typealias Success = ExplicitSuccess
         internal typealias Failure = CloudBoardControllerAPIError
     }

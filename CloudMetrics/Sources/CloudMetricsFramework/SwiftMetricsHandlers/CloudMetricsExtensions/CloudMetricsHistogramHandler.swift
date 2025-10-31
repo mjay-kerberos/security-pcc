@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -128,7 +128,7 @@ internal final class CloudMetricsHistogramHandler: HistogramHandler {
     internal func record(_ value: Int64) {
         let histogram = self.histogram
         let epoch = Date().timeIntervalSince1970
-        metricUpdateContinuation.yield(.recordHistogramInteger(.init(
+        metricUpdateContinuation.yieldAndLogOnFailure(.recordHistogramInteger(.init(
             histogram,
             buckets: histogram.buckets,
             value: value,
@@ -138,7 +138,7 @@ internal final class CloudMetricsHistogramHandler: HistogramHandler {
     internal func record(_ value: Double) {
         let histogram = self.histogram
         let epoch = Date().timeIntervalSince1970
-        metricUpdateContinuation.yield(.recordHistogramDouble(.init(
+        metricUpdateContinuation.yieldAndLogOnFailure(.recordHistogramDouble(.init(
             histogram,
             buckets: histogram.buckets,
             value: value,
@@ -148,7 +148,7 @@ internal final class CloudMetricsHistogramHandler: HistogramHandler {
     internal func record(bucketValues: [Int], sum: Double, count: Int) {
         let histogram = self.histogram
         let epoch = Date().timeIntervalSince1970
-        metricUpdateContinuation.yield(.recordHistogramBuckets(
+        metricUpdateContinuation.yieldAndLogOnFailure(.recordHistogramBuckets(
             .init(histogram, buckets: histogram.buckets,
                   values: bucketValues,
                   sum: sum,

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,58 +14,230 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+package import CloudBoardAsyncXPC
 import Foundation
 
-internal enum CloudBoardJobAPIXPCClientToServerMessage {
-    internal struct Warmup: CloudBoardAsyncXPCMessage {
-        internal typealias Success = ExplicitSuccess
-        internal typealias Failure = CloudBoardJobAPIError
+package enum CloudBoardJobAPIXPCClientToServerMessage {
+    case warmup(WarmupDetails)
+    case parameters(ParametersData)
+    case invokeWorkload(InvokeWorkloadRequest)
+    case teardown
 
-        package let details: WarmupDetails
-    }
-
-    internal struct Parameters: CloudBoardAsyncXPCMessage {
-        internal typealias Success = ExplicitSuccess
-        internal typealias Failure = CloudBoardJobAPIError
-
-        package let parametersData: ParametersData
-    }
-
-    internal struct InvokeWorkload: CloudBoardAsyncXPCMessage {
-        internal typealias Success = ExplicitSuccess
-        internal typealias Failure = CloudBoardJobAPIError
-
-        package let request: InvokeWorkloadRequest
-    }
-
-    package enum InvokeWorkloadRequest: Codable, Sendable {
+    package enum InvokeWorkloadRequest: ByteBufferCodable, Sendable, Equatable {
         case requestChunk(RequestChunk)
-        case helperInvocation(HelperInvocation)
-        case receiveHelperMessage(ReceiveHelperMessage)
-        case receiveHelperEOF(ReceiveHelperEOF)
+        case receiveWorkerFoundEvent(WorkerFound)
+        case receiveWorkerMessage(WorkerResponse)
+        case receiveWorkerEOF(WorkerEOF)
+        case receiveWorkerResponseSummary(WorkerResponseSummary)
+
+        package func encode(to buffer: inout ByteBuffer) throws {
+            switch self {
+            case .requestChunk(let chunk):
+                buffer.writeInteger(0)
+                try chunk.encode(to: &buffer)
+            case .receiveWorkerResponseSummary(let summary):
+                buffer.writeInteger(1)
+                try summary.encode(to: &buffer)
+            case .receiveWorkerMessage(let message):
+                buffer.writeInteger(2)
+                try message.workerID.encode(to: &buffer)
+                try message.message.encode(to: &buffer)
+            case .receiveWorkerFoundEvent(let event):
+                buffer.writeInteger(3)
+                try event.workerID.encode(to: &buffer)
+                try event.releaseDigest.encode(to: &buffer)
+            case .receiveWorkerEOF(let eof):
+                buffer.writeInteger(4)
+                try eof.workerID.encode(to: &buffer)
+            }
+        }
+
+        package init(from buffer: inout ByteBuffer) throws {
+            guard let enumCase: Int = buffer.readInteger() else {
+                throw DecodingError.valueNotFound(
+                    Self.self,
+                    .init(codingPath: [], debugDescription: "no expected enum case")
+                )
+            }
+            switch enumCase {
+            case 0:
+                let chunk = try CloudBoardJobAPIXPCClientToServerMessage.RequestChunk(from: &buffer)
+                self = .requestChunk(chunk)
+            case 1:
+                let summary = try CloudBoardJobAPIXPCClientToServerMessage.WorkerResponseSummary(from: &buffer)
+                self = .receiveWorkerResponseSummary(summary)
+            case 2:
+                let workerID = try UUID(from: &buffer)
+                let message = try WorkerResponseMessage(from: &buffer)
+                self = .receiveWorkerMessage(.init(workerID: workerID, message: message))
+            case 3:
+                let workerID = try UUID(from: &buffer)
+                let releaseDigest = try String(from: &buffer)
+                self = .receiveWorkerFoundEvent(.init(workerID: workerID, releaseDigest: releaseDigest))
+            case 4:
+                self = try .receiveWorkerEOF(.init(workerID: .init(from: &buffer)))
+            case let value:
+                throw DecodingError.dataCorrupted(.init(
+                    codingPath: [ByteBufferCodingKey(Self.self)],
+                    debugDescription: "bad result enum case \(value)"
+                ))
+            }
+        }
     }
 
-    package struct RequestChunk: Codable, Sendable {
-        var data: Data?
-        var isFinal: Bool
+    package typealias InvokeWorkload = InvokeWorkloadRequest
+    package typealias Warmup = WarmupDetails
+    package typealias Parameters = ParametersData
+
+    package struct RequestChunk: ByteBufferCodable, Sendable, Equatable {
+        package var data: Data?
+        package var isFinal: Bool
+
+        internal init(data: Data? = nil, isFinal: Bool) {
+            self.data = data
+            self.isFinal = isFinal
+        }
+
+        package func encode(to buffer: inout ByteBuffer) throws {
+            try self.data.encode(to: &buffer)
+            try self.isFinal.encode(to: &buffer)
+        }
+
+        package init(from buffer: inout ByteBuffer) throws {
+            self.data = try .init(from: &buffer)
+            self.isFinal = try .init(from: &buffer)
+        }
     }
 
-    package struct HelperInvocation: Codable, Sendable {
-        var invocationID: UUID
+    package struct WorkerFound: ByteBufferCodable, Sendable, Equatable {
+        package var workerID: UUID
+        package var releaseDigest: String
+
+        internal init(workerID: UUID, releaseDigest: String) {
+            self.workerID = workerID
+            self.releaseDigest = releaseDigest
+        }
+
+        package func encode(to buffer: inout ByteBuffer) throws {
+            try self.workerID.encode(to: &buffer)
+            try self.releaseDigest.encode(to: &buffer)
+        }
+
+        package init(from buffer: inout ByteBuffer) throws {
+            self.workerID = try UUID(from: &buffer)
+            self.releaseDigest = try .init(from: &buffer)
+        }
     }
 
-    package struct ReceiveHelperMessage: Codable, Sendable {
-        var invocationID: UUID
-        var data: Data
+    package struct WorkerResponse: ByteBufferCodable, Sendable, Equatable {
+        package var workerID: UUID
+        package var message: WorkerResponseMessage
+
+        internal init(workerID: UUID, message: WorkerResponseMessage) {
+            self.workerID = workerID
+            self.message = message
+        }
+
+        package func encode(to buffer: inout ByteBuffer) throws {
+            try self.workerID.encode(to: &buffer)
+            try self.message.encode(to: &buffer)
+        }
+
+        package init(from buffer: inout ByteBuffer) throws {
+            self.workerID = try UUID(from: &buffer)
+            self.message = try .init(from: &buffer)
+        }
     }
 
-    package struct ReceiveHelperEOF: Codable, Sendable {
-        var invocationID: UUID
+    package struct WorkerResponseSummary: ByteBufferCodable, Sendable, Equatable {
+        package var workerID: UUID
+        package var succeeded: Bool
+
+        internal init(workerID: UUID, succeeded: Bool) {
+            self.workerID = workerID
+            self.succeeded = succeeded
+        }
+
+        package func encode(to buffer: inout ByteBuffer) throws {
+            try self.succeeded.encode(to: &buffer)
+            try self.workerID.encode(to: &buffer)
+        }
+
+        package init(from buffer: inout ByteBuffer) throws {
+            self.succeeded = try .init(from: &buffer)
+            self.workerID = try UUID(from: &buffer)
+        }
     }
 
-    internal struct Teardown: CloudBoardAsyncXPCMessage {
+    package struct WorkerEOF: ByteBufferCodable, Sendable, Equatable {
+        package var workerID: UUID
+
+        internal init(workerID: UUID) {
+            self.workerID = workerID
+        }
+
+        @inlinable
+        package func encode(to buffer: inout CloudBoardAsyncXPC.ByteBuffer) throws {
+            try self.workerID.encode(to: &buffer)
+        }
+
+        package init(from buffer: inout CloudBoardAsyncXPC.ByteBuffer) throws {
+            self.workerID = try .init(from: &buffer)
+        }
+    }
+
+    internal struct Teardown: CloudBoardAsyncXPCByteBufferMessage, Equatable {
         internal typealias Success = ExplicitSuccess
         internal typealias Failure = CloudBoardJobAPIError
+
+        init() {}
+
+        func encode(to _: inout ByteBuffer) throws {}
+
+        init(from _: inout ByteBuffer) throws {}
+    }
+}
+
+extension CloudBoardJobAPIXPCClientToServerMessage.InvokeWorkload: CloudBoardAsyncXPCByteBufferMessage {
+    package typealias Success = ExplicitSuccess
+    package typealias Failure = CloudBoardJobAPIError
+}
+
+extension CloudBoardJobAPIXPCClientToServerMessage.Warmup: CloudBoardAsyncXPCByteBufferMessage {
+    package typealias Success = ExplicitSuccess
+    package typealias Failure = CloudBoardJobAPIError
+}
+
+extension CloudBoardJobAPIXPCClientToServerMessage.Parameters: CloudBoardAsyncXPCByteBufferMessage {
+    package typealias Success = ExplicitSuccess
+    package typealias Failure = CloudBoardJobAPIError
+}
+
+extension CloudBoardJobAPIError: ByteBufferCodable {
+    public func encode(to buffer: inout ByteBuffer) throws {
+        switch self {
+        case .internalError: buffer.writeInteger(0)
+        case .noDelegateSet: buffer.writeInteger(1)
+        }
+    }
+
+    public init(from buffer: inout ByteBuffer) throws {
+        guard let enumCase: Int = buffer.readInteger() else {
+            throw DecodingError.valueNotFound(
+                Self.self,
+                .init(codingPath: [], debugDescription: "no expected enum case")
+            )
+        }
+        switch enumCase {
+        case 0:
+            self = .internalError
+        case 1:
+            self = .noDelegateSet
+        case let value:
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: [ByteBufferCodingKey(Self.self)],
+                debugDescription: "bad result enum case \(value)"
+            ))
+        }
     }
 }

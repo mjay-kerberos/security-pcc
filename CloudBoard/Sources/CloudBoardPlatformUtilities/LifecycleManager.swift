@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -108,14 +108,20 @@ public final class LifecycleManager: Sendable {
                 group.cancelAll()
             }
 
-            self.storage.withLock { storage in
+            try self.storage.withLock { storage in
                 switch storage.state {
                 case .drained:
                     () // end the task, any restarting is handled at a higher level
                 case .draining:
-                    assertionFailure("Managed operation ended during drain")
+                    fatalError("Managed operation ended during drain")
                 case .active, .activeWithDrainContinuation, .drainQueued:
-                    assertionFailure("Managed operation ended without drain")
+                    Self.logger.error("Managed operation ended without drain")
+                    if self.config.enforceAllStateChecks {
+                        Self.logger.fault("Managed operation ended without drain")
+                        throw LifecycleManagerError.exitedWithoutDrain
+                    } else {
+                        Self.logger.error("Managed operation ended without drain - ignoring")
+                    }
                 }
             }
 
@@ -288,10 +294,19 @@ public final class LifecycleManager: Sendable {
 }
 
 extension LifecycleManager {
-    public struct Configuration {
+    public struct Configuration: Sendable {
         let timeout: ContinuousClock.Duration
-        public init(timeout: ContinuousClock.Duration) {
+        /// In unit tests often things are torn down in ways that would violate some checks
+        /// Unsetting this skips those checks
+        let enforceAllStateChecks: Bool
+
+        public init(
+            timeout: ContinuousClock.Duration,
+            enforceAllStateChecks: Bool = true
+
+        ) {
             self.timeout = timeout
+            self.enforceAllStateChecks = enforceAllStateChecks
         }
     }
 }
@@ -361,5 +376,6 @@ extension LifecycleManager {
         case taskCancelled
         case cannotDoubleWait
         case cannotDoubleDrain
+        case exitedWithoutDrain
     }
 }

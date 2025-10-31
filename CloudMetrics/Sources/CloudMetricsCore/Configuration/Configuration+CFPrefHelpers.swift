@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -43,6 +43,10 @@ extension Configuration {
     // swiftlint:disable discouraged_optional_collection
     // swiftlint:disable discouraged_optional_boolean
 
+    private static func getAllKeysForDomain(_ domain: String = kCloudMetricsPreferenceDomain) -> [String]? {
+        CFPreferencesCopyKeyList(domain as CFString, kCFPreferencesAnyUser, kCFPreferencesAnyHost) as? [String]
+    }
+    
     private static func getCFPreferenceValue(key: String,
                                              expectedType: CFTypeID,
                                              domain: String = kCloudMetricsPreferenceDomain) throws -> CFPropertyList? {
@@ -123,6 +127,19 @@ extension Configuration {
             return nil
         }
         return value as? [String: NSDictionary] ?? [String: NSDictionary]()
+    }
+    
+    static func allDictPreferencesIn(domain: String = kCloudMetricsPreferenceDomain) throws -> [String: NSDictionary]? {
+        guard let allKeys = getAllKeysForDomain(domain) else {
+            return nil
+        }
+        var dict = [String: NSDictionary]()
+        for key in allKeys {
+            if let value = try getCFPreferenceValue(key: key, expectedType: CFDictionaryGetTypeID(), domain: domain) as? NSDictionary {
+                dict[key] = value
+            }
+        }
+        return dict
     }
 
     static func preferencesDictOfArrays(_ key: String,

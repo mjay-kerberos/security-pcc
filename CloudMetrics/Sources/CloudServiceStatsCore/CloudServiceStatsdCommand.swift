@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,15 +14,15 @@
 
 //  Copyright © 2024 Apple Inc. All rights reserved.
 
-import ArgumentParser
+import ArgumentParserInternal
 
 public struct CloudServiceStatsdCommand: AsyncParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "cloudservicestatsd",
-        abstract: "agent collecting launchd stat events to emit to metrics backend",
+        abstract: "agent collecting crash reports/events to emit to metrics backend",
         discussion: """
-        cloudservicestatsd collects service exit events from launchd stats SPI, logging and \
-        uploading them to a metrics backend.
+        cloudservicestatsd collects events from launchd stats SPI and OSAnalytics, logging and \
+        publishing them using CloudMetrics.
         """
     )
     

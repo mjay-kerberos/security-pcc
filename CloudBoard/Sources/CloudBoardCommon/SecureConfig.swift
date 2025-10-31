@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -52,7 +52,7 @@ public enum SecureConfigLoader: Sendable {
     }
 }
 
-public struct SecureConfig: Sendable {
+public struct SecureConfig: Hashable, Sendable {
     static let logger: os.Logger = .init(
         subsystem: "com.apple.cloudos.cloudboard",
         category: "SecureConfig"
@@ -77,10 +77,42 @@ public struct SecureConfig: Sendable {
             return true
         }
     }
+
+    /// Is this instance a proxy or not
+    public var isProxy: Bool {
+        return self.parameters.isProxy
+    }
+
+    /// No actual request chunks should reach this instance,
+    /// Request bypass should ensure no request is received and a failure is terminal
+    public var enforceRequestBypass: Bool {
+        if self.isProxy, self.forceSecurityConfigurationOn {
+            return true
+        }
+        return self.parameters.enforceRequestBypass
+    }
+
+    public var routingGroupAliases: [String] {
+        self.parameters.routingGroupAliases
+    }
+
+    public var grpcForceIPv6Resolution: Bool? {
+        self.parameters.grpcForceIPv6Resolution
+    }
+
+    public var convergenceSpanID: String {
+        self.parameters.convergenceSpanID
+    }
+
+    public var convergenceTraceID: String {
+        self.parameters.convergenceTraceID
+    }
 }
 
 extension SecureConfig {
-    public struct Parameters: Sendable {
+    /// Deliberately *not* Codable, This data should not accidentally be read from anywhere except the API
+    /// provided by SecureConfigDB
+    public struct Parameters: Hashable, Sendable {
         public enum SecurityPolicy: Sendable {
             case none
             case carry
@@ -89,6 +121,12 @@ extension SecureConfig {
 
         let securityPolicy: SecurityPolicy
         let disableAppleInfrastructureEnforcementForResearch: Bool?
+        let isProxy: Bool
+        let enforceRequestBypass: Bool
+        let routingGroupAliases: [String]
+        let grpcForceIPv6Resolution: Bool?
+        let convergenceSpanID: String
+        let convergenceTraceID: String
 
         init(_ secureConfigParameters: SecureConfigParameters) {
             switch secureConfigParameters.securityPolicy {
@@ -96,7 +134,7 @@ extension SecureConfig {
                 self.securityPolicy = .none
             case .carry:
                 self.securityPolicy = .carry
-            case .customer:
+            case .customer, .customerProxy:
                 self.securityPolicy = .customer
             @unknown default:
                 SecureConfig.logger.warning("Unexpected security policy, defaulting to customer")
@@ -105,11 +143,54 @@ extension SecureConfig {
             // for customer policy this parameter can only be set to true if the code is running in VRE
             self.disableAppleInfrastructureEnforcementForResearch =
                 secureConfigParameters.research_disableAppleInfrastrucutureEnforcement
+
+            func readParameter<T>(
+                key: String, defaultValue: T
+            ) -> T {
+                do {
+                    return try secureConfigParameters.unvalidatedParameter(key) ?? defaultValue
+                } catch {
+                    SecureConfig.logger.fault(
+                        "Failed to parse \"\(key)\" secure-config parameter"
+                    )
+                    fatalError("Failed to parse \"\(key)\" secure-config parameter")
+                }
+            }
+
+            self.isProxy = secureConfigParameters.cloudboard_isProxy ?? false
+            self.enforceRequestBypass = readParameter(
+                key: "com.apple.cloudboard.enforceRequestBypass", defaultValue: false
+            )
+            self.routingGroupAliases = readParameter(key: "com.apple.cloudboard.routingGroupAliases", defaultValue: [])
+            self.grpcForceIPv6Resolution = readParameter(
+                key: "com.apple.cloudboard.grpc.forceIPv6Resolution",
+                defaultValue: nil
+            )
+
+            // Cross-component parameters used for convergence tracing
+            self.convergenceSpanID = readParameter(key: "com.apple.cloudos.tracing.spanID", defaultValue: "")
+            self.convergenceTraceID = readParameter(key: "com.apple.cloudos.tracing.traceID", defaultValue: "")
         }
 
-        init(securityPolicy: SecurityPolicy, disableAppleInfrastructureEnforcementForResearch: Bool? = nil) {
+        // exposed for testing only
+        internal init(
+            securityPolicy: SecurityPolicy,
+            disableAppleInfrastructureEnforcementForResearch: Bool? = nil,
+            isProxy: Bool = false,
+            enforceRequestBypass: Bool = false,
+            routingGroupAliases: [String] = [],
+            grpcForceIPv6Resolution: Bool? = nil,
+            convergenceSpanID: String = "",
+            convergenceTraceID: String = ""
+        ) {
             self.securityPolicy = securityPolicy
             self.disableAppleInfrastructureEnforcementForResearch = disableAppleInfrastructureEnforcementForResearch
+            self.isProxy = isProxy
+            self.enforceRequestBypass = enforceRequestBypass
+            self.routingGroupAliases = routingGroupAliases
+            self.grpcForceIPv6Resolution = grpcForceIPv6Resolution
+            self.convergenceSpanID = convergenceSpanID
+            self.convergenceTraceID = convergenceTraceID
         }
     }
 }

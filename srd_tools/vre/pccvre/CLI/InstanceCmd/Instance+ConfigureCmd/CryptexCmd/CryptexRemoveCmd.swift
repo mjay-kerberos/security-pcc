@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -27,39 +27,23 @@ extension CLI.InstanceCmd.InstanceConfigureCmd.CryptexCmd {
 
         @OptionGroup var globalOptions: CLI.globalOptions
         @OptionGroup var configureOptions: CLI.InstanceCmd.InstanceConfigureCmd.options
-        @OptionGroup var instanceOptions: CLI.InstanceCmd.options
 
         @Option(name: [.customLong("variant"), .customShort("V")],
                 help: "Variant name of the cryptex to be removed.")
         var variant: String
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
-
             let vreName = configureOptions.instanceName
             CLI.logger.log("remove cryptex from \(vreName, privacy: .public)")
 
-            guard VRE.exists(vreName) else {
-                throw CLIError("VRE '\(vreName)' not found")
-            }
+            let vre = try VRE.Instance(name: vreName)
+            var darwinInit = try vre.darwinInitHelper()
 
-            let vre = try VRE(
-                name: vreName,
-                vrevmPath: instanceOptions.vrevmPath
-            )
-
-            var darwinInit: DarwinInitHelper
-            do {
-                darwinInit = try DarwinInitHelper(fromFile: vre.darwinInitFile.path)
-            } catch {
-                throw CLIError("unable to load darwin-init for instance")
-            }
-
-            guard let cryptex = darwinInit.lookupCryptex(variant: variant) else {
+            guard let cryptex = try darwinInit.lookupCryptex(variant: variant) else {
                 throw CLIError("no matching cryptexes for '\(variant)'")
             }
 
-            if darwinInit.removeCryptex(variant: cryptex.variant) {
+            if try darwinInit.removeCryptex(variant: cryptex.variant) {
                 try? FileManager.default.removeItem(at: vre.cryptexFile(cryptex.url))
 
                 do {
@@ -71,10 +55,6 @@ extension CLI.InstanceCmd.InstanceConfigureCmd.CryptexCmd {
 
             CLI.logger.log("removing cryptex variant: \(variant, privacy: .public)")
             print("Removed cryptex matching '\(variant)' from VRE instance.")
-
-            guard darwinInit.cryptexes.count > 0 else {
-                throw CLIError("no cryptexes defined for instance")
-            }
         }
     }
 }

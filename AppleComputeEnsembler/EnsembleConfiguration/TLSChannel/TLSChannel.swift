@@ -1,0 +1,439 @@
+// Copyright © 2025 Apple Inc. All Rights Reserved.
+
+// APPLE INC.
+// PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
+// PLEASE READ THE FOLLOWING PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT (“AGREEMENT”) CAREFULLY BEFORE DOWNLOADING OR USING THE APPLE SOFTWARE ACCOMPANYING THIS AGREEMENT(AS DEFINED BELOW). BY DOWNLOADING OR USING THE APPLE SOFTWARE, YOU ARE AGREEING TO BE BOUND BY THE TERMS OF THIS AGREEMENT. IF YOU DO NOT AGREE TO THE TERMS OF THIS AGREEMENT, DO NOT DOWNLOAD OR USE THE APPLE SOFTWARE. THESE TERMS AND CONDITIONS CONSTITUTE A LEGAL AGREEMENT BETWEEN YOU AND APPLE.
+// IMPORTANT NOTE: BY DOWNLOADING OR USING THE APPLE SOFTWARE, YOU ARE AGREEING ON YOUR OWN BEHALF AND/OR ON BEHALF OF YOUR COMPANY OR ORGANIZATION TO THE TERMS OF THIS AGREEMENT.
+// 1. As used in this Agreement, the term “Apple Software” collectively means and includes all of the Apple Private Cloud Compute materials provided by Apple here, including but not limited to the Apple Private Cloud Compute software, tools, data, files, frameworks, libraries, documentation, logs and other Apple-created materials. In consideration for your agreement to abide by the following terms, conditioned upon your compliance with these terms and subject to these terms, Apple grants you, for a period of ninety (90) days from the date you download the Apple Software, a limited, non-exclusive, non-sublicensable license under Apple’s copyrights in the Apple Software to download, install, compile and run the Apple Software internally within your organization only on a single Apple-branded computer you own or control, for the sole purpose of verifying the security and privacy characteristics of Apple Private Cloud Compute. This Agreement does not allow the Apple Software to exist on more than one Apple-branded computer at a time, and you may not distribute or make the Apple Software available over a network where it could be used by multiple devices at the same time. You may not, directly or indirectly, redistribute the Apple Software or any portions thereof. The Apple Software is only licensed and intended for use as expressly stated above and may not be used for other purposes or in other contexts without Apple's prior written permission. Except as expressly stated in this notice, no other rights or licenses, express or implied, are granted by Apple herein.
+// 2. The Apple Software is provided by Apple on an "AS IS" basis. APPLE MAKES NO WARRANTIES, EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION THE IMPLIED WARRANTIES OF NON-INFRINGEMENT, MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE, REGARDING THE APPLE SOFTWARE OR ITS USE AND OPERATION ALONE OR IN COMBINATION WITH YOUR PRODUCTS, SYSTEMS, OR SERVICES. APPLE DOES NOT WARRANT THAT THE APPLE SOFTWARE WILL MEET YOUR REQUIREMENTS, THAT THE OPERATION OF THE APPLE SOFTWARE WILL BE UNINTERRUPTED OR ERROR-FREE, THAT DEFECTS IN THE APPLE SOFTWARE WILL BE CORRECTED, OR THAT THE APPLE SOFTWARE WILL BE COMPATIBLE WITH FUTURE APPLE PRODUCTS, SOFTWARE OR SERVICES. NO ORAL OR WRITTEN INFORMATION OR ADVICE GIVEN BY APPLE OR AN APPLE AUTHORIZED REPRESENTATIVE WILL CREATE A WARRANTY.
+// 3. IN NO EVENT SHALL APPLE BE LIABLE FOR ANY DIRECT, SPECIAL, INDIRECT, INCIDENTAL OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) ARISING IN ANY WAY OUT OF THE USE, REPRODUCTION, COMPILATION OR OPERATION OF THE APPLE SOFTWARE, HOWEVER CAUSED AND WHETHER UNDER THEORY OF CONTRACT, TORT (INCLUDING NEGLIGENCE), STRICT LIABILITY OR OTHERWISE, EVEN IF APPLE HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// 4. This Agreement is effective until terminated. Your rights under this Agreement will terminate automatically without notice from Apple if you fail to comply with any term(s) of this Agreement. Upon termination, you agree to cease all use of the Apple Software and destroy all copies, full or partial, of the Apple Software. This Agreement constitutes the entire understanding of the parties with respect to the subject matter contained herein, and supersedes all prior negotiations, representations, or understandings, written or oral. This Agreement will be governed and construed in accordance with the laws of the State of California, without regard to its choice of law rules.
+// You may report security issues about Apple products to product-security@apple.com, as described here: https://www.apple.com/support/security/. Non-security bugs and enhancement requests can be made via https://bugreport.apple.com as described here: https://developer.apple.com/bug-reporting/
+// EA1937
+// 10/02/2024
+
+//
+//  TLSChannel.swift
+//  AppleComputeEnsembler
+//
+//  Created by Dhanasekar Thangavel on 11/8/24.
+//
+
+// we need to weaklink since we wanted to run xctest on skywagon which might not contain the
+// symbols.
+@_weakLinked import CloudAttestation
+import Foundation
+import Network
+import OSLog
+
+private let logger = Logger(subsystem: kEnsemblerPrefix, category: "TLSChannel")
+
+private let serverDefaultPort: UInt16 = 4250
+// Default expirty in cloudattestation framework is 1 hr. we are setting it to 8 hrs.
+// we will do the refresh attestation and reconnect clients to server to pick up
+// the refreshed attestation.
+// for server connections, just refreshing is enough, since, the new clients handshaking will ensure
+// server is handshaking with the refreshed attestation.
+private let kDefaultAttestationExpiryInSeconds: Int = 8 * 60 * 60
+
+public protocol ServerConnectionDelegate {
+	/// An incoming message from a node.
+	func incomingMessage(node: Int, message: Data)
+
+	func onServerStatusChange(state: NWListener.State)
+}
+
+public protocol ClientConnectionDelegate {
+	/// callback regarding send status
+	func sendCallback(node: Int, message: Data, error: Error?)
+
+	/// callback indicating that connection to target server change
+	/// in case of leader, it indicates the connection to all followers change
+	/// in case of follower, it indicates the connection to leader change
+	func onClientConnectionChange(node: Int, state: NWConnection.State)
+
+	/// callback indicating that client connection could not be established
+	/// after retrying maximum attempt.
+	func onClientConnectionFailure(node: Int)
+}
+
+let tlsOutboundQ = DispatchQueue(label: "outboundQ", qos: .userInteractive)
+let tlsInboundQ = DispatchSerialQueue(label: "inboundQ", qos: .userInteractive)
+let tlsInboundConnQ = DispatchSerialQueue(label: "inboundConnQ", qos: .userInteractive)
+
+public final class TLSChannel {
+	// server listening for inbound messages
+	var server: Server?
+	// client to leader in case of followers, and clients to followers in case of leader
+	var clients: [Int: Client] = [:]
+	var configuration: BackendConfiguration
+	let serverDelegate: ServerConnectionDelegate
+	let clientDelegate: ClientConnectionDelegate
+	let currentNode: NodeConfiguration
+	let useNoAttestation: Bool
+	var configurator: AttestedTLS.Configurator<EnsembleAttestor>?
+	var tlsOptions: NWProtocolTLS.Options?
+	init(
+		configuration: BackendConfiguration,
+		serverDelegate: ServerConnectionDelegate,
+		clientDelegate: ClientConnectionDelegate,
+		useNoAttestation: Bool = false
+	) async throws {
+		self.configuration = configuration
+		self.serverDelegate = serverDelegate
+		self.clientDelegate = clientDelegate
+		self.useNoAttestation = useNoAttestation
+		let port = configuration.node.port ?? serverDefaultPort
+		self.currentNode = configuration.node
+		
+		if useNoAttestation == true {
+			self.server = try getServer(port: port, delegate: serverDelegate, node: configuration.node.rank)
+		} else {
+            self.configurator = try await AttestedTLS.Configurator(
+                with: EnsembleAttestor(),
+                lifetime: .seconds(kDefaultAttestationExpiryInSeconds)
+            )
+            self.tlsOptions = try self.getCloudAttestationTlsOptions(configuration: configuration)
+			self.server = try self.getCloudAttestationBackedServer(
+				configuration: configuration,
+				port: port,
+				delegate: serverDelegate,
+				node: configuration.node.rank
+			)
+		}
+		self.server?.start()
+
+		guard let clients = try self.getClients() else {
+			throw EnsembleError.internalError(error: "Error getting client connections")
+		}
+		self.clients = clients
+	}
+
+	func refreshAttestation() throws {
+		let dispatchGroup = DispatchGroup()
+		dispatchGroup.enter()
+		Task {
+			defer {
+				dispatchGroup.leave()
+			}
+			logger.info(
+				"TLSChannel.refreshAttestation() on rank \(self.configuration.node.rank, privacy: .public): Refreshing attestation"
+			)
+			try await self.configurator?.refresh()
+		}
+
+		dispatchGroup.wait()
+
+		logger.info(
+			"TLSChannel.refreshAttestation() on rank \(self.configuration.node.rank, privacy: .public): Refreshing attestation completed"
+		)
+	}
+
+	func reConnectWithClients() throws {
+		logger.info(
+			"TLSChannel.reConnectWithClients() on rank \(self.configuration.node.rank, privacy: .public): Reconnecting with clients"
+		)
+
+		for client in self.clients {
+			client.value.stop()
+		}
+
+		try self.refreshAttestation()
+		guard let clients = try self.getClients() else {
+			throw EnsembleError.internalError(error: "Error getting client connections")
+		}
+
+		self.clients.removeAll()
+		self.clients = clients
+	}
+
+	func getClients() throws -> [Int: Client]? {
+		if self.configuration.node.rank == 0 {
+			return try self.getClientsForLeader()
+		} else {
+			return try self.getClientsForFollower()
+		}
+	}
+
+	func getClientsForLeader() throws -> [Int: Client]? {
+		var clients: [Int: Client] = [:]
+		var targetPort: UInt16 = serverDefaultPort
+
+		// for leader we need to send message to all clients
+		// for follower, we just need to talk to leader
+		for node in self.configuration.ensemble.nodes {
+			if node.value.port != nil {
+				targetPort = node.value.port!
+			}
+
+			guard let hostName = node.value.hostName else {
+				throw EnsembleError.internalError(error: "Error getting targets hostname")
+			}
+
+			if node.value.rank != 0 {
+				// For server lets wait for announce message before we can start client connection to each
+				// follower.
+				if self.useNoAttestation == true {
+					clients[node.value.rank] = try getClient(
+						server: hostName,
+						port: targetPort,
+						node: node.value.rank,
+						delegate: self.clientDelegate
+					)
+				} else {
+					clients[node.value.rank] = try self.getCloudAttestationBackedClient(
+						configuration: self.configuration,
+						server: hostName,
+						port: targetPort,
+						node: node.value.rank,
+						delegate: self.clientDelegate
+					)
+				}
+			}
+		}
+
+		return clients
+	}
+
+	func getClientsForFollower() throws -> [Int: Client]? {
+		var clients: [Int: Client] = [:]
+		var targetPort: UInt16 = serverDefaultPort
+
+		// for leader we need to send message to all clients
+		// for follower, we just need to talk to leader
+		for node in self.configuration.ensemble.nodes {
+			if node.value.port != nil {
+				targetPort = node.value.port!
+			}
+
+			guard let hostName = node.value.hostName else {
+				throw EnsembleError.internalError(error: "Error getting targets hostname")
+			}
+
+			if node.value.rank == 0 {
+				if self.useNoAttestation == true {
+					clients[node.value.rank] = try getClient(
+						server: hostName,
+						port: targetPort,
+						node: node.value.rank,
+						delegate: self.clientDelegate
+					)
+				} else {
+					clients[node.value.rank] = try self.getCloudAttestationBackedClient(
+						configuration: self.configuration,
+						server: hostName,
+						port: targetPort,
+						node: node.value.rank,
+						delegate: self.clientDelegate
+					)
+				}
+
+				// we will start the client to leader because followers need to checking first.
+				clients[node.value.rank]?.start()
+			}
+		}
+
+		return clients
+	}
+
+	func startClientsToFollowers() {
+        EnsemblerTLS.logger.info("Starting clients to all followers.")
+        for client in self.clients {
+            client.value.start()
+        }
+	}
+
+	func startClientToLeader() {
+		self.clients[0]?.start()
+	}
+
+	func sendControlMessage(node: Int, message: Data, expectAck: Bool = true) throws {
+		DispatchQueue.global(qos: .userInteractive).async {
+			let controlMsg: EnsembleControlMessage
+			do {
+				controlMsg = try JSONDecoder().decode(EnsembleControlMessage.self, from: message)
+				guard let client = self.clients[node] else {
+					throw EnsembleError.internalError(error: "Error getting client for node \(node)")
+				}
+
+				let controlData = EnsembleControlData(rank: self.configuration.node.rank, data: message)
+
+				if expectAck {
+					client.sendAndWaitForAck(message: controlData)
+				} else {
+					client.send(message: controlData)
+				}
+			} catch {
+				logger.error(
+					"TLSChannel.sendControlMessage() on rank \(self.configuration.node.rank, privacy: .public): Control message decoding failed: \(error, privacy: .public)"
+				)
+				return
+			}
+
+			logger.info(
+				"""
+				TLSChannel.sendControlMessage on rank \(self.configuration.node.rank, privacy: .public): Sending message
+				\(controlMsg.description, privacy: .public)  to rank \(node, privacy: .public)
+				"""
+			)
+		}
+	}
+
+	func sendMessageTo(msg: EnsembleControlMessage, destination: Int) throws {
+		// EnsembleControlMessage.description does not expose any private data.
+		logger.info(
+			"""
+			TLSChannel.sendMessageTo() on rank \(self.currentNode.rank, privacy: .public): \(
+				msg,
+				privacy: .public
+			), \
+			destination: \(destination, privacy: .public)
+			"""
+		)
+
+		let msgData: Data
+		do {
+			msgData = try JSONEncoder().encode(msg)
+		} catch {
+			EnsemblerTLS.logger.error(
+				"""
+				TLSChannel.sendMessageTo() on rank \(self.currentNode.rank, privacy: .public):
+				Failed to encode message \(String(describing: msg), privacy: .public) \
+				: \(String(reportableError: error), privacy: .public))
+				"""
+			)
+			throw error
+		}
+
+		try self.sendControlMessage(node: destination, message: msgData)
+	}
+
+	deinit {
+		// perform the deinitialization
+		stopServer()
+		closeClients()
+	}
+
+	public func stopServer() {
+		// stop the server
+		logger.info(
+			"""
+			TLSChannel.stopServer on rank \(
+				self.configuration.node.rank,
+				privacy: .public
+			): Stopping the server)
+			"""
+		)
+		self.server?.stop()
+	}
+
+	func closeClients() {
+		logger.info(
+			"""
+			TLSChannel.closeClients on rank \(
+				self.configuration.node.rank,
+				privacy: .public
+			): Stopping all clients )
+			"""
+		)
+		for client in self.clients {
+			client.value.stop()
+		}
+	}
+
+	func getEnsembleDeviceFilter(configuration: BackendConfiguration) -> EnsembleValidator
+		.DeviceFilter {
+		let deviceIdentifiersFilter: EnsembleValidator
+			.DeviceFilter = { (deviceIdentifier: DeviceIdentifiers?) in
+				guard let deviceID = deviceIdentifier else {
+					logger.error(
+						"""
+						TLSChannel.DeviceIdentifiersFilter on rank \(
+							configuration.node.rank,
+							privacy: .public
+						): DeviceID returned from EnsembleValidator is nil )
+						"""
+					)
+					return false
+				}
+
+				if configuration.ensemble.nodes.keys.contains(deviceID.udid) {
+					logger.info(
+						"""
+						TLSChannel.DeviceIdentifiersFilter() on rank \(
+							configuration.node.rank,
+							privacy: .public
+						): \(deviceID.udid, privacy: .public) allowed
+						"""
+					)
+					return true
+				} else {
+					logger.error(
+						"""
+						TLSChannel.DeviceIdentifiersFilter() on rank \(
+							configuration.node.rank,
+							privacy: .public
+						): \(deviceID.udid, privacy: .public) rejected
+						"""
+					)
+					return false
+				}
+			}
+
+		return deviceIdentifiersFilter
+	}
+
+	func getCloudAttestationTlsOptions(configuration: BackendConfiguration) throws -> NWProtocolTLS
+		.Options {
+		do {
+			let deviceFilter = self.getEnsembleDeviceFilter(configuration: configuration)
+			let validator = try EnsembleValidator(deviceFilter)
+
+			var options: NWProtocolTLS.Options? = nil
+			let dispatchGroup = DispatchGroup()
+			dispatchGroup.enter()
+			Task {
+				defer {
+					dispatchGroup.leave()
+				}
+				logger.info("Calling configurator.createTLSOptions()")
+				options = try await self.configurator?.createTLSOptions(with: validator)
+			}
+
+			dispatchGroup.wait()
+
+			guard let options else {
+				throw EnsembleError.internalError(error: "we did not get TLS Options from cloudattestation")
+			}
+			return options
+		} catch {
+			logger.error("Error in getting tlsoptions: \(error, privacy: .public)")
+		}
+		return NWProtocolTLS.Options()
+	}
+
+	func getCloudAttestationBackedClient(
+		configuration _: BackendConfiguration,
+		server: String,
+		port: UInt16,
+		node: Int,
+		delegate: ClientConnectionDelegate
+	) throws -> Client {
+		guard let tlsOptions = self.tlsOptions else {
+			throw EnsembleError.internalError(error: "TLSOptions is nil, not expected")
+		}
+		return Client(host: server, port: port, tlsOptions: tlsOptions, node: node, delegate: delegate)
+	}
+
+	func getCloudAttestationBackedServer(
+		configuration _: BackendConfiguration,
+		port: UInt16,
+		delegate: ServerConnectionDelegate,
+		node: Int
+	) throws -> Server {
+		guard let tlsOptions = self.tlsOptions else {
+			throw EnsembleError.internalError(error: "TLSOptions is nil, not expected")
+		}
+		return try Server(port: port, tlsOptions: tlsOptions, delegate: delegate, node: node)
+	}
+}

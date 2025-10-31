@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -59,7 +59,13 @@ final class CIOBackend: Backend {
 			self.meshService = meshService
 			meshService.setDispatchQueue(configuration.queue)
 
-			var ok = meshService.setNodeId(UInt32(configuration.node.rank))
+			var ok = false
+			if #available(iOS 18.4, macOS 15.4, *) {
+				ok = meshService.setExtendedNodeId(UInt32(configuration.node.rank))
+			} else {
+				ok = meshService.setNodeId(UInt32(configuration.node.rank))
+			}
+
 			if !ok {
 				throw EnsembleError.internalError(
 					error:
@@ -102,9 +108,13 @@ final class CIOBackend: Backend {
 				)
 			}
 
+			meshService.onNodeNetworkConnectionChange { node, connected in
+				self.configuration.delegate.networkConnectionChange(node: Int(node), connected: connected)
+			}
+
 			meshService.onNodeMessage { node, message in
 				guard let message else {
-					logger.warning("Received a nil message from node\(node)")
+					logger.warning("Received a nil message from node\(node, privacy: .public)")
 					return
 				}
 				self.configuration.delegate.incomingMessage(node: Int(node), message: message)
@@ -147,7 +157,7 @@ final class CIOBackend: Backend {
 	}
 
 	func disconnectCIO(channel: Int) throws {
-		logger.error("CIOBackend.disconnectCIO(): Call into CIO backend to disconnect CIO.")
+		logger.info("CIOBackend.disconnectCIO(): Call into CIO backend to disconnect CIO.")
 		guard self.meshService.disconnectCIOChannel(UInt32(channel)) else {
 			logger.error(
 				"""
@@ -162,10 +172,10 @@ final class CIOBackend: Backend {
 
 	func sendControlMessage(node: Int, message: Data) throws {
 		if !self.activated {
-			logger.error(
+			logger.warning(
 				"""
 				Mesh not activated: \
-				Ignoring request to send a control message to node \(node): \(message)
+				Ignoring request to send a control message to node \(node, privacy: .public): \(message)
 				"""
 			)
 			return
@@ -290,6 +300,17 @@ final class CIOBackend: Backend {
 	/// gets the number of seconds that can be used for a crypto key
 	func getMaxSecondsPerKey() throws -> UInt64 {
 		return self.meshService.getMaxSecondsPerCryptoKey()
+	}
+
+	public func addPeerHostname(hostname: String, node: Int) throws -> Bool {
+		logger.info(
+			"""
+			CIOBackend.addPeerHostname(hostname: \(hostname, privacy: .public), node: \(node): \
+			Call into the CIO backend's addPeerHostname() function. 
+			"""
+		)
+
+		return self.meshService.addPeerHostname(hostname, peerNodeId: UInt32(node))
 	}
 }
 #endif

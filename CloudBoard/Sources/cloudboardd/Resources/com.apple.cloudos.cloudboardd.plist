@@ -1,4 +1,4 @@
-<!-- Copyright © 2024 Apple Inc. All Rights Reserved. -->
+<!-- Copyright © 2025 Apple Inc. All Rights Reserved. -->
 
 <!-- APPLE INC. -->
 <!-- PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT -->
@@ -42,7 +42,7 @@
 		<string>/usr/libexec/cloudboardd</string>
 	</array>
 	<key>ProcessType</key>
-	<string>Interactive</string>
+	<string>App</string>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>EnablePressuredExit</key>

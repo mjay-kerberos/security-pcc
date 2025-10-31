@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,8 +14,8 @@
 
 //  Copyright © 2024 Apple Inc. All rights reserved.
 
-#if canImport(Ensemble)
-@_weakLinked import Ensemble
+#if canImport(AppleComputeEnsembler)
+@_weakLinked import AppleComputeEnsembler
 #endif
 
 #if canImport(cloudOSInfo)
@@ -153,10 +153,10 @@ struct EnsembleNodeInfo {
 }
 
 extension EnsembleNodeInfo: CustomStringConvertible {
-    /// used when Ensemble framework doesn't provide us with a host name
+    /// used when AppleComputeEnsembler framework doesn't provide us with a host name
     private static let defaultHostName = "[unknown]"
 
-    /// used when Ensemble framework doesn't provide us with an ensemble ID
+    /// used when AppleComputeEnsembler framework doesn't provide us with an ensemble ID
     private static let defaultEnsembleID = "[unknown]"
 
     public var description: String {
@@ -230,11 +230,11 @@ extension NodeInfo {
         #endif
     }
 
-    /// Returns the node info loaded from Ensemble framework.
+    /// Returns the node info loaded from AppleComputeEnsembler framework.
     ///
     /// Load this once at process start, the info does not change.
     private static func loadEnsembleNodeInfo() -> EnsembleNodeInfo? {
-        #if canImport(Ensemble)
+        #if canImport(AppleComputeEnsembler)
         if #_hasSymbol(EnsemblerSession.self) {
             do {
                 let ensemblerSession = try EnsemblerSession()
@@ -263,7 +263,7 @@ extension NodeInfo {
             return nil
         }
         #else
-        self.logger.error("ensemble framework not available, returning nil EnsembleNodeInfo.")
+        self.logger.error("AppleComputeEnsembler framework not available, returning nil EnsembleNodeInfo.")
         return nil
         #endif
     }

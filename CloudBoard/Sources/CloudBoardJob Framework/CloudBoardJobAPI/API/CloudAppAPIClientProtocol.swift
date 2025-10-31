@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,59 +14,64 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
+package import CloudBoardAsyncXPC
 import Foundation
 
 package protocol CloudBoardJobAPIClientToServerProtocol: Actor {
     func warmup(details: WarmupDetails) async throws
     func receiveParameters(parametersData: ParametersData) async throws
     func provideInput(_ data: Data?, isFinal: Bool) async throws
-    func helperInvocation(invocationID: UUID) async throws
-    func receiveHelperMessage(invocationID: UUID, data: Data) async throws
-    func receiveHelperEOF(invocationID: UUID) async throws
+    func receiveWorkerFoundEvent(workerID: UUID, releaseDigest: String) async throws
+    func receiveWorkerMessage(workerID: UUID, _ response: WorkerResponseMessage) async throws
+    func receiveWorkerResponseSummary(workerID: UUID, succeeded: Bool) async throws
+    func receiveWorkerEOF(workerID: UUID) async throws
     func teardown() async throws
 }
 
-internal protocol CloudAppAPIClientProtocol: CloudBoardJobAPIClientToServerProtocol {
-    func connect() async -> AsyncThrowingStream<CloudAppResponse, Error>
+package struct WarmupDetails: Sendable, ByteBufferCodable, Equatable {
+    public init() {}
+
+    package func encode(to _: inout ByteBuffer) throws {}
+
+    package init(from _: inout ByteBuffer) throws {}
 }
 
-package struct WarmupDetails: Sendable, Codable {
-    package var initialMetrics: InitialMetrics
-
-    package init(
-        initialMetrics: InitialMetrics
-    ) {
-        self.initialMetrics = initialMetrics
-    }
-}
-
-extension WarmupDetails {
-    package struct InitialMetrics: Sendable, Codable {
-        package var setupMessageReceived: ContinuousClock.Instant
-
-        package init(
-            setupMessageReceived: ContinuousClock.Instant
-        ) {
-            self.setupMessageReceived = setupMessageReceived
-        }
-    }
-}
-
-package struct ParametersData: Sendable, Codable, Hashable {
-    package var parametersReceived: ContinuousClock.Instant
+/// Parameters message sent from cb_jobhelper to the cloud app
+package struct ParametersData: Sendable, ByteBufferCodable, Hashable, Equatable {
+    package var parametersReceived: Date
     package var plaintextMetadata: PlaintextMetadata
+    package var requestBypassed: Bool
+    package var traceContext: TraceContext
 
     package init(
-        parametersReceived: ContinuousClock.Instant,
-        plaintextMetadata: PlaintextMetadata
+        parametersReceived: Date,
+        plaintextMetadata: PlaintextMetadata,
+        requestBypassed: Bool,
+        traceContext: TraceContext
     ) {
         self.parametersReceived = parametersReceived
         self.plaintextMetadata = plaintextMetadata
+        self.requestBypassed = requestBypassed
+        self.traceContext = traceContext
+    }
+
+    package func encode(to buffer: inout ByteBuffer) throws {
+        try self.plaintextMetadata.encode(to: &buffer)
+        try self.parametersReceived.encode(to: &buffer)
+        try self.requestBypassed.encode(to: &buffer)
+        try self.traceContext.encode(to: &buffer)
+    }
+
+    package init(from buffer: inout ByteBuffer) throws {
+        self.plaintextMetadata = try .init(from: &buffer)
+        self.parametersReceived = try .init(from: &buffer)
+        self.requestBypassed = try .init(from: &buffer)
+        self.traceContext = try .init(from: &buffer)
     }
 }
 
 extension ParametersData {
-    public struct PlaintextMetadata: Codable, Sendable, Hashable {
+    package struct PlaintextMetadata: ByteBufferCodable, Sendable, Hashable {
         public var bundleID: String
         public var bundleVersion: String
         public var featureID: String
@@ -94,6 +99,107 @@ extension ParametersData {
             self.workloadParameters = workloadParameters
             self.requestID = requestID
             self.automatedDeviceGroup = automatedDeviceGroup
+        }
+
+        package func encode(to buffer: inout ByteBuffer) throws {
+            try self.automatedDeviceGroup.encode(to: &buffer)
+            try self.bundleID.encode(to: &buffer)
+            try self.bundleVersion.encode(to: &buffer)
+            try self.clientInfo.encode(to: &buffer)
+            try self.featureID.encode(to: &buffer)
+            try self.requestID.encode(to: &buffer)
+            try self.workloadType.encode(to: &buffer)
+            try self.workloadParameters.encode(to: &buffer)
+        }
+
+        package init(from buffer: inout ByteBuffer) throws {
+            self.automatedDeviceGroup = try .init(from: &buffer)
+            self.bundleID = try .init(from: &buffer)
+            self.bundleVersion = try .init(from: &buffer)
+            self.clientInfo = try .init(from: &buffer)
+            self.featureID = try .init(from: &buffer)
+            self.requestID = try .init(from: &buffer)
+            self.workloadType = try .init(from: &buffer)
+            self.workloadParameters = try .init(from: &buffer)
+        }
+    }
+
+    package struct TraceContext: ByteBufferCodable, Sendable, Hashable, Equatable {
+        public var traceID: String
+        public var spanID: String
+
+        public init(traceID: String, spanID: String) {
+            self.traceID = traceID
+            self.spanID = spanID
+        }
+
+        package func encode(to buffer: inout ByteBuffer) throws {
+            try self.traceID.encode(to: &buffer)
+            try self.spanID.encode(to: &buffer)
+        }
+
+        public init(from buffer: inout ByteBuffer) throws {
+            self.traceID = try .init(from: &buffer)
+            self.spanID = try .init(from: &buffer)
+        }
+    }
+}
+
+package enum WorkerResponseMessage: ByteBufferCodable, Sendable, Equatable {
+    package enum Result: Codable, Sendable {
+        case ok
+        case failure
+    }
+
+    case payload(Data)
+    case result(Result)
+
+    package func encode(to buffer: inout ByteBuffer) throws {
+        switch self {
+        case .payload(let data):
+            buffer.writeInteger(0)
+            try data.encode(to: &buffer)
+        case .result(let result):
+            buffer.writeInteger(1)
+            switch result {
+            case .ok: buffer.writeInteger(0)
+            case .failure: buffer.writeInteger(1)
+            }
+        }
+    }
+
+    package init(from buffer: inout ByteBuffer) throws {
+        guard let enumCase: Int = buffer.readInteger() else {
+            throw DecodingError.valueNotFound(
+                Self.self,
+                .init(codingPath: [], debugDescription: "no expected enum case")
+            )
+        }
+        switch enumCase {
+        case 0:
+            let payload = try Data(from: &buffer)
+            self = .payload(payload)
+        case 1:
+            guard let enumCase: Int = buffer.readInteger() else {
+                throw DecodingError.valueNotFound(
+                    WorkerResponseMessage.Result.self,
+                    .init(codingPath: [], debugDescription: "no expected enum case")
+                )
+            }
+            switch enumCase {
+            case 0: self = .result(.ok)
+            case 1: self = .result(.failure)
+            case let value:
+                throw DecodingError.dataCorrupted(.init(
+                    codingPath: [ByteBufferCodingKey(WorkerResponseMessage.Result.self)],
+                    debugDescription: "bad result enum case \(value)"
+                ))
+            }
+        case let value:
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: [ByteBufferCodingKey(Self.self)],
+                debugDescription: "bad result enum case \(value)"
+            ))
         }
     }
 }

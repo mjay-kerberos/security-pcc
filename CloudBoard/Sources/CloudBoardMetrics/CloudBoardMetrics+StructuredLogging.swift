@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -67,8 +67,8 @@ public struct OperationMetrics: Sendable {
     }
 }
 
-struct ContinuousTimeMeasurement {
-    static func start() -> Self {
+package struct ContinuousTimeMeasurement {
+    package static func start() -> Self {
         Self(start: .now)
     }
 
@@ -80,7 +80,7 @@ struct ContinuousTimeMeasurement {
     }
 
     /// elapsed time since this measurement was started.
-    var duration: ContinuousClock.Duration {
+    package var duration: ContinuousClock.Duration {
         let end = ContinuousClock().now
         return end - self.start
     }

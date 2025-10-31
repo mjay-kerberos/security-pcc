@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,12 +14,29 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-public enum CloudBoardAttestationAPIError: Error, Codable, Hashable {
+package import CloudBoardAsyncXPC
+import Foundation
+
+package enum CloudBoardAttestationAPIError: Error, Codable, Hashable {
     case internalError
     case noDelegateSet
     case notConnected
     case missingEntitlement(String)
     case noXPCConnectionInTaskLocal
+    // We cannot act on the supplied key.
+    // This would happen if
+    // * it's not a legal keyId
+    // * if the key was lost (say due to a crash)
+    // * the key expired
+    // We maintain a limited window to provide ``expired`` information to assist diagnosis of errors
+    // but this is not a guarantee, as we cannnot maintain that information indefinitely
+    case unavailableKeyID(requestKeyID: Data, expired: Bool)
+    // This timeout may ultimately happen at the point the requestKeyId expires
+    case validationTimedOut(requestKeyID: Data, workerKeyId: Data)
+
+    // Used in testing where implementing a feature is pointless but you want
+    // to know when it happens rather than triggering a fataError
+    case notImplemented
 }
 
 extension CloudBoardAttestationAPIError: CustomStringConvertible {
@@ -35,6 +52,75 @@ extension CloudBoardAttestationAPIError: CustomStringConvertible {
             return "Missing entitlement \(entitlement)"
         case .noXPCConnectionInTaskLocal:
             return "No connection in task local"
+        case .unavailableKeyID(let requestKeyID, let expired):
+            return "Unavailable key ID: \(requestKeyID.base64EncodedString()) expired: \(expired)"
+        case .validationTimedOut(let requestKeyID, let workerKeyID):
+            return "Validation timed out for request key: \(requestKeyID.base64EncodedString()) with worker key \(workerKeyID.base64EncodedString())"
+        case .notImplemented:
+            return "Not implemented"
+        }
+    }
+}
+
+extension CloudBoardAttestationAPIError: ByteBufferCodable {
+    public func encode(to buffer: inout ByteBuffer) throws {
+        switch self {
+        case .internalError:
+            buffer.writeInteger(0)
+        case .noDelegateSet:
+            buffer.writeInteger(1)
+        case .notConnected:
+            buffer.writeInteger(2)
+        case .missingEntitlement(let entitlement):
+            buffer.writeInteger(3)
+            try entitlement.encode(to: &buffer)
+        case .noXPCConnectionInTaskLocal:
+            buffer.writeInteger(4)
+        case .unavailableKeyID(let keyID, let expired):
+            buffer.writeInteger(5)
+            try keyID.encode(to: &buffer)
+            try expired.encode(to: &buffer)
+        case .validationTimedOut(let requestKeyID, let workerKeyId):
+            buffer.writeInteger(6)
+            try requestKeyID.encode(to: &buffer)
+            try workerKeyId.encode(to: &buffer)
+        case .notImplemented:
+            buffer.writeInteger(7)
+        }
+    }
+
+    public init(from buffer: inout ByteBuffer) throws {
+        guard let enumCase: Int = buffer.readInteger() else {
+            throw DecodingError.valueNotFound(
+                Self.self,
+                .init(codingPath: [], debugDescription: "no expected enum case")
+            )
+        }
+        switch enumCase {
+        case 0:
+            self = .internalError
+        case 1:
+            self = .noDelegateSet
+        case 2:
+            self = .notConnected
+        case 3:
+            self = try .missingEntitlement(.init(from: &buffer))
+        case 4:
+            self = .noXPCConnectionInTaskLocal
+        case 5:
+            self = try .unavailableKeyID(requestKeyID: .init(from: &buffer), expired: .init(from: &buffer))
+        case 6:
+            self = try .validationTimedOut(
+                requestKeyID: .init(from: &buffer),
+                workerKeyId: .init(from: &buffer)
+            )
+        case 7:
+            self = .notImplemented
+        case let value:
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: [ByteBufferCodingKey(Self.self)],
+                debugDescription: "bad result enum case \(value)"
+            ))
         }
     }
 }

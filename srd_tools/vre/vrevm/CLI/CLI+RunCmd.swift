@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -42,11 +42,10 @@ extension CLI {
 
         @Option(name: [.customLong("darwin-init"), .customShort("I")],
                 help: "Update path to darwin-init.json startup config (copied in).",
-                transform: { try DarwinInit(fromFile: $0) })
-        var darwinInit: DarwinInit? = nil
+                transform: { try DarwinInitConfig(fromFile: $0) })
+        var darwinInit: DarwinInitConfig? = nil
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
             CLI.logger.log("run VRE \(vmName, privacy: .public)")
 
             let vm = VM(name: vmName, dataDir: globalOptions.datadir)

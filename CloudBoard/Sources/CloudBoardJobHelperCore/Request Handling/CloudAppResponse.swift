@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,13 +14,41 @@
 
 // Copyright © 2023 Apple. All rights reserved.
 
+import CloudBoardCommon
 import Foundation
 
-enum CloudAppResponse {
+package enum CloudAppResponse: Sendable {
     case chunk(Data)
+    case internalError
+    /// Cloud app will not send any more response chunks
+    case endOfResponse
+    /// Job has ended. There will not be any more responses from the cloud app, so we signal that onwards to the caller
+    case endJob
+    /// App has terminated. If we did not get `.endJob` first, indicates the app terminated uncleanly
     case appTermination(TerminationMetadata)
+    case findWorker(FindWorkerQuery)
+    case workerRequestMessage(UUID, Data)
+    case workerRequestEOF(UUID, Bool)
+    case finalizeRequestExecutionLog
 }
 
-struct TerminationMetadata {
+public struct TerminationMetadata: Sendable {
     var statusCode: Int?
+}
+
+extension CloudAppResponse: CustomStringConvertible {
+    /// This is a public description of the response and should not include associated data
+    public var description: String {
+        switch self {
+        case .chunk: "chunk"
+        case .endOfResponse: "endOfResponse"
+        case .endJob: "endJob"
+        case .appTermination: "appTermination"
+        case .findWorker: "findWorker"
+        case .workerRequestMessage: "workerRequestMessage"
+        case .workerRequestEOF: "workerRequestEOF"
+        case .finalizeRequestExecutionLog: "finalizeRequestExecutionLog"
+        case .internalError: "internalError"
+        }
+    }
 }

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -20,7 +20,7 @@
 //  Created by Andrea Guzzo on 8/29/22.
 //
 
-package import ArgumentParser
+package import ArgumentParserInternal
 private import CloudMetricsConstants
 package import CloudMetricsHealthFramework
 private import Logging

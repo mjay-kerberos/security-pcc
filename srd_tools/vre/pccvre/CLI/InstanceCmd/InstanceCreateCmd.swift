@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -21,29 +21,9 @@ import Foundation
 import System
 
 extension CLI.InstanceCmd {
-    struct InstanceCreateCmd: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(
-            commandName: "create",
-            abstract: "Create a new Virtual Research Environment instance.",
-            discussion: """
-            The standard flow for this command uses the configuration and assets provided
-            within release metadata (using the --release option). After completing successfully,
-            a VM has been created and restored with the configured OS image and left stopped.
-            It's also possible to create a VRE instance using --osimage if --release is not used.
-
-            Use the instance 'configure' command to manage individual cryptexes and replace
-            darwin-init configuration.
-            """
-        )
-
-        @OptionGroup var globalOptions: CLI.globalOptions
-        @OptionGroup var instanceOptions: CLI.InstanceCmd.options
-
-        @Option(name: [.customLong("name"), .customShort("N")],
-                help: "VRE instance name.",
-                transform: { try CLI.validateVREName($0) })
-        var vreName: String
-
+    // InstanceCreateOptions contains command-line arguments shared between commands responsible for
+    //  creating instances (certain items [such as name] remain closer to the implementation
+    struct CreateOptions: ParsableArguments {
         @Option(name: [.customLong("release"), .customShort("R")],
                 help: "SW Release Log index, or path to release metadata .json or .protobuf file. Release assets must be downloaded with `pccvre release download` prior to this.",
                 completion: .file())
@@ -63,7 +43,7 @@ extension CLI.InstanceCmd {
 
         @Option(name: [.customLong("variant")],
                 help: """
-                Specify variant for OS installation. (values: \(CLI.osVariants.joined(separator: ", ")).
+                Specify variant for OS installation. (values: \(CLI.osVariants.joined(separator: ", "))
                 default: \(CLI.defaultOSVariant))
                 """,
                 transform: { try CLI.validateOSVariant($0) })
@@ -76,12 +56,7 @@ extension CLI.InstanceCmd {
         @Option(name: [.customLong("fusing")],
                 help: ArgumentHelp("Specify VRE instance fusing.", visibility: .customerHidden),
                 transform: { try CLI.validateFusing($0) })
-        var fusing: String?
-
-        @Option(name: [.customLong("macaddr"), .customLong("mac")],
-                help: "Specify network MAC address for VRE [xx:xx:xx:xx:xx:xx].",
-                transform: { try CLI.validateMACAddress($0) })
-        var macAddr: String?
+        var fusing: String = CLI.internalBuild ? "dev" : "prod"
 
         @Option(name: [.customLong("boot-args"), .customShort("B")],
                 help: "Specify VRE boot-args (research variant only).",
@@ -106,9 +81,9 @@ extension CLI.InstanceCmd {
         var vsepImage: String?
 
         @Option(name: [.customLong("http-endpoint")],
-                help: "Bind built-in HTTP service to <addr>[:<port>] or 'none' (default: automatic)",
+                help: "Bind built-in HTTP service to <addr>[:<port>] or 'none'. (default: automatic)",
                 transform: { try CLI.validateHTTPService($0) })
-        var httpService: VRE.HTTPServiceDef = .init(enabled: true)
+        var httpService: HTTPServer.Configuration? = .virtual(HTTPServer.Configuration.Virtual(mode: .nat))
 
         @Option(name: [.customShort("K"), .customLong("kernelcache")],
                 help: "Custom kernel cache for VRE.",
@@ -120,239 +95,409 @@ extension CLI.InstanceCmd {
                 help: "Custom SPTM for VRE.",
                 completion: .file(),
                 transform: { try CLI.validateFilePath($0) })
-        var sptm: String?
+        var sptmPath: String?
 
         @Option(name: [.customShort("M"), .customLong("txm")],
                 help: "Custom TXM for VRE.",
                 completion: .file(),
                 transform: { try CLI.validateFilePath($0) })
-        var txm: String?
+        var txmPath: String?
+
+        @Flag(help: ArgumentHelp("Skip the release requirements check.",
+                                 visibility: .customerHidden))
+        var skipReleaseRequirementsCheck: Bool = false
 
         func validate() throws {
             if osVariant != nil && osVariantName != nil {
                 throw ValidationError("Only one of --variant or --variant-name can be specified.")
             }
         }
+    }
+
+    struct InstanceCreateCmd: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "create",
+            abstract: "Create a new Virtual Research Environment instance.",
+            discussion: """
+            The standard flow for this command uses the configuration and assets
+            provided within release metadata (using the --release option). After
+            completing successfully, a VM has been created and restored with the
+            configured OS image and left stopped.
+
+            It's also possible to create a VRE instance using --osimage if --release
+            is not used.
+
+            Use the instance 'configure' command to manage individual cryptexes and
+            replace darwin-init configuration.
+            """
+        )
+
+        @OptionGroup var globalOptions: CLI.globalOptions
+        @OptionGroup var createOptions: CLI.InstanceCmd.CreateOptions
+
+        @Option(name: [.customLong("name"), .customShort("N")],
+                help: "VRE instance name.",
+                transform: { try CLI.validateVREName($0) })
+        var vreName: String
+
+        @Option(name: [.customLong("macaddr"), .customLong("mac")],
+                help: "Specify network MAC address for VRE instance (xx:xx:xx:xx:xx:xx).",
+                transform: { try CLI.validateMACAddress($0) })
+        var macAddr: String?
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
             CLI.logger.log("create VRE \(vreName, privacy: .public)")
 
-            Main.printHardwareRecommendationWarningIfApplicable()
+            let instanceOptions = InstanceOptions(
+                release: createOptions.release,
+                skipReleaseRequirementsCheck: createOptions.skipReleaseRequirementsCheck,
+                osImage: createOptions.osImage,
+                osVariant: createOptions.osVariant,
+                osVariantName: createOptions.osVariantName,
+                fusing: createOptions.fusing,
+                name: vreName,
+                networks: [
+                    VRE.VMConfig.Network(mode: .nat, macAddr: macAddr),
+                    VRE.VMConfig.Network(mode: .hostOnly)
+                ],
+                bootArgs: createOptions.bootArgs,
+                nvramArgs: createOptions.nvramArgs,
+                romImage: createOptions.romImage,
+                vsepImage: createOptions.vsepImage,
+                kernelCache: createOptions.kernelCache,
+                sptmPath: createOptions.sptmPath,
+                txmPath: createOptions.txmPath
+            )
 
-            guard !VRE.exists(vreName) else {
-                throw CLIError("VRE '\(vreName)' already exists")
-            }
+            try CLI.validateRequiredMemoryToCreate(instanceOptions: [instanceOptions])
 
             // Synthesize all of the inputs to create a recipe for this instance.
             // Any cryptexes specified in the darwin-init must be accessible locally
             // prior to creating the instance (we will link/copy these to the instance
             // directory).
-
-            var darwinInit = DarwinInitHelper() // start with "empty" darwin-init
-            var releaseAssets: [CryptexSpec] = []
-            var releaseID = "-" // glean from release metadata (if available)
-
-            if let release { // --release argument specified
-                var releaseMetadata: SWReleaseMetadata
-                var altAssetsDir: FilePath? = nil
-
-                if let relIndex = UInt64(release) { // index number: look for release.json file (from "releases download")
-                    CLI.logger.log("lookup release index \(relIndex, privacy: .public)")
-                    if logEnvironment != .production {
-                        CLI.logger.log("using KT environment: \(logEnvironment.rawValue)")
-                    }
-
-                    var assetHelper: AssetHelper
-                    do {
-                        assetHelper = try AssetHelper(directory: CLIDefaults.assetsDirectory.path)
-                    } catch {
-                        throw CLIError("\(CLIDefaults.assetsDirectory.path): \(error)")
-                    }
-
-                    let relMD: SWReleaseMetadata
-                    do {
-                        (_, relMD) = try assetHelper.loadRelease(
-                            index: relIndex,
-                            logEnvironment: logEnvironment
-                        )
-                    } catch {
-                        let logmsg = "release lookup [\(logEnvironment):\(relIndex)]: \(error)"
-                        CLI.logger.error("\(logmsg, privacy: .public)")
-
-                        throw CLIError("SW Release info not found for index \(relIndex): have assets been downloaded?")
-                    }
-
-                    releaseMetadata = relMD
-                } else if release.hasSuffix(".json") { // external release.json file
-                    do {
-                        releaseMetadata = try SWReleaseMetadata(from: FileManager.fileURL(release))
-                    } catch {
-                        throw CLIError("cannot load \(release): \(error)")
-                    }
-
-                    altAssetsDir = FilePath(release).removingLastComponent()
-                } else if release.hasSuffix(".pb") || release.hasSuffix(".protobuf") { // external protobuf file
-                    do {
-                        let pbufdata = try Data(contentsOf: FileManager.fileURL(release))
-                        releaseMetadata = try SWReleaseMetadata(data: pbufdata)
-                    } catch {
-                        throw CLIError("cannot load \(release): \(error)")
-                    }
-                } else {
-                    throw ValidationError("must provide release index or release.json file pathname")
-                }
-
-                releaseAssets = try extractAssetsFromReleaseMetadata(releaseMetadata,
-                                                                     altAssetSourceDir: altAssetsDir)
-
-                guard let releaseDarwinInit = releaseMetadata.darwinInit else {
-                    throw CLIError("unable to parse darwin-init config from release info")
-                }
-
-                darwinInit = releaseDarwinInit
-                releaseID = releaseMetadata.releaseHash.hexString
-            }
-
-            var osVariant = self.osVariant
-            if let osImage {
-                if osVariant == nil || osVariant!.isEmpty, osVariantName == nil || osVariantName!.isEmpty {
-                    osVariant = CLI.defaultOSVariant
-                    print("Using default OS variant: \(osVariant!)")
-                    CLI.logger.log("using default OS variant: \(osVariant!, privacy: .public)")
-                }
-
-                if releaseAssets.count > 0 {
-                    // update ASSET_TYPE_OS with image/variant ultimately used
-                    try releaseAssets.append(CryptexSpec(
-                        path: osImage,
-                        variant: osVariantName ?? osVariant ?? "Unknown",
-                        assetType: SWReleaseMetadata.AssetType.os.label
-                    ))
-                }
-            }
-
-            var vre = try VRE(
-                name: vreName,
-                releaseID: releaseID,
-                httpService: httpService,
-                vrevmPath: instanceOptions.vrevmPath
+            _ = try CLI.createVREInstance(
+                instanceOptions: instanceOptions,
+                httpService: createOptions.httpService
             )
+        }
+    }
+}
 
-            var fusing = self.fusing
-            if fusing == nil {
-                fusing = CLI.internalBuild ? "dev" : "prod"
+extension SWReleaseMetadata {
+    init (
+        release: String,
+        logEnvironment: TransparencyLog.Environment,
+        skipReleaseRequirementsCheck: Bool = false
+    ) throws {
+        var releaseMetadata: SWReleaseMetadata
+        (releaseMetadata, _) = try CLI.fetchReleaseInfo(release: release, logEnvironment: logEnvironment)
+
+        guard let _ = releaseMetadata.darwinInitString else {
+            throw CLIError("unable to load darwin-init config from release info")
+        }
+
+        if !skipReleaseRequirementsCheck {
+            try CLI.checkReleaseRequirements(metadata: releaseMetadata)
+        }
+
+        self = releaseMetadata
+    }
+}
+
+extension CLI {
+    static func createVREInstance(
+        instanceOptions: InstanceOptions,
+        httpService: HTTPServer.Configuration?,
+        force: Bool = false
+    ) throws -> VRE.Instance {
+        if VRE.Instance.exists(instanceOptions.name) {
+            if force {
+                let vre = try VRE.Instance(name: instanceOptions.name)
+                if vre.isRunning {
+                    throw CLIError("VRE '\(instanceOptions.name)' is running")
+                }
+                try vre.remove()
+            } else {
+                throw CLIError("VRE '\(instanceOptions.name)' already exists")
             }
-            CLI.logger.log("VM fusing: \(fusing!, privacy: .public)")
+        }
 
-            let vmConfig = VRE.VMConfig(
-                osImage: osImage,
-                osVariant: osVariant,
-                osVariantName: osVariantName,
-                fusing: fusing!,
-                macAddr: macAddr,
-                bootArgs: bootArgs,
-                nvramArgs: nvramArgs,
-                romImagePath: romImage,
-                vsepImagePath: vsepImage,
-                kernelCachePath: kernelCache,
-                sptmPath: sptm,
-                txmPath: txm
+        let releaseMetadata = try instanceOptions.releaseMetadata
+
+        var releaseAssets: [CryptexSpec] = if let releaseMetadata {
+            try CLI.extractAssetsFromReleaseMetadata(releaseMetadata, altAssetSourceDir: instanceOptions.altAssetsDir)
+        } else {
+            []
+        }
+
+        let releaseID = releaseMetadata?.releaseHash.hexString ?? "-"
+
+        var osVariant = instanceOptions.osVariant
+        if let osImage = instanceOptions.osImage {
+            if osVariant == nil || osVariant!.isEmpty,
+               instanceOptions.osVariantName == nil || instanceOptions.osVariantName!.isEmpty
+            {
+                osVariant = CLI.defaultOSVariant
+                print("Using default OS variant: \(osVariant!)")
+                CLI.logger.log("using default OS variant: \(osVariant!, privacy: .public)")
+            }
+
+            if releaseAssets.count > 0 {
+                // update ASSET_TYPE_OS with image/variant ultimately used
+                try releaseAssets.append(CryptexSpec(
+                    path: osImage,
+                    variant: instanceOptions.osVariantName ?? osVariant ?? "Unknown",
+                    assetType: SWReleaseMetadata.AssetType.os.label
+                ))
+            }
+        }
+
+        var vre = VRE.Instance(
+            name: instanceOptions.name,
+            releaseID: releaseID,
+            httpService: httpService
+        )
+
+        var darwinInit = "" // start with "empty" darwin-init
+        if let relDarwinInit = releaseMetadata?.darwinInitString {
+            darwinInit = relDarwinInit
+        }
+
+        if let instanceDarwinInitOverrides = try instanceOptions.darwinInitOverridesString {
+            // ensure we have PC host tools to handle the overrides
+            _ = try vre.copyInstancePCTools(instanceAssets: releaseAssets)
+            var darwinInitHelper = try DarwinInitHelper(config: darwinInit, pccvreHelper: vre.pccvreHelper())
+
+            // get the list of cryptexes from the instance config - we will want to make sure we have copied
+            // their assets
+            let overrideDarwinInitHelper = try DarwinInitHelper(
+                config: instanceDarwinInitOverrides,
+                pccvreHelper: darwinInitHelper.pccvreHelper
             )
+            // tolerate having some cryptexes with blank URL specified - we are not going to use them
+            // any cryptexes that are getting removed using `MERGE_STRAT` _should_ have the URL set to ""
+            let cryptexes = try overrideDarwinInitHelper.cryptexes().filter { $0.url != "" }
+            let overrideCryptexes: [CryptexSpec] = try cryptexes.map {
+                return try CryptexSpec(path: $0.url, variant: $0.variant)
+            }
+            CLI.logger.debug("Got cryptexes \(overrideCryptexes)")
+            let copiedOverrideCryptexes = try vre.copyInstanceAssets(instanceAssets: overrideCryptexes)
+            // merge the provided instance config onto the release darwin init
+            try darwinInitHelper.mergeConfig(overrideDarwinInit: overrideDarwinInitHelper.configJSON)
+            for cryptex in copiedOverrideCryptexes {
+                if let assetBasename = cryptex.path.lastComponent?.string {
+                    try darwinInitHelper.addCryptex(.init(variant: cryptex.variant, url: assetBasename))
+                }
+            }
+            darwinInit = darwinInitHelper.configJSON
+        }
 
-            // create the VRE instance (and underlying VM) -- a restore is also performed on the
-            //  new VM using the recipe we've crafted above from the input.
-            do {
-                try vre.create(
-                    vmConfig: vmConfig,
-                    darwinInit: darwinInit,
-                    instanceAssets: releaseAssets
+        CLI.logger.debug("Create VRE instance with darwin-init:\(darwinInit, privacy: .public)")
+
+
+        // create the VRE instance (and underlying VM) -- a restore is also performed on the
+        //  new VM using the recipe we've crafted above from the input.
+        do {
+            try vre.create(
+                vmConfig: instanceOptions.vmConfig,
+                darwinInit: darwinInit,
+                instanceAssets: releaseAssets
+            )
+        } catch {
+            // if VRE/VM creation failed, attempt to save a copy of the vrevm logs
+            let createErr = error
+            if let savedLogs = try? CLI.copyVMLogs(vre: vre) {
+                print("\nCopy of the VRE VM logs stored under: \(savedLogs.path)")
+            }
+
+            try? vre.remove()
+            throw createErr
+        }
+
+        var darwinInitHelper = try vre.darwinInitHelper()
+        if try darwinInitHelper.localHostname() == nil {
+            try darwinInitHelper.setLocalHostname(randomHostname())
+            try darwinInitHelper.save()
+        }
+
+        AnalyticsSendEventLazy("com.apple.securityresearch.pccvre.restored") {
+            var eventReleaseID = releaseID
+            if eventReleaseID.isEmpty || eventReleaseID == "-" {
+                eventReleaseID = "unknown"
+            }
+
+            return [
+                "version": eventReleaseID as NSString,
+            ]
+        }
+
+        return vre
+    }
+
+    static func validateRequiredMemoryToCreate(instanceOptions: [InstanceOptions]) throws {
+        let requiredMemoryGB = instanceOptions.map { $0.resolveNramGB() }.reduce(0) { (sum, mem) in sum + mem }
+        // Assume that restore won't use all memory - don't account for host headroom and running instances.
+        try Main.validateRequiredMemory(
+            requiredMemoryGB: Int(requiredMemoryGB),
+            consumedMemoryGB: 0
+        )
+    }
+}
+
+protocol SharedVREInstanceOptions: Codable {
+    /// SW Release Log index
+    var release: String? { get set }
+    /// SW Transparency Log environment
+    var transparencyLogEnvironment: TransparencyLog.Environment? { get set }
+    /// Alternate Private Cloud Compute OS image path
+    var osImage: String? { get set }
+    /// Specify variant for OS installation
+    var osVariant: String? { get set }
+    /// Specify variant-name for OS installation
+    var osVariantName: String? { get set }
+    /// Specify VRE instance fusing
+    var fusing: String? { get set }
+
+    func validate() throws
+}
+
+struct InstanceOptions: SharedVREInstanceOptions {
+    /// SW Release Log index
+    var release: String?
+
+    /// Skip the check whether release meets the requirements specified in release metadata
+    var skipReleaseRequirementsCheck: Bool?
+
+    /// SW Transparency Log environment
+    var transparencyLogEnvironment: TransparencyLog.Environment?
+
+    var osImage: String?
+
+    var osVariant: String? = CLI.defaultOSVariant
+
+    var osVariantName: String?
+
+    var fusing: String?
+
+    /// Name of the instance
+    var name: String
+
+    var ncpu: UInt?
+
+    var nramGB: UInt?
+
+    var networks: [VRE.VMConfig.Network]? = [
+        VRE.VMConfig.Network(mode: .nat, macAddr: nil),
+        VRE.VMConfig.Network(mode: .hostOnly)
+    ]
+
+    var bootArgs: VRE.NVRAMArgs?
+
+    var nvramArgs: VRE.NVRAMArgs?
+
+    var romImage: String?
+
+    var vsepImage: String?
+
+    var kernelCache: String?
+
+    var sptmPath: String?
+
+    var txmPath: String?
+
+    /// Overrides for bits of darwin-init otherwise specified in release metadata
+    var darwinInitOverrides: InstanceOptions.UnstructuredJSON?
+
+    var darwinInitOverridesString: String? {
+        get throws {
+            if let darwinInitOverrides {
+                let encoder = JSONEncoder()
+                let data = try encoder.encode(darwinInitOverrides)
+                return String(decoding: data, as: UTF8.self)
+            } else {
+                return nil
+            }
+        }
+    }
+
+    func validate() throws {
+        _ = try osVariant.map { try CLI.validateOSVariant($0) }
+        _ = try fusing.map { try CLI.validateFusing($0) }
+        _ = try osImage.map { try CLI.validateFilePath($0) }
+        _ = try romImage.map { try CLI.validateFilePath($0) }
+        _ = try vsepImage.map { try CLI.validateFilePath($0) }
+        _ = try kernelCache.map { try CLI.validateFilePath($0) }
+        _ = try sptmPath.map { try CLI.validateFilePath($0) }
+        _ = try txmPath.map { try CLI.validateFilePath($0) }
+        if osVariant != nil && osVariantName != nil {
+            throw ValidationError("Only one of --variant or --variant-name can be specified.")
+        }
+    }
+
+    var releaseMetadata: SWReleaseMetadata? {
+        get throws {
+            // we validate release to always be set when parsing the wrapping workload structure
+            // or expect the release info to be passed in directly, but we don't require it for various CLI
+            // instance creation workflows.
+            if let release {
+                try SWReleaseMetadata(
+                    release: release,
+                    logEnvironment: transparencyLogEnvironment ?? CLIDefaults.ktEnvironment,
+                    skipReleaseRequirementsCheck: skipReleaseRequirementsCheck ?? false
                 )
-            } catch {
-                // if VRE/VM creation failed, attempt to save a copy of the vrevm logs
-                let createErr = error
-                if let savedLogs = try? CLI.copyVMLogs(vre: vre) {
-                    print("\nCopy of the VRE VM logs stored under: \(savedLogs.path)")
-                }
-
-                try? vre.remove()
-                throw createErr
-            }
-
-            AnalyticsSendEventLazy("com.apple.securityresearch.pccvre.restored") {
-                var eventReleaseID = releaseID
-                if eventReleaseID.isEmpty || eventReleaseID == "-" {
-                    eventReleaseID = "unknown"
-                }
-
-                return [
-                    "version": eventReleaseID as NSString,
-                ]
+            } else {
+                nil
             }
         }
+    }
 
-        // extractAssetsFromReleaseMetadata parses release metadata (json file) to obtain list of
-        //  assets (os image, cryptexes, and types) along with their qualified pathname (relative to
-        //  the json file), verified to exist
-        private func extractAssetsFromReleaseMetadata(
-            _ releaseMetadata: SWReleaseMetadata,
-            altAssetSourceDir: FilePath? = nil
-        ) throws -> [CryptexSpec] {
-            // Extract the assets specified by the release metadata. For each asset, validate
-            // that we can find it and determine the local path where it can be found.
-            var releaseAssets: [CryptexSpec] = []
-            if let osAsset = releaseMetadata.osAsset() {
-                do {
-                    let assetPath = try CLI.expandAssetPath(osAsset,
-                                                            altAssetSourceDir: altAssetSourceDir)
-                    try releaseAssets.append(CryptexSpec(
-                        path: assetPath.string,
-                        variant: osAsset.variant,
-                        assetType: osAsset.type.label,
-                        fileType: osAsset.fileType.assetFileType
-                    ))
-
-                    CLI.logger.log("OS release asset: \(assetPath.string, privacy: .public)")
-                } catch {
-                    throw CLIError("asset '\(osAsset.url)' in release: \(error)")
-                }
-            }
-
-            if let cryptexAssets = releaseMetadata.cryptexAssets() {
-                for asset in cryptexAssets.values {
-                    do {
-                        let assetPath = try CLI.expandAssetPath(asset,
-                                                                altAssetSourceDir: altAssetSourceDir)
-                        try releaseAssets.append(CryptexSpec(
-                            path: assetPath.string,
-                            variant: asset.variant,
-                            assetType: asset.type.label
-                        ))
-
-                        CLI.logger.log("cryptex release asset: \(assetPath.string, privacy: .public)")
-                    } catch {
-                        throw CLIError("asset '\(asset.url)' in release: \(error)")
-                    }
-                }
-            }
-
-            if let toolsAsset = releaseMetadata.hostToolsAsset() {
-                do {
-                    let assetPath = try CLI.expandAssetPath(toolsAsset,
-                                                            altAssetSourceDir: altAssetSourceDir)
-                    try releaseAssets.append(CryptexSpec(
-                        path: assetPath.string,
-                        variant: toolsAsset.variant,
-                        assetType: toolsAsset.type.label
-                    ))
-
-                    CLI.logger.log("host tools release image: \(assetPath.string, privacy: .public)")
-                } catch {
-                    throw CLIError("asset '\(toolsAsset.url)' in release: \(error)")
-                }
-            }
-
-            return releaseAssets
+    var altAssetsDir: FilePath? {
+        if let release, release.hasSuffix(".json") {
+            FilePath(release).removingLastComponent()
+        } else {
+            nil
         }
+    }
+}
+
+extension InstanceOptions {
+    var vmConfig: VRE.VMConfig {
+        .init(
+            osImage: osImage,
+            osVariant: osVariant,
+            osVariantName: osVariantName,
+            fusing: fusing,
+            networks: networks ?? [],
+            ncpu: ncpu,
+            nramGB: resolveNramGB(),
+            bootArgs: bootArgs,
+            nvramArgs: nvramArgs,
+            romImagePath: romImage,
+            vsepImagePath: vsepImage,
+            kernelCachePath: kernelCache,
+            sptmPath: sptmPath,
+            txmPath: txmPath
+        )
+    }
+}
+
+extension InstanceOptions {
+    func resolveNramGB() -> UInt {
+        // explicit config takes priority
+        if let nramGB {
+            return nramGB
+        }
+
+        let application = try? self.releaseMetadata?.application
+
+        // ask pccvre-helper about memory requirements in the corresponding PCC release
+        if let release,
+           let helper = try? PCCVREHelper.configuredOrFromRelease(release),
+           let requiredMemory = try? helper.requiredMemory(application: application) {
+            return requiredMemory
+        }
+
+        // fallback to hard-coded defaults for older releases
+        return (application == "TIE Proxy") ? 2 : 14
     }
 }

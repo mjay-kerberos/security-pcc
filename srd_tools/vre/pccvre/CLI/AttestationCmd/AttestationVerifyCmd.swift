@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -59,6 +59,10 @@ extension CLI.AttestationCmd {
               help: "restrictDeveloperMode property of the validator.") // for research variant
         var restrictDeveloperMode: Bool = true
 
+        @Flag(inversion: .prefixedNo,
+              help: "validateProxiedReleaseProofs property of the validator.")
+        var validateProxiedReleaseProofs: Bool = true
+
         @Argument(help: "Path to PCC Attestation Bundle to verify.",
                   completion: .file())
         var file: String
@@ -71,20 +75,12 @@ extension CLI.AttestationCmd {
                 throw CLIError("read attestation bundle: \(error)")
             }
 
-            var validator = NodeValidator(environment: environment)
-            validator.allowExpired = allowExpired
-            validator.strictCertificateValidation = strictCertificateValidation
-            validator.transparencyProofValidation = transparencyProofValidation
-            validator.requireProdFusing = requireProdFusing
-            validator.restrictDeveloperMode = restrictDeveloperMode
-            validator.ensembleTopologyValidation = ensembleTopologyValidation
-
             let keyData: PublicKeyData
             let keyExpiry: Date
             let validated: Validated.AttestationBundle
 
             do {
-                (keyData, keyExpiry, validated) = try await validator.validate(bundle: attestationBundle)
+                (keyData, keyExpiry, validated) = try await validator().validate(bundle: attestationBundle)
             } catch {
                 throw CLIError("verify Attestation Bundle: \(error)")
             }
@@ -102,6 +98,52 @@ extension CLI.AttestationCmd {
 
             print("UDID: \(validated.udid ?? "<unknown>")")
             print("Valid until: \(dateAsString(keyExpiry))")
+        }
+
+        func validator() -> any Validator {
+            var validator = MuxValidator(environment: environment) { appData in
+                if let appData {
+                    CLI.logger.debug("Attestation app data: \((try? appData.jsonString()) ?? "<unknown>")")
+                } else {
+                    CLI.logger.debug("Attestation has no app data")
+                }
+
+                switch PCC.AttestationType(from: appData) {
+                case .computeNode(version: _):
+                    CLI.logger.debug("Using compute node validator")
+                    return nodeValidator()
+                case .proxyNode(version: .v1):
+                    CLI.logger.debug("Using proxy node validator")
+                    return proxyNodeValidator()
+                default:
+                    CLI.logger.error("Unrecognized attestation type, using auto validator and ignoring relaxed configuration options")
+                    return PCC.AutoValidator(environment: environment)
+                }
+            }
+            validator.strictCertificateValidation = strictCertificateValidation
+            return validator
+        }
+
+        func nodeValidator() -> NodeValidator {
+            var nodeValidator = NodeValidator(environment: environment)
+            configureNodeValidator(&nodeValidator)
+            return nodeValidator
+        }
+
+        func proxyNodeValidator() -> PCC.ProxyNodeValidator {
+            var proxyNodeValidator = PCC.ProxyNodeValidator(environment: environment)
+            proxyNodeValidator.validateProxiedReleaseProofs = validateProxiedReleaseProofs
+            configureNodeValidator(&proxyNodeValidator.inner)
+            return proxyNodeValidator
+        }
+
+        func configureNodeValidator(_ validator : inout NodeValidator) {
+            validator.allowExpired = allowExpired
+            validator.strictCertificateValidation = strictCertificateValidation
+            validator.transparencyProofValidation = transparencyProofValidation
+            validator.requireProdFusing = requireProdFusing
+            validator.restrictDeveloperMode = restrictDeveloperMode
+            validator.ensembleTopologyValidation = ensembleTopologyValidation
         }
     }
 }

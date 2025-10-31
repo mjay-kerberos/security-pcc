@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -15,17 +15,29 @@
 //  Copyright © 2024 Apple Inc. All rights reserved.
 
 import CloudBoardAttestationDAPI
+import CloudBoardLogging
 import Foundation
 import Security
 import Security_Private.SecItemPriv
 
 enum Keychain {
-    enum Error: Swift.Error {
+    enum Error: ReportableError {
         case failedToQueryForKeys(OSStatus, String? = nil)
         case failedToAddKeyToKeychain(OSStatus, String? = nil)
         case failedToDeleteKeyFromKeychain(OSStatus, String? = nil)
         case unexpectedSecClass
         case unexpectedResultType(CFTypeID)
+
+        var publicDescription: String {
+            let errorType = switch self {
+            case .failedToQueryForKeys(let osStatus, _): "failedToQueryForKeys(osStatus: \(osStatus))"
+            case .failedToAddKeyToKeychain(let osStatus, _): "failedToAddKeyToKeychain(osStatus: \(osStatus))"
+            case .failedToDeleteKeyFromKeychain(let osStatus, _): "failedToDeleteKeyFromKeychain(osStatus: \(osStatus))"
+            case .unexpectedSecClass: "unexpectedSecClass"
+            case .unexpectedResultType: "unexpectedResultType"
+            }
+            return "keychain.\(errorType)"
+        }
     }
 
     static var baseNodeKeyQuery: [String: Any] {
@@ -42,12 +54,14 @@ enum Keychain {
         ] as [String: Any]
     }
 
-    static func findKeys(for attributes: [String: Any], keychain: SecKeychain? = nil) throws -> [SecKey] {
+    /// Returns Array of tuples of (SecKey, KeyId)
+    static func findKeys(for attributes: [String: Any], keychain: SecKeychain? = nil) throws -> [(SecKey, Data)] {
         // Primary attributes for keys are:
         // kSecAttrKeyClass, kSecAttrKeyType, kSecAttrApplicationLabel, kSecAttrApplicationTag, kSecAttrKeySizeInBits,
         // and kSecAttrEffectiveKeySize.
         var query = attributes
         query[kSecReturnRef as String] = true
+        query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitAll
 
         if let secClass = query[kSecClass as String], secClass as! CFString != kSecClassKey {
@@ -68,18 +82,23 @@ enum Keychain {
             let errMsg = SecCopyErrorMessageString(status, nil)
             throw Error.failedToQueryForKeys(status, errMsg as String?)
         }
-        guard let keys = result as? [SecKey] else {
+        guard let resultDict = result as? [[String: Any]] else {
             throw Error.unexpectedResultType(CFGetTypeID(result))
         }
 
-        return keys
+        return resultDict.map { result in
+            let secKey = result[kSecValueRef as String] as! SecKey?
+            let keyId = result[kSecAttrApplicationTag as String] as! Data?
+            return (secKey!, keyId!)
+        }
     }
 
-    static func add(key secKey: SecKey, keychain: SecKeychain? = nil) throws {
+    static func add(key secKey: SecKey, keyId: Data, keychain: SecKeychain? = nil) throws {
         var itemAddParams = [
             kSecClass: kSecClassKey,
             kSecValueRef: secKey,
             kSecAttrAccessGroup: CloudBoardAttestation.keychainAccessGroup,
+            kSecAttrApplicationTag: keyId,
         ] as [String: Any]
         itemAddParams.addKeychainAttributes(keychain: keychain, for: .update)
 

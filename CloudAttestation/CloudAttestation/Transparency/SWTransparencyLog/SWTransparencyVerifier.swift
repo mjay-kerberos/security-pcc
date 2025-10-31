@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -35,22 +35,24 @@ public struct SWTransparencyVerifier: TransparencyVerifier {
         self.softwareTransparency = SoftwareTransparency(application: .privateCloudCompute)
     }
 
-    public func verifyExpiringInclusion(of release: Release, proofs: TransparencyLogProofs) async throws -> Date {
+    public func verifyExpiringInclusion(of digest: Data, proofs: TransparencyLogProofs) async throws -> Date {
         guard let softwareTransparency else {
             throw Error.notAvailable
         }
 
         do {
-            let verification = try await softwareTransparency.verifyExpiringProofs(try proofs.proofs.serializedData(), for: release.serializedData)
+            let verification = try await softwareTransparency.verifyExpiringProofs(try proofs.proofs.serializedData(), forDigest: digest, configuration: nil)
             switch verification.result {
             case .invalid:
-                Self.logger.error("Invalid transparency proof for: \(release, privacy: .public)")
+                Self.logger.error("Invalid transparency proof for digest \(digest.hexString, privacy: .public)")
                 throw TransparencyLogError.invalidProof
             case .valid:
-                Self.logger.info("Valid transparency proof for: \(release, privacy: .public) (expires \(verification.expiry, privacy: .public)")
+                Self.logger.info("Valid transparency proof for digest \(digest.hexString, privacy: .public) (expires \(verification.expiry, privacy: .public)")
                 break
             @unknown default:
-                Self.logger.error("Unknown transparency proof validation result: \(verification.result.rawValue, privacy: .public)")
+                Self.logger.error(
+                    "Unknown transparency proof validation result for digest \(digest.hexString, privacy: .public): \(verification.result.rawValue, privacy: .public)"
+                )
                 throw TransparencyLogError.unrecognized(status: Int(verification.result.rawValue))
             }
 

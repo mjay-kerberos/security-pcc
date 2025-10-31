@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -21,9 +21,13 @@
 
 import Foundation
 import Security
+import Security_Private
 import CryptoKit
 import os.log
+import InternalSwiftProtobuf
 import DarwinPrivate.os.variant
+
+private let logger = Logger(subsystem: "com.apple.CloudAttestation", category: "CloudAttestation")
 
 // MARK: - Attestor Protocol
 
@@ -31,22 +35,36 @@ import DarwinPrivate.os.variant
 ///
 /// Attestors also implement ``Validator`` and must be thread safe.
 public protocol Attestor: Sendable {
+    @available(*, deprecated, renamed: "defaultKeyDuration", message: "prefer Duration over TimeInterval")
     var defaultKeyLifetime: TimeInterval { get }
+    var defaultKeyDuration: Swift.Duration { get }
+    var attestingKey: SecKey { get throws }
+    var sepProtocol: any SEP.AttestationProtocol { get }
+    var assetProvider: any AttestationAssetProvider { get }
+    var enforcementOptions: EnforcementOptions { get }
+    var sealedHashSlots: Set<UUID> { get }
+
     /// Attest that a key is resident on the current device's Secure Enclave, along with all relevant attestable data.
     ///
     /// Attestation from a Secure Enclave must be performed against a SEP resident key, even if only the attestation structures about the device state are desired.
     ///
     /// - Parameters:
-    ///  - key: A SecKey that will be attested by DCIK.
+    ///  - key: A SecKey that will be attested by attestingKey.
+    ///  - using: The key to use to sign the attestation. Defaults to ``Attestor/attestingKey-50y3c``
     ///  - expiration: the expiration date to staple in the AttestationBundle. Defaults to ``Attestor/defaultKeyDuration`` (24 hours)
     ///  - nonce: An optional nonce value that can be up to 32 bytes. Function will throw if larger.
+    func attest(key: SecKey, using: SecKey, expiration: Date, nonce: Data?) async throws -> AttestationBundle
+    func attest(key: SecKey, using: SecKey, expiration: Date, appData: AttestationBundle.AppData) async throws -> AttestationBundle
     func attest(key: SecKey, expiration: Date, nonce: Data?) async throws -> AttestationBundle
 }
 
-extension Attestor {
+public struct EnforcementOptions: Sendable {
+    public var requireCertificateChain: Bool = true
+}
 
+extension Attestor {
     public var defaultKeyLifetime: TimeInterval {
-        TimeInterval(defaultKeyDuration.components.seconds)
+        defaultKeyDuration.timeInterval
     }
 
     /// The default key lifetime, returned as a Duration object.
@@ -54,16 +72,114 @@ extension Attestor {
         .days(1)
     }
 
-    /// Helper method that will call ``Attestor/attest(key:expiration:policy:)`` with ``Validator/defaultPolicy-swift.property`` and a default expiration of ``Attestor/defaultKeyLifetime`` from now.
+    public var sepProtocol: any SEP.AttestationProtocol {
+        SEP.PhysicalDevice()
+    }
+
+    public var assetProvider: any AttestationAssetProvider {
+        PCC.AssetProvider()
+    }
+
+    public var enforcementOptions: EnforcementOptions {
+        EnforcementOptions()
+    }
+
+    public var sealedHashSlots: Set<UUID> {
+        [cryptexSlotUUID, secureConfigSlotUUID]
+    }
+
+    public func defaultAttest(key: SecKey, using attestingKey: SecKey, expiration: Date, nonce: Data?) async throws -> AttestationBundle {
+        do {
+            let parsedAttestation: SEP.Attestation
+            if let nonce {
+                SecKeySetParameter(attestingKey, kSecKeyParameterSETokenAttestationNonce, nonce as CFPropertyList, nil)
+            }
+            parsedAttestation = try self.sepProtocol.attest(key: key, using: attestingKey)
+            let attestation = parsedAttestation.data
+            let provisioningCertificateChain: [Data]
+            do {
+                provisioningCertificateChain = try await self.assetProvider.provisioningCertificateChain
+            } catch AttestationAssetProviderError.missingProvisioningCertificate {
+                provisioningCertificateChain = []
+            }
+            let proto = try Proto_AttestationBundle.with { builder in
+                builder.sepAttestation = attestation
+                builder.keyExpiration = Google_Protobuf_Timestamp(date: expiration)
+
+                do {
+                    builder.apTicket = try self.assetProvider.apTicket
+                } catch {
+                    logger.error("Unable to fetch ap ticket: \(error, privacy: .public)")
+                    throw error
+                }
+
+                // Only populate if not empty, so we don't have a wasteful empty proto field
+                if !provisioningCertificateChain.isEmpty {
+                    builder.provisioningCertificateChain = provisioningCertificateChain
+                } else {
+                    logger.warning("Empty provisioning certificate chain")
+                    if self.enforcementOptions.requireCertificateChain {
+                        throw CloudAttestationError.emptyCertificateChain
+                    }
+                }
+
+                var sealedHashes = try self.assetProvider.sealedHashEntries
+                synchronizeLockStates(attestation: parsedAttestation, sealedHashes: &sealedHashes)
+
+                for desiredSlotUUID in self.sealedHashSlots.sorted() {
+                    switch desiredSlotUUID {
+                    case cryptexSlotUUID:
+                        guard let cryptexSlot = sealedHashes[cryptexSlotUUID] else {
+                            logger.error("Failed to read cryptex sealed hashes from \(cryptexSlotUUID, privacy: .public)")
+                            throw CloudAttestationError.missingSealedHash(slot: cryptexSlotUUID)
+                        }
+                        populateCryptex(&builder, cryptexSlot, cryptexSlotUUID)
+
+                    case secureConfigSlotUUID:
+                        guard let secureConfigSlot = sealedHashes[secureConfigSlotUUID] else {
+                            logger.error("Failed to read secure config from \(secureConfigSlotUUID, privacy: .public)")
+                            throw CloudAttestationError.missingSealedHash(slot: secureConfigSlotUUID)
+                        }
+                        try populateSecureConfig(&builder, secureConfigSlot)
+
+                    default:
+                        guard let genericSlot = sealedHashes[desiredSlotUUID] else {
+                            logger.error("Failed to read seled hashes from \(desiredSlotUUID, privacy: .public)")
+                            throw CloudAttestationError.missingSealedHash(slot: desiredSlotUUID)
+                        }
+                        populateGenericSealedHash(&builder, genericSlot, desiredSlotUUID)
+                    }
+                }
+            }
+
+            let bundle = AttestationBundle(proto: proto)
+
+            // Can safely unwrap since a successful attestation of the key happened
+            let publicKey = SecKeyCopyPublicKey(key)!
+            let fingerprint = SecKeyCopyExternalRepresentation(publicKey, nil)!
+
+            logger.log("Successfully created attestation for key: \(SHA256.hash(data: fingerprint as Data), privacy: .public)")
+            return bundle
+        } catch {
+            logger.error("attestation creation failed: \(error)")
+            throw error
+        }
+    }
+
+    public func attest(key: SecKey, using: SecKey, expiration: Date, nonce: Data?) async throws -> AttestationBundle {
+        try await defaultAttest(key: key, using: using, expiration: expiration, nonce: nonce)
+    }
+
+    /// Helper method that will call ``Attestor/attest(key:expiration:policy:)`` with ``Validator/policy-swift.property`` and a default expiration of ``Attestor/defaultKeyLifetime`` from now.
     @inlinable
     public func attest(key: SecKey) async throws -> AttestationBundle {
-        try await self.attest(key: key, expiration: Date(timeIntervalSinceNow: self.defaultKeyLifetime), nonce: nil)
+        try await self.attest(key: key, using: self.attestingKey, expiration: Date(timeIntervalSinceNow: self.defaultKeyDuration.timeInterval), nonce: nil)
     }
 
     /// Helper method that will call ``Attestor/attest(key:expiration:nonce:)`` with an empty nonce.
     @inlinable
     public func attest(key: SecKey, expiration: Date) async throws -> AttestationBundle {
-        try await self.attest(key: key, expiration: expiration, nonce: nil)
+        try await self.attest(key: key, using: self.attestingKey, expiration: expiration, nonce: nil)
     }
 
     /// Returns a default ``AttestationBundle`` that can be used for testing.
@@ -72,7 +188,26 @@ extension Attestor {
     ///   - nonce: The nonce to use for testing.
     @inlinable
     public func attest(key: SecKey, nonce: Data?) async throws -> AttestationBundle {
-        try await self.attest(key: key, expiration: Date(timeIntervalSinceNow: self.defaultKeyLifetime), nonce: nonce)
+        try await self.attest(key: key, using: self.attestingKey, expiration: Date(timeIntervalSinceNow: self.defaultKeyDuration.timeInterval), nonce: nonce)
+    }
+
+    public func attest(key: SecKey, using: SecKey, expiration: Date, appData: AttestationBundle.AppData) async throws -> AttestationBundle {
+        let appDataBytes = try appData.serializedData()
+        var bundle = try await self.attest(key: key, using: using, expiration: expiration, nonce: Data(appDataBytes.digest()))
+        bundle.proto.appData = appDataBytes
+        return bundle
+    }
+
+    public func attest(key: SecKey, expiration: Date, appData: AttestationBundle.AppData) async throws -> AttestationBundle {
+        try await self.attest(key: key, using: self.attestingKey, expiration: expiration, appData: appData)
+    }
+
+    public func attest(key: SecKey, appData: AttestationBundle.AppData) async throws -> AttestationBundle {
+        try await self.attest(key: key, using: self.attestingKey, expiration: Date(timeIntervalSinceNow: self.defaultKeyDuration.timeInterval), appData: appData)
+    }
+
+    public func attest(key: SecKey, expiration: Date, nonce: Data?) async throws -> AttestationBundle {
+        try await self.attest(key: key, using: self.attestingKey, expiration: expiration, nonce: nonce)
     }
 }
 
@@ -80,10 +215,24 @@ extension Attestor {
 
 /// Validator defines a protocol that can validate ``AttestationBundle`` returned from ``Attestor``.
 public protocol Validator: Sendable {
-    associatedtype DefaultPolicy: AttestationPolicy
+    @available(*, deprecated, renamed: "Policy")
+    associatedtype DefaultPolicy: AttestationPolicy = Policy
+
+    @available(*, deprecated, renamed: "policy")
+    var defaultPolicy: DefaultPolicy { get }
+
+    @available(*, deprecated, renamed: "validate(bundle:nonce:)")
+    func validate(
+        bundle: AttestationBundle,
+        nonce: Data?,
+        policy: some AttestationPolicy
+    ) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle)
+
+    // MARK: - New API
+    associatedtype Policy: AttestationPolicy
 
     /// Computes a default ``AttestationPolicy`` assosciated with this type.
-    var defaultPolicy: DefaultPolicy { get }
+    var policy: Policy { get }
 
     /// Validates an attestation bundle with a provided policy.
     ///
@@ -99,22 +248,49 @@ public protocol Validator: Sendable {
     /// - Throws: ``CloudAttestationError`` if the attestation is invalid, or a policy rejected it.
     func validate(
         bundle: AttestationBundle,
-        nonce: Data?,
-        policy: some AttestationPolicy
+        nonce: Data?
     ) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle)
+
+    /// Convenience method for validating without a nonce
+    func validate(bundle: AttestationBundle) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle)
 }
 
+// MARK: - New API defaults
+
 extension Validator {
-    /// Default validate implementation
+
+    public var defaultPolicy: Policy {
+        policy
+    }
+
+    public func validate(bundle: AttestationBundle) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle) {
+        return try await self.validate(bundle: bundle, nonce: nil)
+    }
+
     public func validate(
         bundle: AttestationBundle,
         nonce: Data?,
         policy: some AttestationPolicy
     ) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle) {
+        try await self.validate(bundle: bundle, nonce: nonce)
+    }
+
+    public func validate(
+        bundle: AttestationBundle,
+        nonce: Data?
+    ) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle) {
+        try await defaultValidate(bundle: bundle, nonce: nonce)
+    }
+
+    /// Default validate implementation
+    func defaultValidate(
+        bundle: AttestationBundle,
+        nonce: Data?
+    ) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle) {
         let logger = Logger(subsystem: "com.apple.CloudAttestation", category: String(describing: Self.self))
         do {
             var context = AttestationPolicyContext()
-            try await policy.evaluate(bundle: bundle, context: &context)
+            try await self.policy.evaluate(bundle: bundle, context: &context)
 
             let attestation: SEP.Attestation
             if let maybeAttestation = context[SEPAttestationPolicy.validatedAttestationKey] as? SEP.Attestation {
@@ -135,70 +311,36 @@ extension Validator {
 
             logger.log("AttestationBundle passed validation for public key: \(keyData.fingerprint())")
 
+            if !bundle.proto.appData.isEmpty {
+                guard let nonce = attestation.nonce else {
+                    logger.error("Bundle AppData is non-empty, but attestation contains no nonce")
+                    throw CloudAttestationError.untrustedAppData
+                }
+                guard bundle.proto.appData.digest().elementsEqual(nonce) else {
+                    logger.error(
+                        "Bundle AppData failed integrity check: (digest:\(bundle.proto.appData.digest().hexString, privacy: .public) != nonce:\(nonce.hexString, privacy: .public)"
+                    )
+                    throw CloudAttestationError.untrustedAppData
+                }
+            }
+
             let expiration = bundle.proto.keyExpiration.date
             guard Date.now < expiration else {
                 throw CloudAttestationError.expired(expiration: expiration)
             }
             return (
                 key: keyData, expiration: expiration,
-                attestation: Validated.AttestationBundle(bundle: bundle, udid: attestation.identity?.udid, routingHint: nil)
+                attestation: Validated.AttestationBundle(
+                    bundle: bundle,
+                    udid: attestation.identity?.udid,
+                    routingHint: context.validatedRoutingHint,
+                    releaseDigest: context.releaseDigest
+                )
             )
         } catch {
             logger.error("AttestationBundle validation failed: \(error)")
             throw error
         }
-    }
-
-    /// Validates a bundle and returns a tuple of the key data, the expiration date, and the attestation bundle.
-    /// - Parameter bundle: The attestation bundle to validate.
-    @inlinable
-    public func validate(bundle: AttestationBundle) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle) {
-        try await self.validate(bundle: bundle, nonce: nil, policy: self.defaultPolicy)
-    }
-
-    /// Validates a bundle with an optional nonce and returns a tuple of the key data, the expiration date, and the attestation bundle.
-    /// - Parameters:
-    ///   - bundle: The attestation bundle to validate.
-    ///   - nonce: The nonce to validate.
-    @inlinable
-    public func validate(bundle: AttestationBundle, nonce: Data?) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle) {
-        try await self.validate(bundle: bundle, nonce: nonce, policy: self.defaultPolicy)
-    }
-
-    /// Validates a bundle with a custom attestation policy and returns a tuple of the key data, the expiration date, and the attestation bundle.
-    /// - Parameters:
-    ///   - bundle: The attestation bundle to validate.
-    ///   - policy: The policy to validate the bundle against.
-    @inlinable
-    public func validate(bundle: AttestationBundle, policy: some AttestationPolicy) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle)
-    {
-        try await self.validate(bundle: bundle, nonce: nil, policy: policy)
-    }
-
-    /// Validates a bundle with a custom policy built with ``PolicyBuilder`` and returns a tuple of the key data, the expiration date, and the attestation bundle.
-    /// - Parameters:
-    ///   - bundle: The attestation bundle to validate.
-    ///   - nonce: The nonce to validate.
-    ///   - _: The nonce to validate.
-    @inlinable
-    public func validate(
-        bundle: AttestationBundle,
-        nonce: Data?,
-        @PolicyBuilder _ builder: () -> some AttestationPolicy
-    ) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle) {
-        try await self.validate(bundle: bundle, nonce: nonce, policy: builder())
-    }
-
-    /// Validates a bundle with a custom policy built with ``PolicyBuilder`` and returns a tuple of the key data, the expiration date, and the attestation bundle.
-    /// - Parameters:
-    ///   - bundle: The attestation bundle to validate.
-    ///   - _: The nonce to validate.
-    @inlinable
-    public func validate(
-        bundle: AttestationBundle,
-        @PolicyBuilder _ builder: () -> some AttestationPolicy
-    ) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle) {
-        try await self.validate(bundle: bundle, nonce: nil, policy: builder())
     }
 }
 
@@ -295,6 +437,13 @@ public enum Validated {
             }
         }
 
+        public var appData: CloudAttestation.AttestationBundle.AppData? {
+            if bundle.proto.appData.isEmpty {
+                return nil
+            }
+            return try? .init(serializedBytes: bundle.proto.appData)
+        }
+
         /// The public key used to sign the attestation.
         public var provisioningCertificateChain: [Data] { bundle.proto.provisioningCertificateChain }
 
@@ -304,13 +453,17 @@ public enum Validated {
         /// The routing hint used to route the attestation to the correct device.
         public let routingHint: String?
 
+        /// The sha256 release digest of the bundle
+        public let releaseDigest: Data?
+
         @available(*, deprecated)
         public let ensembleUDIDs: [String]? = nil
 
-        init(bundle: CloudAttestation.AttestationBundle, udid: String?, routingHint: String?) {
+        init(bundle: CloudAttestation.AttestationBundle, udid: String?, routingHint: String?, releaseDigest: Data?) {
             self.bundle = bundle
             self._udid = udid
             self.routingHint = routingHint
+            self.releaseDigest = releaseDigest
         }
     }
 }
@@ -390,34 +543,37 @@ extension AttestationBundle {
 
 public enum CloudAttestationError: Error {
     case unexpected(reason: String)
-    @available(*, deprecated) case attestError(Error)
-    @available(*, deprecated) case validateError(Error)
+    @available(*, deprecated)
+    case attestError(any Error)
+    @available(*, deprecated)
+    case validateError(any Error)
     case invalidNonce
     case expired(expiration: Date)
+    case emptyCertificateChain
+    case malformedSecureConfig
+    case missingAttestingKey
+    case missingSealedHash(slot: UUID)
+    case untrustedAppData
 }
 
 extension CloudAttestationError: CustomNSError {
     public static var errorDomain: String = "com.apple.CloudAttestation.CloudAttestationError"
 
     public var errorCode: Int {
-        switch self {
-        case .unexpected(_): return 1
-        case .attestError(_): return 2
-        case .validateError(_): return 3
-        case .invalidNonce: return 4
-        case .expired(_): return 5
+        return switch self {
+        case .unexpected(_): 1
+        case .attestError(_): 2
+        case .validateError(_): 3
+        case .invalidNonce: 4
+        case .expired(_): 5
+        case .emptyCertificateChain: 6
+        case .malformedSecureConfig: 7
+        case .missingAttestingKey: 8
+        case .missingSealedHash(_): 9
+        case .untrustedAppData: 10
         }
     }
 }
-
-#if DEBUG
-// enforce compiler error if this is still present in release builds
-extension CloudAttestationError {
-    static var notImplemented: Self {
-        .unexpected(reason: "Not implemented")
-    }
-}
-#endif
 
 // MARK: - Transparency Auditor API
 
@@ -426,6 +582,91 @@ extension AttestationBundle {
     public var atLogProofs: Data {
         get throws {
             try self.proto.transparencyProofs.proofs.serializedData()
+        }
+    }
+}
+
+// MARK: - Helper functions
+// mutate `sealedHashes` to end with a `.ratchetLocked` flag if the actual SEP register is locked
+func synchronizeLockStates(attestation: SEP.Attestation, sealedHashes: inout [UUID: [SEP.SealedHash.Entry]]) {
+    for uuid in sealedHashes.keys {
+        if let sh = attestation.sealedHash(at: uuid), sh.flags.contains(.ratchetLocked) {
+            if let lastIndex = sealedHashes[uuid]?.indices.last {
+                sealedHashes[uuid]![lastIndex].flags.formUnion(.ratchetLocked)
+            }
+        }
+    }
+}
+
+private func populateCryptex(_ builder: inout Proto_AttestationBundle, _ entries: [SEP.SealedHash.Entry], _ slot: UUID) {
+    guard !entries.isEmpty else {
+        return
+    }
+    builder.sealedHashes.slots[slot.uuidString] = Proto_SealedHash.with { sh in
+        let hashAlg = entries.first?.algorithm.protoHashAlg ?? .unknown
+        sh.hashAlg = hashAlg
+        sh.entries = entries.map { sepEntry in
+            return Proto_SealedHash.Entry.with { entry in
+                entry.flags = Int32(sepEntry.flags.rawValue)
+                entry.digest = sepEntry.digest
+                if let metadata = sepEntry.metadata {
+                    entry.metadata = metadata
+                }
+
+                // sets .info = .cryptex(...)
+                if sepEntry.flags.contains(.ratchetLocked) && sepEntry.digest.elementsEqual(cryptexSignatureSealedHashSalt) {
+                    entry.cryptexSalt = Proto_Cryptex.Salt()
+                } else {
+                    entry.cryptex = Proto_Cryptex.with { cryptex in
+                        if let data = sepEntry.data {
+                            cryptex.image4Manifest = data
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private func populateSecureConfig(_ builder: inout Proto_AttestationBundle, _ entries: [SEP.SealedHash.Entry]) throws {
+    guard !entries.isEmpty else {
+        return
+    }
+    builder.sealedHashes.slots[secureConfigSlotUUID.uuidString] = try Proto_SealedHash.with { sh in
+        let hashAlg = entries.first?.algorithm.protoHashAlg ?? .unknown
+        sh.hashAlg = hashAlg
+        sh.entries = try entries.map { sepEntry in
+            try Proto_SealedHash.Entry.with { entry in
+                entry.flags = Int32(sepEntry.flags.rawValue)
+                entry.digest = sepEntry.digest
+                entry.secureConfig = try Proto_SecureConfig.with { sconf in
+                    if let data = sepEntry.data {
+                        guard let config = SecureConfig(from: data) else {
+                            throw CloudAttestationError.malformedSecureConfig
+                        }
+                        sconf.data = config.serializedData
+                    }
+                }
+            }
+        }
+    }
+}
+
+private func populateGenericSealedHash(_ builder: inout Proto_AttestationBundle, _ entries: [SEP.SealedHash.Entry], _ slot: UUID) {
+    guard !entries.isEmpty else {
+        return
+    }
+    builder.sealedHashes.slots[slot.uuidString] = Proto_SealedHash.with { sh in
+        let hashAlg = entries.first?.algorithm.protoHashAlg ?? .unknown
+        sh.hashAlg = hashAlg
+        sh.entries = entries.map { sepEntry in
+            Proto_SealedHash.Entry.with { entry in
+                entry.flags = Int32(sepEntry.flags.rawValue)
+                entry.digest = sepEntry.digest
+                if let data = sepEntry.data {
+                    entry.generic = data
+                }
+            }
         }
     }
 }

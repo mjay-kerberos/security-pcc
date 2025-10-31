@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -72,12 +72,12 @@ package final class OpenTelemetryPeriodicMetricReader: Sendable {
 
     private func readMetrics() {
         guard let metricProducer = (self.metricProducer.withLock { $0 }) else {
-            logger.error("No metric producer for destination \(self.destination)")
+            logger.error("No metric producer for destination. destination=\(self.destination, privacy: .public)")
             return
         }
         let store = self.store.withLock { $0 }
         guard let metricData = store?.collectAllMetrics(producer: metricProducer) else {
-            logger.error("No metric data for destination \(self.destination)")
+            logger.error("No metric data for destination. destination=\(self.destination, privacy: .public)")
             return
         }
         guard !metricData.isEmpty else {
@@ -85,7 +85,7 @@ package final class OpenTelemetryPeriodicMetricReader: Sendable {
             // If exportInterval is low, we're probably running tests and don't want to
             // completely flood our logger.
             if self.destination.publishInterval > .seconds(10) {
-                logger.log("Metric data are empty for destination \(self.destination)")
+                logger.log("Metric data are empty. destination=\(self.destination, privacy: .public)")
             }
             return
         }

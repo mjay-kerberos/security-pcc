@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -17,22 +17,19 @@
 import Foundation
 import Security
 
-public protocol CloudBoardAttestationAPIServerProtocol: CloudBoardAttestationAPIServerToClientProtocol {
+package protocol CloudBoardAttestationAPIServerProtocol: CloudBoardAttestationAPIServerToClientProtocol {
     func set(delegate: CloudBoardAttestationAPIServerDelegateProtocol) async
     func connect() async
 }
 
+/// This is two different ways of expressing the same thing, but targeted
+/// to the consumer's point of view:
+/// cloudboardd cares about the attestations rotating
+/// cb_jobhelper instances care about the keys rotating
 public protocol CloudBoardAttestationAPIServerToClientProtocol: Actor {
     func keyRotated(newKeySet: AttestedKeySet) async throws
     func attestationRotated(newAttestationSet: AttestationSet) async throws
 }
 
-public protocol CloudBoardAttestationAPIServerDelegateProtocol: AnyObject, Sendable,
+package protocol CloudBoardAttestationAPIServerDelegateProtocol: AnyObject, Sendable,
 CloudBoardAttestationAPIClientToServerProtocol {}
-
-extension CloudBoardAttestationAPIServerToClientProtocol {
-    // We provide empty default implementations for both of these functions as clients will typically only use one or
-    // the other.
-    public func keyRotated(newKeySet _: AttestedKeySet) async throws {}
-    public func attestationRotated(newAttestationSet _: AttestationSet) async throws {}
-}

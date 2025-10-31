@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -22,7 +22,6 @@ import Foundation
 // MARK: - DIAVLO Request
 /*
     Expected serialization docs can be found here:
-     
     Request V0:
     {
         "audienceProperties":
@@ -76,9 +75,9 @@ extension DiavloCertRequest {
     }
 }
 
-extension DiavloCertAudience: Encodable { }
+extension DiavloCertAudience: Codable, Equatable { }
 
-extension DiavloCertRequest: Encodable { }
+extension DiavloCertRequest: Codable { }
 
 // MARK: - DIAVLO Response
 /*
@@ -88,12 +87,12 @@ extension DiavloCertRequest: Encodable { }
     }
  */
 
-struct DiavloCertList: Decodable {
+struct DiavloCertList: Codable {
     var certificates: Array<DiavloCert>
 }
 
-struct DiavloCert : Decodable {
-    var cert : Data
+struct DiavloCert: Codable {
+    var cert: Data
 }
 
 extension DiavloCert {

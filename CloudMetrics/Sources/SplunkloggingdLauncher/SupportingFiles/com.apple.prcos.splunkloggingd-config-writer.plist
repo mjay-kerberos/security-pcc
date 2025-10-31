@@ -1,4 +1,4 @@
-<!-- Copyright © 2024 Apple Inc. All Rights Reserved. -->
+<!-- Copyright © 2025 Apple Inc. All Rights Reserved. -->
 
 <!-- APPLE INC. -->
 <!-- PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT -->
@@ -24,6 +24,7 @@
 	<array>
 		<string>/usr/libexec/SplunkloggingdConfigWriter</string>
 		<string>/var/db/prcos/splunkloggingd/config-main.plist</string>
+		<string>/var/db/prcos/splunkloggingd/config-prism.plist</string>
 	</array>
 </dict>
 </plist>

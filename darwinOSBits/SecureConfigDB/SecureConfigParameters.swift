@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -71,6 +71,7 @@ public class SecureConfigParameters: NSObject, Codable {
 		case crashRedactionEnabled = "com.apple.logging.crashRedactionEnabled"
 		case internalRequestOptionsAllowed = "com.apple.tie.internalRequestOptionsAllowed"
 		case tie_allowNonProdExceptionOptions = "com.apple.tie.allowNonProdExceptionOptions"
+		case cloudboard_isProxy = "com.apple.cloudboard.isProxy"
 
 		//Research keys
 		case research_disableAppleInfrastrucutureEnforcement = "com.apple.pcc.research.disableAppleInfrastrucutureEnforcement"
@@ -102,6 +103,9 @@ public class SecureConfigParameters: NSObject, Codable {
 
 	/// Parameter for ``Keys.tie_allowNonProdExceptionOptions`` key.
 	public let tie_allowNonProdExceptionOptions: Bool?
+
+	/// Parameter for ``Keys.cloudboard_isProxy`` key.
+	public let cloudboard_isProxy: Bool?
 
 	/// Parameter for ``Keys.research_disableAppleInfrastrucutureEnforcement`` key.
 	public let research_disableAppleInfrastrucutureEnforcement: Bool?
@@ -174,6 +178,7 @@ public class SecureConfigParameters: NSObject, Codable {
 		self.crashRedactionEnabled = try parameters.get(Keys.crashRedactionEnabled.rawValue)
 		self.internalRequestOptionsAllowed = try parameters.get(Keys.internalRequestOptionsAllowed.rawValue)
 		self.tie_allowNonProdExceptionOptions = try parameters.get(Keys.tie_allowNonProdExceptionOptions.rawValue)
+		self.cloudboard_isProxy = try parameters.get(Keys.cloudboard_isProxy.rawValue)
 
 		self.research_disableAppleInfrastrucutureEnforcement = try parameters.get(Keys.research_disableAppleInfrastrucutureEnforcement.rawValue)
 	}
@@ -211,6 +216,8 @@ public enum SecureConfigSecurityPolicy: Int, Codable, CaseIterable {
 	case none = 0
 	/// Parameters must be validated to ensure secure and private handling of **customer** data.
 	case customer
+	/// Parameters must be validated to ensure secure and private handling of **customerProxy** data.
+	case customerProxy
 	/// Parameters must be validated to ensure secure and private handling of **internal carry / live-on** data.
 	case carry
 
@@ -226,6 +233,7 @@ public enum SecureConfigSecurityPolicy: Int, Codable, CaseIterable {
 		switch self {
 		case .none: return nil
 		case .customer: return "customer"
+		case .customerProxy: return "customerProxy"
 		case .carry: return "carry"
 		}
 	}

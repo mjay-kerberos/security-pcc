@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -24,15 +24,22 @@ enum GRPCTransformableError: GRPCStatusTransformable {
     case maxConcurrentRequestsExceeded
     case maxCumulativeRequestBytesExceeded
     case workloadUnhealthy
+    case workloadBusy(String?)
     case invalidAEAD
     case ohttpDecapsulationFailure
     case ohttpEncapsulationFailure
     case unknownKeyID
     case expiredKey
     case idleTimeoutExceeded
-    case protocolError
+    case protocolError(Error)
     case abortedCleanly
     case connectionCancelled
+    // Errors related to bypass which are specifically related to the inbound message from ROPES
+    // any internal errors related to bypass are not separated out here
+    case requestBypassEnforced
+    case providedBypassSettingsToProxy
+    case bypassVersionInvalid(value: Int)
+    case providedRequestWhenBypassExpected
 
     func makeGRPCStatus() -> GRPCStatus {
         switch self {
@@ -44,6 +51,8 @@ enum GRPCTransformableError: GRPCStatusTransformable {
             return .init(code: .resourceExhausted, message: "Max cumulative request size exceeded")
         case .workloadUnhealthy:
             return .init(code: .unavailable, message: "Workload is unhealthy")
+        case .workloadBusy(let reason):
+            return .init(code: .unavailable, message: "Workload is busy\(reason.map { ": \($0)" } ?? "")")
         case .invalidAEAD:
             return .init(code: .internalError, message: "CloudBoard error: Invalid AEAD")
         case .ohttpDecapsulationFailure:
@@ -62,6 +71,18 @@ enum GRPCTransformableError: GRPCStatusTransformable {
             return .init(code: .cancelled, message: "RPC cleanly aborted by ROPES, no error")
         case .connectionCancelled:
             return .init(code: .cancelled, message: "Connection cancelled")
+        case .requestBypassEnforced:
+            return .init(code: .failedPrecondition, message: "request bypassed is expected but not set")
+        case .providedBypassSettingsToProxy:
+            return .init(
+                // technically ROPES specified an invalid argument not the client
+                code: .invalidArgument,
+                message: "request to perform response bypass sent to proxy"
+            )
+        case .bypassVersionInvalid:
+            return .init(code: .unimplemented, message: "response bypass version indicated not supported")
+        case .providedRequestWhenBypassExpected:
+            return .init(code: .failedPrecondition, message: "provided request chunk when request bypass configured")
         }
     }
 }
@@ -77,6 +98,8 @@ extension GRPCTransformableError: ReportableError {
             "GRPCTransformableError.maxCumulativeRequestBytesExceeded"
         case .workloadUnhealthy:
             "GRPCTransformableError.workloadUnhealthy"
+        case .workloadBusy(let reason):
+            "GRPCTransformableError.workloadBusy\(reason.map { "(\($0))" } ?? "")"
         case .invalidAEAD:
             "GRPCTransformableError.invalidAEAD"
         case .ohttpDecapsulationFailure:
@@ -89,12 +112,20 @@ extension GRPCTransformableError: ReportableError {
             "GRPCTransformableError.expiredKey"
         case .idleTimeoutExceeded:
             "GRPCTransformableError.idleTimeoutExceeded"
-        case .protocolError:
-            "GRPCTransformableError.protocolError"
+        case .protocolError(let error):
+            "GRPCTransformableError.protocolError(\(String(reportable: error)))"
         case .abortedCleanly:
             "GRPCTransformableError.abortedCleanly"
         case .connectionCancelled:
             "GRPCTransformableError.connectionCancelled"
+        case .requestBypassEnforced:
+            "GRPCTransformableError.requestBypassEnforced"
+        case .providedBypassSettingsToProxy:
+            "GRPCTransformableError.providedBypassSettingsToProxy"
+        case .bypassVersionInvalid:
+            "GRPCTransformableError.bypassVersionInvalid"
+        case .providedRequestWhenBypassExpected:
+            "GRPCTransformableError.providedRequestWhenBypassExpected"
         }
     }
 }
@@ -135,13 +166,15 @@ extension GRPCTransformableError {
              .receivedChunkBeforeParameters,
              .receivedChunkAfterFinal,
              .receivedChunkAfterTermination,
+             .receivedChunkUnderRequestBypass,
              .receivedDuplicateFinalChunk,
              .receivedSetupAfterTermination,
              .receivedParametersAfterTermination,
              .receivedFinalChunkAfterTermination,
              .receivedDuplicateTermination,
-             .receivedTerminationBeforeSetup:
-            self = .protocolError
+             .receivedTerminationBeforeSetup,
+             .receivedRequestBypassNotification:
+            self = .protocolError(invokeWorkloadError)
         case .rpcAborted:
             self = .abortedCleanly
         case .unexpectedEndOfStream:
@@ -153,12 +186,41 @@ extension GRPCTransformableError {
 extension SessionError: GRPCStatusTransformable {
     func makeGRPCStatus() -> GRPCStatus {
         switch self {
+        case .invalidKeyMaterial:
+            return .init(
+                code: .invalidArgument,
+                message: "Rejected because the key material did not match the specifications"
+            )
         case .sessionReplayed:
             return .init(code: .permissionDenied, message: "Rejected because of suspected replay attack")
         case .unknownKeyID:
             return .init(
                 code: .invalidArgument,
                 message: "Rejected because the node/key ID is unknown or the corresponding key has expired"
+            )
+        case .keyIDBlocked:
+            return .init(
+                code: .permissionDenied,
+                message: "Rejected because the anti replay storage could not be loaded"
+            )
+        }
+    }
+}
+
+extension AttestationError: GRPCStatusTransformable {
+    public func makeGRPCStatus() -> GRPCStatus {
+        switch self {
+        case .attestationExpired:
+            return .init(code: .unavailable, message: "CloudBoard error: Attestation expired")
+        case .unavailableWithinTimeout:
+            return .init(
+                code: .unavailable,
+                message: "CloudBoard error: Attestation information unavailable to serve request"
+            )
+        case .unknownOrExpiredKeyID(let keyID):
+            return .init(
+                code: .unavailable,
+                message: "CloudBoard error: Key \(keyID.base64EncodedString()) is unknown or expired"
             )
         }
     }

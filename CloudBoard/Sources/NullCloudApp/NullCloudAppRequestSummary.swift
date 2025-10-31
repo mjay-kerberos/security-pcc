@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,12 +14,17 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
+import CloudBoardCommon
 import CloudBoardJob
 import CloudBoardLogging
 import os
 
 internal struct NullAppRequestSummary: RequestSummary {
     var startTimeNanos: Int64?
+
+    var parentSpanID: String
+
+    var spanID: String
 
     var endTimeNanos: Int64?
 
@@ -36,21 +41,21 @@ internal struct NullAppRequestSummary: RequestSummary {
         self.nullServiceName.rawValue
     }
 
-    let namespace: String = "NullCloudApp"
+    var namespace: String
     var error: Error?
-
-    // MARK: NullCloudApp-specific fields
-
     var requestMetadata: CloudAppEnvironment.PlaintextMetadata
     var timeToCloudAppInvoke: ContinuousClock.Duration?
     var timeToReceiveParameters: ContinuousClock.Duration?
 
-    public init(app: NullAppServiceName, from environment: CloudAppEnvironment) {
+    public init(app: NullAppServiceName, from environment: CloudAppEnvironment, spanID: String) {
         self.nullServiceName = app
         self.requestMetadata = environment.plaintextMetadata
         self.timeToReceiveParameters = environment.metrics.timeToReceiveParameters
         self.timeToCloudAppInvoke = environment.metrics.timeToCloudAppInvoke
         self.automatedDeviceGroup = environment.plaintextMetadata.automatedDeviceGroup
+        self.parentSpanID = environment.traceContext.spanID
+        self.spanID = spanID
+        self.namespace = (app == NullAppServiceName.proxyApp ? "NullProxyApp" : "NullCloudApp")
     }
 
     public func log(to logger: Logger) {
@@ -62,6 +67,8 @@ internal struct NullAppRequestSummary: RequestSummary {
         tracing.name=\(self.operationName, privacy: .public)
         tracing.type=\(self.type, privacy: .public)
         tracing.trace_id=\(self.requestID?.replacingOccurrences(of: "-", with: "").lowercased() ?? "", privacy: .public)
+        tracing.span_id=\(self.spanID, privacy: .public)
+        tracing.parent_span_id=\(self.parentSpanID, privacy: .public)
         tracing.start_time_unix_nano=\(self.startTimeNanos ?? 0, privacy: .public)
         tracing.end_time_unix_nano=\(self.endTimeNanos ?? 0, privacy: .public)
         request.duration_ms=\(self.durationMicros.map { String($0 / 1000) } ?? "", privacy: .public)

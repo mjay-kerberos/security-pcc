@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -42,8 +42,6 @@ extension CLI.ReleaseCmd {
         var skipVerifier: Bool = false
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
-
             // assetHelper tracks downloaded assets and metadata (json) info
             var assetHelper: AssetHelper
             do {
@@ -66,8 +64,7 @@ extension CLI.ReleaseCmd {
 
                 var swlog = try await SWReleases(
                     environment: logEnvironment,
-                    altKtInitEndpoint: swlogOptions.ktInitEndpoint,
-                    tlsInsecure: swlogOptions.tlsInsecure
+                    altKtInitEndpoint: swlogOptions.ktInitEndpoint
                 )
 
                 try await swlog.fetchReleases(

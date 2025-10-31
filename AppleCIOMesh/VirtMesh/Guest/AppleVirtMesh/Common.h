@@ -1,0 +1,277 @@
+// Copyright © 2025 Apple Inc. All Rights Reserved.
+
+// APPLE INC.
+// PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
+// PLEASE READ THE FOLLOWING PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT (“AGREEMENT”) CAREFULLY BEFORE DOWNLOADING OR USING THE APPLE SOFTWARE ACCOMPANYING THIS AGREEMENT(AS DEFINED BELOW). BY DOWNLOADING OR USING THE APPLE SOFTWARE, YOU ARE AGREEING TO BE BOUND BY THE TERMS OF THIS AGREEMENT. IF YOU DO NOT AGREE TO THE TERMS OF THIS AGREEMENT, DO NOT DOWNLOAD OR USE THE APPLE SOFTWARE. THESE TERMS AND CONDITIONS CONSTITUTE A LEGAL AGREEMENT BETWEEN YOU AND APPLE.
+// IMPORTANT NOTE: BY DOWNLOADING OR USING THE APPLE SOFTWARE, YOU ARE AGREEING ON YOUR OWN BEHALF AND/OR ON BEHALF OF YOUR COMPANY OR ORGANIZATION TO THE TERMS OF THIS AGREEMENT.
+// 1. As used in this Agreement, the term “Apple Software” collectively means and includes all of the Apple Private Cloud Compute materials provided by Apple here, including but not limited to the Apple Private Cloud Compute software, tools, data, files, frameworks, libraries, documentation, logs and other Apple-created materials. In consideration for your agreement to abide by the following terms, conditioned upon your compliance with these terms and subject to these terms, Apple grants you, for a period of ninety (90) days from the date you download the Apple Software, a limited, non-exclusive, non-sublicensable license under Apple’s copyrights in the Apple Software to download, install, compile and run the Apple Software internally within your organization only on a single Apple-branded computer you own or control, for the sole purpose of verifying the security and privacy characteristics of Apple Private Cloud Compute. This Agreement does not allow the Apple Software to exist on more than one Apple-branded computer at a time, and you may not distribute or make the Apple Software available over a network where it could be used by multiple devices at the same time. You may not, directly or indirectly, redistribute the Apple Software or any portions thereof. The Apple Software is only licensed and intended for use as expressly stated above and may not be used for other purposes or in other contexts without Apple's prior written permission. Except as expressly stated in this notice, no other rights or licenses, express or implied, are granted by Apple herein.
+// 2. The Apple Software is provided by Apple on an "AS IS" basis. APPLE MAKES NO WARRANTIES, EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION THE IMPLIED WARRANTIES OF NON-INFRINGEMENT, MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE, REGARDING THE APPLE SOFTWARE OR ITS USE AND OPERATION ALONE OR IN COMBINATION WITH YOUR PRODUCTS, SYSTEMS, OR SERVICES. APPLE DOES NOT WARRANT THAT THE APPLE SOFTWARE WILL MEET YOUR REQUIREMENTS, THAT THE OPERATION OF THE APPLE SOFTWARE WILL BE UNINTERRUPTED OR ERROR-FREE, THAT DEFECTS IN THE APPLE SOFTWARE WILL BE CORRECTED, OR THAT THE APPLE SOFTWARE WILL BE COMPATIBLE WITH FUTURE APPLE PRODUCTS, SOFTWARE OR SERVICES. NO ORAL OR WRITTEN INFORMATION OR ADVICE GIVEN BY APPLE OR AN APPLE AUTHORIZED REPRESENTATIVE WILL CREATE A WARRANTY.
+// 3. IN NO EVENT SHALL APPLE BE LIABLE FOR ANY DIRECT, SPECIAL, INDIRECT, INCIDENTAL OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) ARISING IN ANY WAY OUT OF THE USE, REPRODUCTION, COMPILATION OR OPERATION OF THE APPLE SOFTWARE, HOWEVER CAUSED AND WHETHER UNDER THEORY OF CONTRACT, TORT (INCLUDING NEGLIGENCE), STRICT LIABILITY OR OTHERWISE, EVEN IF APPLE HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// 4. This Agreement is effective until terminated. Your rights under this Agreement will terminate automatically without notice from Apple if you fail to comply with any term(s) of this Agreement. Upon termination, you agree to cease all use of the Apple Software and destroy all copies, full or partial, of the Apple Software. This Agreement constitutes the entire understanding of the parties with respect to the subject matter contained herein, and supersedes all prior negotiations, representations, or understandings, written or oral. This Agreement will be governed and construed in accordance with the laws of the State of California, without regard to its choice of law rules.
+// You may report security issues about Apple products to product-security@apple.com, as described here: https://www.apple.com/support/security/. Non-security bugs and enhancement requests can be made via https://bugreport.apple.com as described here: https://developer.apple.com/bug-reporting/
+// EA1937
+// 10/02/2024
+
+//
+//  Common.h
+//  AppleVirtMesh
+//
+//  Created by Zixuan Wang on 11/19/24.
+//
+
+#pragma once
+
+#include "VirtMesh/Guest/AppleVirtMeshIOBridge/Interfaces.h"
+#include <IOKit/IOUserClient.h>
+
+/**
+ * @brief Roundup A by B
+ */
+constexpr uint64_t
+round_up(uint64_t A, uint64_t B)
+{
+	if ((0 == B) || (0 == (A % B)))
+		return A;
+
+	return (A + B) - (A % B);
+}
+
+namespace VirtMesh::Guest
+{
+/**
+ * @brief RAII lock guard that performs IOLockLock() and IOLockUnlock()
+ */
+class IOLockGuard
+{
+  public:
+	IOLockGuard(IOLock * lock) : _lock(lock)
+	{
+		assert(_lock);
+		IOLockLock(_lock);
+	}
+
+	~IOLockGuard()
+	{
+		assert(_lock);
+		IOLockUnlock(_lock);
+	}
+
+	/* Prevent copying */
+	IOLockGuard(const IOLockGuard &)             = delete;
+	IOLockGuard & operator=(const IOLockGuard &) = delete;
+
+  private:
+	IOLock * _lock;
+};
+
+template <typename T> class AutoMalloc
+{
+  public:
+	explicit AutoMalloc(uint64_t count, T default_value) : _ptr(static_cast<T *>(IOMalloc(count * sizeof(T)))), _count(count)
+	{
+		assertf(nullptr != _ptr, "Failed to allocate pointer with [%llu] elements of size [%lu]", count, sizeof(T));
+		for (uint64_t i = 0; i < count; i++) {
+			_ptr[i] = default_value;
+		}
+	}
+
+	~AutoMalloc()
+	{
+		if (nullptr != _ptr) {
+			IOFree(_ptr, _count * sizeof(T));
+			_ptr = nullptr;
+		}
+	}
+
+	AutoMalloc()                               = delete;
+	AutoMalloc(const AutoMalloc &)             = delete;
+	AutoMalloc & operator=(const AutoMalloc &) = delete;
+
+	T *
+	get()
+	{
+		return _ptr;
+	}
+
+	uint64_t
+	count() const
+	{
+		return _count;
+	}
+
+  private:
+	T *      _ptr = nullptr;
+	uint64_t _count;
+};
+
+template <typename ObjType, typename Func>
+void
+for_each(OSSharedPtr<OSArray> array, Func && func)
+{
+	for (unsigned i = 0; i < array->getCount(); i++) {
+		auto obj = static_cast<ObjType *>(array->getObject(i));
+		func(i, obj);
+	}
+}
+
+template <typename ObjType, typename Func>
+void
+atomic_for_each(IOLock * lock, OSSharedPtr<OSArray> array, Func && func)
+{
+	auto guard = IOLockGuard(lock);
+	for_each<ObjType>(array, func);
+}
+
+template <typename ObjType>
+ObjType *
+get_obj_or_panic(OSSharedPtr<OSArray> array, unsigned int index)
+{
+	auto obj = array->getObject(index);
+
+	/* Checking the nullptr seems safer vs checking the array count before getObject(). Because if the array is not locked, other
+	 * code may change the array (e.g., removing an object) between the count check and getObject() thus we still get nullptr here.
+	 * The current code seems safer although it does not guarantee atomicity either.
+	 */
+	if (nullptr == obj) {
+		panic("Array index [%u] out of range [%u]", index, array->getCount());
+	}
+
+	return static_cast<ObjType *>(obj);
+}
+
+namespace UserClient
+{
+struct UserNotify {
+	bool               ref_valid;
+	OSAsyncReference64 ref;
+	/* TODO: make the lock private and provide a Lock()/Unlock() member func to this struct. */
+	IOLock * lock;
+
+	UserNotify()
+	{
+		lock = IOLockAlloc();
+		assert(lock);
+	}
+
+	~UserNotify()
+	{
+		/* IOLockFree() assumes the caller to check if lock is nullptr. */
+		if (lock) {
+			IOLockFree(lock);
+		}
+	}
+};
+
+/**
+ * @brief Helper code from AppleCIOMesh
+ *
+ * @ref AppleCIOMesh/Kext/UserClientHelpers.h
+ */
+
+// These are only to be used with fixed structure inputs/outputs,
+// they do not validate any size, instead relying on the built-in
+// checks performed on IOExternalMethodDispatch
+template <typename T> class EMAOutputExtractor
+{
+  public:
+	EMAOutputExtractor(IOExternalMethodArguments * ema) : _t(nullptr)
+	{
+		assert(ema);
+
+		if (ema->structureOutputDescriptor) {
+			_t = reinterpret_cast<T *>(ema->structureOutputDescriptor->map()->getVirtualAddress());
+		} else if (ema->structureOutput) {
+			_t = reinterpret_cast<T *>(ema->structureOutput);
+		}
+	}
+
+	T *
+	operator->()
+	{
+		return _t;
+	}
+
+	T *
+	get()
+	{
+		return _t;
+	}
+
+	T * _t;
+};
+
+template <typename T> class EMAInputExtractor
+{
+  public:
+	EMAInputExtractor(IOExternalMethodArguments * ema) : _t(nullptr)
+	{
+		assert(ema);
+
+		if (ema->structureInputDescriptor) {
+			_t = reinterpret_cast<T *>(ema->structureInputDescriptor->map()->getVirtualAddress());
+		} else if (ema->structureInput) {
+			_t = reinterpret_cast<const T *>(ema->structureInput);
+		}
+	}
+
+	const T *
+	operator->()
+	{
+		return _t;
+	}
+
+	const T *
+	get()
+	{
+		return _t;
+	}
+
+	const T * _t;
+};
+
+/**
+ * @brief Copy one object into the buffer
+ *
+ * @note This function changes the passed in `buffer` and `remaining_size`.
+ */
+template <typename T>
+inline bool
+fold_one(uint8_t *& buffer, uint64_t & remaining_size, const T & obj)
+{
+	if (sizeof(T) > remaining_size) {
+		/* Not enough space to copy */
+		return false;
+	}
+
+	memcpy(buffer, reinterpret_cast<const char *>(&obj), sizeof(T));
+	buffer += sizeof(T);
+	remaining_size -= sizeof(T);
+
+	return true;
+}
+
+/**
+ * @brief Copy arbitrary number of data objects into the buffer. Relying on template parameter packs with C++17 fold expression to
+ *        copy objects into buffer.
+ */
+template <typename... Args>
+bool
+fold_all(uint8_t * buffer, uint64_t buffer_size, const Args &... args)
+{
+	uint8_t * current        = buffer;
+	uint64_t  remaining_size = buffer_size;
+
+	/* Short-circuit AND, if any `fold_one` fails, the entire result is false. */
+	return (fold_one(current, remaining_size, args) && ...);
+}
+
+template <typename... Ts>
+constexpr uint64_t
+fold_size(size_t round_up_unit)
+{
+	uint64_t total = (sizeof(Ts) + ...);
+	return round_up(total, round_up_unit);
+}
+
+}; // namespace UserClient
+}; // namespace VirtMesh::Guest

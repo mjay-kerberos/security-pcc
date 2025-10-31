@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -12,55 +12,255 @@
 // EA1937
 // 10/02/2024
 
-//  Copyright © 2024 Apple, Inc. All rights reserved.
+//  Copyright © 2024-2025 Apple, Inc. All rights reserved.
 //
 
 import Foundation
 
 // DarwinInit.Cryptex provides a structured definition of a cryptex entry of a darwin-init config
 
+struct Cryptex {
+    let variant: String
+    let url: String
+}
+
+extension Cryptex: Decodable {
+}
+
 extension DarwinInitHelper {
-    struct Cryptex: CustomStringConvertible {
-        private var cryptex: [String: Any]
-        var url: String {
-            get { cryptex["url"] as? String ?? "" }
-            set(newValue) { cryptex["url"] = newValue != "" ? newValue : nil }
+    func cryptexes() throws -> [Cryptex] {
+        try read {
+            try $0.listCryptexes()
+        } v1Fallback: {
+            $0.cryptexes
+        }
+    }
+
+    /// lookupCryptex returns cryptex entry matching variant (nil if not found)
+    func lookupCryptex(variant: String) throws -> Cryptex? {
+        try cryptexes().first { $0.variant == variant }
+    }
+
+    /// addCryptex replaces existing (with matching variant) or otherwise introduces new cryptex entry
+    mutating func addCryptex(_ new: Cryptex) throws {
+        try modify {
+            try $0.addCryptex(new)
+        } v1Fallback: {
+            $0.addCryptex(new)
+        }
+    }
+
+    /// removeCryptex deletes existing cryptex entry with matching variant; returns true if updated
+    @discardableResult
+    mutating func removeCryptex(variant: String) throws -> Bool {
+        let before = try lookupCryptex(variant: variant) != nil
+        try modify {
+            try $0.removeCryptex(variant: variant)
+        } v1Fallback: {
+            $0.removeCryptex(variant: variant)
+        }
+        let after = try lookupCryptex(variant: variant) != nil
+        return before != after
+    }
+
+    // updateLocalURLs updates cryptex locations (url) with httpServer endpoint (bindAddr/bindPort) --
+    //  only entries that are not already in URL form are updated. Returns true if any changes applied,
+    //  otherwise false.
+    //
+    // Example:
+    //      "cryptex": [
+    //          {
+    //              "url": "PlatinumLining3A501_PrivateCloud_Support.aar",
+    //              "variant": "PrivateCloud Support"
+    //          }, ...
+    //       ]
+    //   is updated to:
+    //      "cryptex": [
+    //          {
+    //              "url": "http://192.168.64.1:53423/PlatinumLining3A501_PrivateCloud_Support.tar.gz",
+    //              "variant": "PrivateCloud Support"
+    //          }, ...
+    //       ]
+    //   (where httpServer.bindAddr == 192.168.64.1 / .bindPort == 53423)
+    //
+    @discardableResult
+    mutating func updateLocalCryptexURLs(httpServer: HTTPServer) throws -> Bool {
+        var updated = false
+
+        for cryptex in try cryptexes() {
+            if let qurl = httpServer.makeURL(path: cryptex.url),
+               qurl.absoluteString != cryptex.url
+            {
+                let newcryptex = Cryptex(variant: cryptex.variant, url: qurl.absoluteString)
+                try addCryptex(newcryptex)
+                updated = true
+                DarwinInitHelper.logger.log("update cryptex: \(cryptex.url, privacy: .public) -> \(newcryptex.url, privacy: .public)")
+            }
         }
 
-        var variant: String {
-            get { cryptex["variant"] as? String ?? "" }
-            set(newValue) { cryptex["variant"] = newValue != "" ? newValue : nil }
-        }
+        return updated
+    }
 
-        var description: String { "\(variant): \(url)" }
+    //  populateReleaseCryptexes fills in cryptex entries of darwinInit from releaseAssets provided.
+    //  Cryptex entries in darwinInit whose -variant- name matches AssetType (ASSET_TYPE_XX) in
+    //  releaseMeta are substituted in.
+    //
+    //  The path location inserted is just the last component (base filename) which will later be
+    //  qualified to reference the local HTTP service when the VRE is started.
+    //
+    //  Example:
+    //    darwin-init contains the following stanza:
+    //      "cryptex": [
+    //          {
+    //            "variant": "ASSET_TYPE_PCS",
+    //            "url": "/"
+    //          },
+    //          {
+    //            "variant": "ASSET_TYPE_MODEL",
+    //            "url": "/"
+    //          },
+    //          ...
+    //      ]
+    //
+    //   Assets associated with ASSET_TYPE_PCS and ASSET_TYPE_MODEL in the metadata will be filled
+    //   into the corresponding entry (variant and url), as well as link/copied into the instance
+    //   folder alongside the final darwin-init.json file.
+    //
+    mutating func populateReleaseCryptexes(
+        assets: [CryptexSpec]
+    ) throws {
+        // As we are populating cryptexes, the variant changes. We need to preserve the order and don't have a way to
+        // update a cryptex while changing the variant. So we remove all cryptexes, building up the populated list, and
+        // then re-add them.
+        var populatedCryptexes = [Cryptex]()
+        while let cryptex = try cryptexes().first {
+            try removeCryptex(variant: cryptex.variant)
 
-        subscript() -> [String: Any] { cryptex } // return key/values
-        subscript(_ key: String) -> Any { // return specific key
-            get { return cryptex[key] ?? "" }
-            set { cryptex[key] = newValue }
-        }
-
-        init?(_ cryptex: [String: Any]) {
-            guard cryptex["url"] as? String != nil else {
-                return nil
+            guard let asset = findAsset(label: cryptex.variant, assets: assets) else {
+                populatedCryptexes.append(cryptex)
+                continue
             }
 
-            self.cryptex = cryptex
+            let assetVariant = asset.variant
+            guard let assetBasename = asset.path.lastComponent?.string else {
+                throw DarwinInitHelperError("derive basename from asset path: \(asset.path)")
+            }
+
+            populatedCryptexes.append(Cryptex(
+                variant: assetVariant,
+                url: assetBasename
+            ))
+        }
+        for cryptex in populatedCryptexes {
+            try addCryptex(cryptex)
+        }
+    }
+
+    func findAsset(label: String, assets: [CryptexSpec]) -> CryptexSpec? {
+        guard let _ = SWReleaseMetadata.AssetType(label: label) else {
+            return nil
+        }
+        let assetsOfType = assets.filter { $0.assetType == label }
+        guard assetsOfType.count == 1 else {
+            if assetsOfType.count == 0 {
+                AssetHelper.logger.error("'\(label, privacy: .public)' from darwin-init in release assets not found")
+            } else {
+                AssetHelper.logger.error("count of \(label, privacy: .public) in darwin-init != 1 (\(assetsOfType.count, privacy: .public))")
+            }
+            return nil
+        }
+        return assetsOfType[0]
+    }
+}
+
+extension Cryptex {
+    init(json: DarwinInitConfigV1.JSONDict) throws {
+        guard
+            let variant = json["variant"] as? String,
+            let url = json["url"] as? String
+        else {
+            throw DarwinInitHelperError("Cryptex dictionary is missing variant or url: \(json)")
+        }
+        self.init(variant: variant, url: url)
+    }
+
+    var json: DarwinInitConfigV1.JSONDict {
+        [
+            "variant": variant,
+            "url": url
+        ]
+    }
+}
+
+extension DarwinInitConfigV1 {
+    // retrieve and store ["cryptex"] block as [DarwinInit.Cryptex]
+    var cryptexes: [Cryptex] {
+        get {
+            var _cryptexes: [Cryptex] = []
+            if let cryptexArray = getSection(Section.cryptex) as? [JSONDict] {
+                for c in cryptexArray {
+                    guard let cryptex = try? Cryptex(json: c) else {
+                        continue
+                    }
+
+                    _cryptexes.append(cryptex)
+                }
+            }
+
+            return _cryptexes
         }
 
-        init(
-            url: String,
-            variant: String? = nil
-        ) {
-            self.cryptex = ["url": url]
-            if let variant {
-                cryptex["variant"] = variant
+        set(newValue) {
+            var _new: [JSONDict] = []
+            for c in newValue {
+                _new.append(c.json)
+            }
+
+            setSection(Section.cryptex, value: _new)
+        }
+    }
+
+    // addCryptex replaces existing (with matching variant) or otherwise introduces new cryptex entry
+    mutating func addCryptex(_ new: Cryptex) {
+        // preserve the order of cryptexes if replacing
+        var replaced = false
+        let updatedCryptexes = cryptexes.map {
+            if $0.variant == new.variant {
+                replaced = true
+                return new
+            } else {
+                return $0
             }
         }
-
-        func asDictionary() -> [String: Any] {
-            // subscript() can't be coerced to underlying type
-            return cryptex
+        if replaced {
+            cryptexes = updatedCryptexes
+            DarwinInitHelper.logger.log("replaced cryptex '\(new.variant, privacy: .public)' (\(new.url, privacy: .public))")
+        } else {
+            cryptexes.append(new)
+            DarwinInitHelper.logger.log("added cryptex '\(new.variant, privacy: .public)' (\(new.url, privacy: .public))")
         }
+    }
+
+    // removeCryptex deletes existing cryptex entry with matching variant; returns true if updated
+    @discardableResult
+    mutating func removeCryptex(variant: String) -> Bool {
+        var updated = false
+        var loaded = cryptexes
+
+        loaded = loaded.filter {
+            if $0.variant == variant {
+                updated = true
+                return false
+            }
+
+            return true
+        }
+
+        if updated {
+            cryptexes = loaded
+            DarwinInitHelper.logger.log("removed cryptex variant '\(variant, privacy: .public)'")
+        }
+
+        return updated
     }
 }

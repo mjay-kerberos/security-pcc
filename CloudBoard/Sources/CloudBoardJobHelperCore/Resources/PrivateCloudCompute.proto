@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -48,7 +48,14 @@ message PrivateCloudComputeResponse {
     // if agreed to by client (see PostResponseActions).
     bytes response_uuid = 1;
     bytes response_payload = 2;
+    // Always sent last (guaranteed to come after the final REL entry). The client
+    // can safely close the connection for the sub-stream to the proxy once it has
+    // received this message.
     ResponseSummary response_summary = 3;
+    // Individual Request Execution Log entry. The Request Execution Log contains
+    // all nodes a proxy has transitively attested and re-wrapped the client-
+    // provided DEK to.
+    RequestExecutionLogEntry request_execution_log_entry = 4;
   }
 
   message ResponseSummary {
@@ -71,6 +78,33 @@ message PrivateCloudComputeResponse {
     UNAUTHENTICATED = 1;
     INTERNAL_ERROR = 2;
     INVALID_REQUEST = 3;
+    PROXY_FIND_WORKER_ERROR = 4;
+    PROXY_WORKER_VALIDATION_ERROR = 5;
   }
 }
 
+// Contains the attestation bundle of a compute node the proxy node has
+// transitively attested and re-wrapped the client-provided DEK to
+message RequestExecutionLogEntry {
+  // Attestation bundle. Optional as the decision whether to attest to additional
+  // nodes might be made after the final time the proxy re-wraps the DEK.
+  optional bytes attestation = 1;
+  // Used in case the response payload is not streamed back by the proxy node itself. This provides the necessary
+  // context for the client to establish a receive-only AEAD context to receive and decrypt the response payload stream.
+  optional ResponseContext response_context = 2;
+  // Indicates whether this is the final entry of the request execution log,
+  // indicating that the proxy will not make any further outbound requests/re-wrap
+  // the DEK for any other nodes
+  bool final = 3;
+}
+
+message ResponseContext {
+  // Context ID of the response payload message stream
+  uint32 context_id = 1;
+  // AEAD algorithm identifier (16-bit identifier sent as uint32 since protobuf does not have a uint16 type)
+  uint32 aead_id = 2;
+  // AEAD key
+  bytes aead_key = 3;
+  // AEAD nonce
+  bytes aead_nonce = 4;
+}

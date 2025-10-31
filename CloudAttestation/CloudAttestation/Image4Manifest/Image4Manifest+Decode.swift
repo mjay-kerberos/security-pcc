@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -19,7 +19,7 @@
 //  Copyright © 2024 Apple Inc. All rights reserved.
 //
 
-import SwiftASN1
+import SwiftASN1Internal
 
 /// Image4Manifest Decoder using SwiftASN1. Gated behind SPI to discourage use over AppleImage4.
 extension Image4Manifest {

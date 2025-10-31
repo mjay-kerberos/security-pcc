@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -38,6 +38,12 @@ public struct SecureConfig: Sendable {
         self.metadata["name"]
     }
 
+    public var rawMetadata: Data {
+        // serializedData already validated during initialization
+        let splits = serializedData.split(separator: "\n".first!.asciiValue!, maxSplits: 2)
+        return splits[0]
+    }
+
     /// Creates a new `SecureConfig` from a serialized string.
     /// - Parameter serialized: The serialized string.
     /// - Returns nil if the string is not a valid ``SecureConfig``
@@ -51,18 +57,30 @@ public struct SecureConfig: Sendable {
         guard let metadata = try? decoder.decode([String: String].self, from: header) else {
             return nil
         }
-        self = .init(entry: entry, metadata: metadata)
+        self.serializedData = serialized
+        self.entry = entry
+        self.metadata = metadata
     }
 
     /// Creates a new `SecureConfig`.
     /// - Parameters:
     ///   - entry: The entry data.
     ///   - metadata: The metadata.
+    @available(iOS, deprecated: 18.4, message: "reconstruction of parsed metadata is unreliable")
+    @available(macOS, deprecated: 15.4, message: "reconstruction of parsed metadata is unreliable")
     public init(entry: Data, metadata: [String: String]) {
+        self.init(entry: entry, unreliableMetadata: metadata)
+    }
+
+    internal init(entry: Data, unreliableMetadata metadata: [String: String]) {
         self.entry = entry
         self.metadata = metadata
         // [String: String] will never fail to encode
         self.serializedData = try! JSONSerialization.data(withJSONObject: metadata, options: .sortedKeys) + "\n".utf8 + entry
+    }
+
+    init?(entry: Data, rawMetadata: Data) {
+        self.init(from: rawMetadata + "\n".utf8 + entry)
     }
 }
 
@@ -86,7 +104,11 @@ extension Proto_AttestationBundle {
             guard case let .secureConfig(sconf) = slotEntry.info else {
                 return nil
             }
-            return SecureConfig(entry: sconf.entry, metadata: sconf.metadata)
+            if sconf.data.isEmpty {
+                // Deprecated, only for use with original PCC
+                return SecureConfig(entry: sconf.entry, unreliableMetadata: sconf.metadata)
+            }
+            return SecureConfig(from: sconf.data)
         }
 
         guard configs.count == slot.entries.count else {
@@ -100,5 +122,25 @@ extension Proto_AttestationBundle {
 extension Array where Self.Element == SecureConfig {
     func replaySealedHash(with hash: any HashFunction.Type = SHA384.self) throws -> SEP.SealedHash.Value {
         try SEP.SealedHash(ratchet: self.map { Data(hash.hash(data: $0.serializedData)) }).value
+    }
+}
+
+extension Collection where Self.Element == SecureConfig {
+    var darwinInit: DarwinInit {
+        get throws {
+            let darwinInits = self.filter { config in
+                config.name == "darwin-init" && config.mimeType == "application/json"
+            }
+
+            guard let darwinInitConfig = darwinInits.first else {
+                throw DarwinInit.Error.missingDarwinInit
+            }
+
+            guard darwinInits.count == 1 else {
+                throw DarwinInit.Error.tooManyDarwinInit
+            }
+
+            return try DarwinInit(from: darwinInitConfig)
+        }
     }
 }

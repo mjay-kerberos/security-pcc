@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -24,10 +24,21 @@ import Foundation
 public struct EnsembleAttestor: Attestor {
     var attestor: NodeAttestor
 
+    public var attestingKey: SecKey {
+        get throws {
+            try attestor.attestingKey
+        }
+    }
+
     /// Creates an instance of ``EnsembleAttestor``.
     public init() {
         // No transparency proofs are utilized for ensembles
         self.attestor = NodeAttestor(transparencyProver: NopTransparencyLog())
+        self.attestor.preserveSecureConfigs = true
+    }
+
+    public init(environment: Environment) {
+        self.attestor = NodeAttestor(transparencyProver: NopTransparencyLog(), assetProvider: PCC.AssetProvider(), environment: environment)
     }
 
     @_spi(Private)
@@ -45,11 +56,11 @@ public struct EnsembleAttestor: Attestor {
     ///   - key: The key to use for the attestation.
     ///   - expiration: The expiration date.
     ///   - nonce: The nonce to use for the attestation.
-    public func attest(key: SecKey, expiration: Date, nonce: Data?) async throws -> AttestationBundle {
-        try await self.attestor.attest(key: key, expiration: expiration, nonce: nonce)
+    public func attest(key: SecKey, using: SecKey, expiration: Date, nonce: Data?) async throws -> AttestationBundle {
+        try await self.attestor.attest(key: key, using: using, expiration: expiration, nonce: nonce)
     }
 
-    var assetProvider: any AttestationAssetProvider {
+    public internal(set) var assetProvider: any AttestationAssetProvider {
         get {
             self.attestor.assetProvider
         }

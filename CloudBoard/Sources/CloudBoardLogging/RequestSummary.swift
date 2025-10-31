@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -142,7 +142,7 @@ public protocol RequestCheckpoint {
 }
 
 extension RequestCheckpoint {
-    public var type: StaticString { "Checkpoint" }
+    public var type: StaticString { "RequestCheckpoint" }
 
     public var status: RequestSummaryStatus? {
         if error != nil {

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -142,7 +142,7 @@ enum Computer {
     }
 
     static func serialNumber() -> String? {
-        return shim_MGQSerialNumber() as String?
+        shim_MGQSerialNumber() as String?
     }
 
     static func securityDomain() -> Int? {
@@ -161,27 +161,31 @@ enum Computer {
     }
 
     static func isComputeNode() -> Bool {
-        return hasServiceNamed("manta-c")
+        MobileGestalt.current.isComputeNode
     }
 
     static func isBMC() -> Bool {
-        return hasServiceNamed("manta-b")
+        MobileGestalt.current.isComputeController
     }
 
     static func isVM() -> Bool {
-        return MobileGestalt.current.isVirtualDevice
+        MobileGestalt.current.isVirtualDevice
     }
 
     static func isDarwinCloud() -> Bool {
-        return self.releaseType().contains("Darwin Cloud")
+        self.releaseType().contains("Darwin Cloud")
+    }
+    
+    static func isFactorySignedRestore() -> Bool {
+        MobileGestalt.current.isFactorySignedRestore
     }
 
     static func buildVersion() -> String? {
-        return MobileGestalt.current.buildVersion
+        MobileGestalt.current.buildVersion
     }
 
     static func releaseType() -> String {
-        return MobileGestalt.current.releaseType
+        MobileGestalt.current.releaseType
     }
 
     private static func hasServiceNamed(_ name: String) -> Bool {
@@ -198,7 +202,7 @@ enum Computer {
     }
 
     static func allowsInternalSecurityPolicies() -> Bool {
-        return shim_allows_internal_security_policies()
+        shim_allows_internal_security_policies()
     }
 
     static func lockCryptexes() throws {

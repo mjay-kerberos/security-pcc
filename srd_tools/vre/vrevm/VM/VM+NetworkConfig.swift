@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -26,41 +26,53 @@ extension VM {
     // Allow us to glean IP address of running VM (NAT mode only) from leases managed by DHCP instance
     //  of the VZ framework -- for bridge mode, caveat emptor
     struct NetworkConfig {
-        let mode: NetworkMode // .nat, .bridged, or .none
-        let macAddr: VZMACAddress? // provided or randomly generated
-        let bridgeIf: VZBridgedNetworkInterface? // host i/f for "bridged" mode
+        struct Options {
+            var bridgeIf: VZBridgedNetworkInterface? = nil // bridged mode: host i/f to connect
+        }
+
+        let mode: NetworkMode // .nat, .bridged, .hostOnly, or .none
+        let macAddr: VZMACAddress // randomly generated if not specified during init
+        let options: Options // mode-specific options
 
         // init constructs NetworkConfig from provided parameters (new config)
-        init(mode: NetworkMode = .none, macAddr: String? = nil, bridgeIf: String? = nil) {
+        init(mode: NetworkMode = .none,
+             macAddr: String? = nil,
+             bridgeIf: String? = nil // bridge mode
+        ) {
+            var options = Options()
+
             self.mode = mode
             if let macAddr {
-                self.macAddr = VZMACAddress(string: macAddr)
+                self.macAddr = VZMACAddress(string: macAddr) ?? VZMACAddress.randomLocallyAdministered()
             } else {
                 self.macAddr = VZMACAddress.randomLocallyAdministered()
             }
 
-            if let bridgeIf {
-                self.bridgeIf = try? VZBridgedNetworkInterface._interface(withIdentifier: bridgeIf)
-            } else {
-                self.bridgeIf = nil
+            if mode == .bridged {
+                assert(CLI.internalBuild, "network bridged mode not permitted")
+                if let bridgeIf {
+                    options.bridgeIf = try? VZBridgedNetworkInterface._interface(withIdentifier: bridgeIf)
+                }
             }
+
+            self.options = options
         }
 
         // init loads NetworkConfig from VM bundle configuration
         init(_ config: VMBundle.Config.NetworkConfig) {
             self.mode = config.mode
-            self.macAddr = VZMACAddress(string: config.macAddr)
-            var bridgeIf: VZBridgedNetworkInterface?
+            self.macAddr = VZMACAddress(string: config.macAddr) ?? VZMACAddress.randomLocallyAdministered()
+            var options = Options()
 
             if let netOptions = config.options {
                 for opt in netOptions {
                     switch opt {
                         case .bridgeIf(let ifname):
-                            bridgeIf = try? VZBridgedNetworkInterface._interface(withIdentifier: ifname)
-                            if bridgeIf == nil {
-                                VM.logger.error("failed mapping bridge interface \(ifname, privacy: .public)")
-                            } else {
+                            if let bridgeIf = try? VZBridgedNetworkInterface._interface(withIdentifier: ifname) {
                                 VM.logger.log("using bridge interface \(ifname, privacy: .public)")
+                                options.bridgeIf = bridgeIf
+                            } else {
+                                VM.logger.error("failed mapping bridge interface \(ifname, privacy: .public)")
                             }
 
                         default:
@@ -69,48 +81,42 @@ extension VM {
                 }
             }
 
-            self.bridgeIf = bridgeIf
+            self.options = options
+        }
+
+        // ipAddress gleans IP address from VZ DHCP leases table based on MAC address;
+        //   NAT & hostOnly network modes only
+        func ipAddress() throws -> IPAddress? {
+            guard [VM.NetworkMode.nat, VM.NetworkMode.hostOnly].contains(self.mode) else {
+                throw VMError("IP address can only be determined when network mode == nat or hostOnly")
+            }
+
+            do {
+                let dhcpLeases = try DHCPLeases()
+                if let ipAddress = dhcpLeases.lookupIPbyMACAddress(macAddr.string) {
+                    VM.logger.log("DHCP lookup found IP: \(ipAddress.asString() ?? "unable to display", privacy: .public)")
+                    return ipAddress
+                }
+            } catch {
+                throw VMError("unable to load VZ DHCP leases: \(error)")
+            }
+
+            VM.logger.log("DHCP lookup found no match")
+            return nil
         }
     }
 
-    // localMACAddress returns MAC address for first network device
-    func localMACAddress() throws -> VZMACAddress {
-        guard self.isOpen, let vmConfig = self.vmConfig else {
-            throw VMError("VM not open")
-        }
-
-        guard let macAddress = vmConfig.networkConfig.macAddr else {
-            throw VMError("VM MAC address not set")
-        }
-
-        return macAddress
+    // primaryInterface returns the (first) NAT interface of VM
+    func primaryInterface() -> NetworkConfig? {
+        return self.vmConfig?.networkConfigs?.first(where: { $0.mode == .nat })
     }
 
-    // localIPAddress gleans IP address from VZ DHCP leases table (NAT network mode only) based on MAC address
-    func localIPAddress() throws -> IPAddress? {
-        let macAddress: VZMACAddress
-        do {
-            macAddress = try self.localMACAddress()
-            VM.logger.log("VM MAC address: \(macAddress.string, privacy: .public)")
-        } catch {
-            throw VMError("could not obtain VM MAC address: \(error)")
-        }
-
-        guard self.vmConfig!.networkConfig.mode == .nat else {
+    // primaryIPAddress gleans IP address from VZ DHCP leases table of VM primaryInterface based on MAC address
+    func primaryIPAddress() throws -> IPAddress? {
+        guard let priNet = primaryInterface() else {
             throw VMError("IP address can only be determined when network mode == NAT")
         }
 
-        do {
-            let dhcpLeases = try DHCPLeases()
-            if let ipAddress = dhcpLeases.lookupIPbyMACAddress(macAddress.string) {
-                VM.logger.log("DHCP lookup found IP: \(ipAddress.asString() ?? "unable to display", privacy: .public)")
-                return ipAddress
-            }
-        } catch {
-            throw VMError("unable to load VZ DHCP leases: \(error)")
-        }
-
-        VM.logger.log("DHCP lookup found no match")
-        return nil
+        return try priNet.ipAddress()
     }
 }

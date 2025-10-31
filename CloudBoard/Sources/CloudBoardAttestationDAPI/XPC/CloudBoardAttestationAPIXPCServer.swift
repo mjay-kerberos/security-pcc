@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,7 +14,7 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+internal import CloudBoardAsyncXPC
 
 public actor CloudBoardAttestationAPIXPCServer {
     private let listener: CloudBoardAsyncXPCListener
@@ -47,21 +47,21 @@ extension CloudBoardAttestationAPIXPCServer {
 
 extension CloudBoardAttestationAPIXPCServer: CloudBoardAttestationAPIServerToClientProtocol {
     public func keyRotated(newKeySet: AttestedKeySet) async throws {
-        try await self.listener.broadcast(
+        await self.listener.broadcast(
             CloudBoardAttestationAPIXPCServerToClientMessages.KeyRotated(newKeySet: newKeySet),
             requiringEntitlement: kAttestationAPIXPCLocalServiceKeyAccessEntitlement
         )
     }
 
     public func attestationRotated(newAttestationSet: AttestationSet) async throws {
-        try await self.listener.broadcast(
+        await self.listener.broadcast(
             CloudBoardAttestationAPIXPCServerToClientMessages.AttestationRotated(newAttestationSet: newAttestationSet)
         )
     }
 }
 
 extension CloudBoardAttestationAPIXPCServer: CloudBoardAttestationAPIServerProtocol {
-    public func set(delegate: CloudBoardAttestationAPIServerDelegateProtocol) async {
+    package func set(delegate: CloudBoardAttestationAPIServerDelegateProtocol) async {
         self.delegate = delegate
     }
 
@@ -90,6 +90,29 @@ extension CloudBoardAttestationAPIXPCServer: CloudBoardAttestationAPIServerProto
             }
 
             return try await delegate.requestAttestedKeySet()
+        }
+        handlers.register(
+            CloudBoardAttestationAPIXPCClientToServerMessages.ForceRevocation.self
+        ) { message in
+            guard let delegate = await self.delegate else {
+                throw CloudBoardAttestationAPIError.noDelegateSet
+            }
+            try await delegate.forceRevocation(
+                keyIDs: message.keyIDs
+            )
+            return ExplicitSuccess()
+        }
+        // note - this one relies on the ByteBufferCodable specialization as it is hot path
+        handlers.register(
+            CloudBoardAttestationAPIXPCClientToServerMessages.RequestValidateWorkerAttestation.self
+        ) { message in
+            guard let delegate = await self.delegate else {
+                throw CloudBoardAttestationAPIError.noDelegateSet
+            }
+            return try await delegate.validateWorkerAttestation(
+                proxyAttestationKeyID: message.proxyAttestationKeyID,
+                rawWorkerAttestationBundle: message.rawWorkerAttestationBundle
+            )
         }
     }
 }

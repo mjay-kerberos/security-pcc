@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -16,21 +16,34 @@
 //
 
 import CryptoKit
+@_spi(Private) import CloudAttestation
 import Foundation
 
 typealias SWReleaseMetadata = SWReleases.Release.Metadata
 
 public extension SWReleases.Release {
     struct Metadata {
-        typealias Asset = TxPB_ReleaseMetadata.Asset
-        typealias AssetType = TxPB_ReleaseMetadata.AssetType
+        typealias Asset = PrivateCloudCompute_ReleaseMetadata.Asset
+        typealias AssetType = PrivateCloudCompute_ReleaseMetadata.AssetType
         typealias AssetVerifier = (URL) -> Bool
 
-        let sourcePath: String? // set if loaded from a (json) file
-        let metadata: TxPB_ReleaseMetadata
+        // min/max schema version of metadata payload to process
+        static let minSchemaVer = PrivateCloudCompute_ReleaseMetadata.SchemaVersion.v1
+        static let maxSchemaVer = PrivateCloudCompute_ReleaseMetadata.SchemaVersion.v1
 
-        var timestamp: Date { return self.metadata.timestamp.date }
-        var releaseHash: Data { return self.metadata.releaseHash }
+        let sourcePath: String? // set if loaded from a (json) file
+        let metadata: PrivateCloudCompute_ReleaseMetadata
+
+        var application: String? {
+            if metadata.hasApplication {
+                metadata.application.name
+            } else {
+                nil
+            }
+        }
+
+        var timestamp: Date { return self.metadata.releaseCreation.date }
+        var releaseHash: Data { return self.metadata.releaseDigest }
         var assets: [Asset] {
             guard let override = CLIDefaults.cdnHostnameOverride else {
                 return self.metadata.assets
@@ -41,15 +54,6 @@ public extension SWReleases.Release {
                 asset.url = asset.url.replacing(/https:\/\/[^\/]+/, with: "https://\(override)")
                 return asset
             }
-        }
-
-        // darwinInit contains DarwinInitHelper object containing attached darwin-init config
-        var darwinInit: DarwinInitHelper? {
-            if let darwinInitJson = darwinInitString {
-                return try? DarwinInitHelper(data: darwinInitJson.data(using: .utf8)!)
-            }
-
-            return nil
         }
 
         // darwinInitString contains attached darwin-init JSON document as a String
@@ -70,12 +74,18 @@ public extension SWReleases.Release {
                 throw TransparencyLogError("\(indexPrefix)no metadata payload")
             }
 
-            guard var metadata = try? TxPB_ReleaseMetadata(serializedBytes: data) else {
+            guard var metadata = try? PrivateCloudCompute_ReleaseMetadata(serializedBytes: data) else {
                 throw TransparencyLogError("\(indexPrefix)failed to parse metadata payload")
             }
 
-            if metadata.releaseHash.isEmpty, let releaseHash {
-                metadata.releaseHash = releaseHash
+            guard metadata.schemaVersion.rawValue >= SWReleases.Release.Metadata.minSchemaVer.rawValue,
+                  metadata.schemaVersion.rawValue <= SWReleases.Release.Metadata.maxSchemaVer.rawValue
+            else {
+                throw TransparencyLogError("\(indexPrefix)incompatible metadata payload schema \(metadata.schemaVersion)")
+            }
+
+            if metadata.releaseDigest.isEmpty, let releaseHash {
+                metadata.releaseDigest = releaseHash
             }
 
             self.sourcePath = nil
@@ -93,13 +103,37 @@ public extension SWReleases.Release {
         }
 
         init(from: URL) throws {
-            let jsonBlob = try Data(contentsOf: from)
-            guard let metadata = try? TxPB_ReleaseMetadata(jsonUTF8Data: jsonBlob) else {
-                throw TransparencyLogError("failed to parse metadata json")
+            do {
+                let jsonBlob = try Self.normalizeMetadataJson(Data(contentsOf: from))
+                self.metadata = try PrivateCloudCompute_ReleaseMetadata(jsonUTF8Data: jsonBlob)
+            } catch {
+                throw TransparencyLogError("failed to parse metadata json - \(error)")
             }
-
             self.sourcePath = from.path
-            self.metadata = metadata
+        }
+
+        static func normalizeMetadataJson(_ json: Data) throws -> Data {
+            // pccvre used to have a copy of ReleaseMetadata.protobuf with slightly different JSON field and enum names.
+            // We need to support that old JSON format for three use-cases:
+            // * `pccvre release download` saved JSON on an old build, new pccvre is now creating an instance from it.
+            // * Internal helper tool crafts release-metadata.json in the old format.
+            // * VRE TA test harness crafts release-metadata.json in the old format.
+            guard var dict = try JSONSerialization.jsonObject(with: json, options: []) as? [String: Any] else {
+                throw TransparencyLogError("failed to parse metadata json as a dictionary")
+            }
+            if dict["schemaVersion"] as? String == "V1" {
+                dict["schemaVersion"] = "SCHEMA_VERSION_V1"
+            }
+            if let timestamp = dict["timestamp"] {
+                dict["releaseCreation"] = timestamp
+                dict["timestamp"] = nil
+            }
+            if let digest = dict["releaseHash"] {
+                dict["releaseDigest"] = digest
+                dict["releaseHash"] = nil
+            }
+            return try JSONSerialization.data(withJSONObject: dict as NSDictionary,
+                                              options: [.fragmentsAllowed, .withoutEscapingSlashes])
         }
 
         func jsonString() throws -> String {
@@ -149,8 +183,12 @@ public extension SWReleases.Release {
 
         var isDownloadable: Bool {
             get async throws {
-                await withTaskGroup(of: Bool.self, returning: Bool.self) { group in
-                    for asset in assets {
+                guard self.assets.count > 0 else {
+                    return false
+                }
+
+                return await withTaskGroup(of: Bool.self, returning: Bool.self) { group in
+                    for asset in self.assets {
                         guard let url = URL(string: asset.url) else {
                             return false
                         }
@@ -213,20 +251,20 @@ public extension SWReleases.Release {
     }
 }
 
-extension TxPB_ReleaseMetadata.FileType {
+extension PrivateCloudCompute_ReleaseMetadata.FileType {
     // assetFileType returns AssetHelper.FileType associated with TxPB_ReleaseMetadata.FileType
     var assetFileType: AssetHelper.FileType? {
         return switch self {
-            case .ipsw: .ipsw
-            case .diskimage: .dmg
-            case .applearchive: .aar
-            default: nil
+        case .ipsw: .ipsw
+        case .diskimage: .dmg
+        case .applearchive: .aar
+        default: nil
         }
     }
 }
 
-extension TxPB_ReleaseMetadata.AssetType {
-    private static let labels: [TxPB_ReleaseMetadata.AssetType: String] = [
+extension PrivateCloudCompute_ReleaseMetadata.AssetType {
+    private static let labels: [PrivateCloudCompute_ReleaseMetadata.AssetType: String] = [
         .unspecified: "ASSET_TYPE_UNSPECIFIED",
         .os: "ASSET_TYPE_OS",
         .pcs: "ASSET_TYPE_PCS",
@@ -235,10 +273,10 @@ extension TxPB_ReleaseMetadata.AssetType {
         .debugShell: "ASSET_TYPE_DEBUG_SHELL"
     ]
 
-    var label: String { TxPB_ReleaseMetadata.AssetType.labels[self] ?? "ASSET_TYPE_UNKNOWN" }
+    var label: String { PrivateCloudCompute_ReleaseMetadata.AssetType.labels[self] ?? "ASSET_TYPE_UNKNOWN" }
 
     init?(label: String) {
-        guard let atype = TxPB_ReleaseMetadata.AssetType.labels.first(where: {$0.value == label}) else {
+        guard let atype = PrivateCloudCompute_ReleaseMetadata.AssetType.labels.first(where: { $0.value == label }) else {
             return nil
         }
 

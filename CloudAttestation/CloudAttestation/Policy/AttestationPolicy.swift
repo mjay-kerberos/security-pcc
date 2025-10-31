@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -68,6 +68,18 @@ public struct AttestationPolicyContext: Sendable {
         }
         set(newValue) {
             context[key] = newValue
+        }
+    }
+
+    public subscript(_ key: Key, defaultValue closure: @autoclosure () throws -> (any Sendable)) -> (any Sendable) {
+        mutating get throws {
+            guard context[key] == nil else {
+                return context[key]
+            }
+
+            let value = try closure()
+            context[key] = value
+            return value
         }
     }
 }

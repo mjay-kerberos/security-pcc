@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -33,7 +33,6 @@ public struct CloudBoardHotProperties: Decodable, Sendable, Hashable {
     /// It is only logged and reported as a metric, but the value isn't used directly.
     public var canary: Int?
 
-    /// A feature flag for rdar://123410406.
     public var pushFailureReportsToROPES: Bool?
 
     /// The maximum number of bytes we may receive on a single GRPC stream

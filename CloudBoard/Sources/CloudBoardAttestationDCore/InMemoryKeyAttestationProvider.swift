@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,6 +14,9 @@
 
 // Copyright © 2024 Apple. All rights reserved.
 import CloudBoardAttestationDAPI
+
+// just for the fake attestation support
+internal import HTTPClientStateMachine
 @_spi(SEP_Curve25519) import CryptoKit
 @_spi(SEP_Curve25519) import CryptoKitPrivate
 import Foundation
@@ -21,26 +24,127 @@ import os
 
 /// Provides in-memory (non-SEP backed) key with a fake attestation bundle (an OHTTP key configuration containing the
 /// node's public key)
-struct InMemoryKeyAttestationProvider: AttestationProvider {
+struct InMemoryKeyAttestationProvider: AttestationProviderProtocol {
+    // In _theory_ this could change (as it's calculated for each attestation produced) but in
+    // reality it should be tied to the OS version, config  and installed cryptexes, which should not change
+    // after startup so just make it fixed
+    let releaseDigest: String
+
+    let attestationBundleCache: AttestationBundleCache = NoopAttestationBundleCache()
+
+    /// Make a provider that knows the releaseSet of itself, and optionaly
+    /// will create attestations which indicate it transitively trusts itself
+    init(releaseDigest: String) {
+        self.releaseDigest = releaseDigest
+    }
+
+    func restoreKeysFromDisk(
+        attestationCache _: AttestationBundleCache,
+        keyExpiryGracePeriod _: TimeInterval
+    ) async -> [AttestedKey] {
+        /// Already lost the in memory private key, nothing to return
+        return []
+    }
+
     public static let logger: Logger = .init(
         subsystem: "com.apple.cloudos.cloudboard",
         category: "InMemoryAttestationProvider"
     )
 
-    func createAttestedKey(attestationBundleExpiry _: Date) async throws -> InternalAttestedKey {
+    /// There are testing cases where we use a real SEP backed key, but not the attestation system
+    /// this lets us use whatever key we like, but be consistent with the formatting
+    static func createBundleForKey(
+        _ publicKey: Curve25519.KeyAgreement.PublicKey,
+        expiration: Date,
+        releaseDigest: String,
+        proxiedReleaseDigests: [String]?
+    ) throws -> Data {
+        // For development it's simpler to just define this by fiat
+        let kem = HPKE.KEM.Curve25519_HKDF_SHA256
+        // If there is some requirement to talk to older clients that only accept the NameKeyConfigurationEncoding
+        // the simply use this instead
+        #if USE_LEGACY_FAKE_ATTESTATION_FORMAT
+        // Note that this format does not encode the key's expiry, or allow releaseSets.
+        let rawBundle = try TestOnlyAttestationBundle.encodeAsNameKeyConfigurationEncoding(
+            for: privateKey.publicKey, kem: kem
+        )
+        #else
+        let appData: TestOnlyAttestationInfo.AppData = if let proxiedReleaseDigests, proxiedReleaseDigests.count > 0 {
+            .proxy(.init(transitivelyTrustedReleaseDigests: proxiedReleaseDigests))
+        } else {
+            .none
+        }
+        let rawBundle = try TestOnlyAttestationBundle.encodeAsNewFormat(
+            for: publicKey,
+            kem: kem,
+            info: TestOnlyAttestationInfo(
+                expiration: expiration,
+                releaseDigest: releaseDigest,
+                appData: appData
+            )
+        )
+        #endif
+        return rawBundle
+    }
+
+    func createAttestedKey(
+        attestationBundleExpiry: Date,
+        proxiedReleaseDigests: [ReleaseDigestEntry]
+    ) async throws -> InternalAttestedKey {
         Self.logger.warning("Using insecure in-memory key. No SEP attestation will be available.")
 
         let privateKey = Curve25519.KeyAgreement.PrivateKey()
-        // We cannot create real attestation bundles for non-SEP keys. Note that the fake bundle does not encode
-        // the key's expiry.
-        let attestationBundle = try FakeAttestationBundle.data(for: privateKey.publicKey, kem: .Curve25519_HKDF_SHA256)
-
         Self.logger.notice(
             "Created attested in-memory key with public key \(privateKey.publicKey.rawRepresentation.base64EncodedString(), privacy: .public)"
         )
+        // We cannot create real attestation bundles for non-SEP keys.
+        // we therefore use the fake format.
+        let attestationBundle = try Self.createBundleForKey(
+            privateKey.publicKey,
+            expiration: attestationBundleExpiry,
+            releaseDigest: self.releaseDigest,
+            proxiedReleaseDigests: proxiedReleaseDigests.map { $0.releaseDigestHexString }
+        )
         return InternalAttestedKey(
             key: .direct(privateKey: privateKey.rawRepresentation),
-            attestationBundle: attestationBundle
+            attestationBundle: attestationBundle,
+            releaseDigest: self.releaseDigest,
+            proxiedReleaseDigests: proxiedReleaseDigests.map { $0.releaseDigestHexString }
         )
+    }
+}
+
+final class InMemoryReleasesProvider: ReleasesProviderProtocol {
+    public static let logger: Logger = .init(
+        subsystem: "com.apple.cloudos.cloudboard",
+        category: "InMemoryReleasesProvider"
+    )
+
+    let releases: [ReleaseDigestEntry]
+
+    init(releases: [String]) {
+        self.releases = releases.map {
+            .init(releaseDigestHexString: $0, expiry: .distantFuture)
+        }
+    }
+
+    func run() async throws {
+        while !Task.isCancelled {
+            try await Task.sleep(for: .hours(24))
+        }
+    }
+
+    func getCurrentReleaseSet() async throws -> [ReleaseDigestEntry] {
+        return self.releases
+    }
+
+    func trustedReleaseSetUpdates() async throws -> ReleasesUpdatesSubscription {
+        let (stream, cont) = AsyncStream<[ReleaseDigestEntry]>.makeStream()
+        cont.yield(self.releases)
+        return .init(id: 0, updates: stream)
+    }
+
+    func deregister(_: Int) {
+        // no op
     }
 }

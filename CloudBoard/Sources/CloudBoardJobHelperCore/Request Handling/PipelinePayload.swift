@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -16,26 +16,51 @@
 
 import CloudBoardJobAPI
 import CloudBoardJobHelperAPI
+import CryptoKit
 import Foundation
 
-enum PipelinePayload<T> {
+// input and output on the inbound path)
+enum PipelinePayload: Equatable, Sendable {
     case warmup(WarmupData)
+    // Provided only when running within a proxy, once and only once
+    // before *any* non warmup message, and no more mesages will be sent after it
+    case nackAndExit(ParametersData)
+    // for the cloud app, this is only a subset of the data associated with the actual parameters
     case parameters(ParametersData)
+    // extracted from the parameters and sent separately
     case oneTimeToken(Data)
-    case chunk(FinalizableChunk<T>)
+    case chunk(FinalizableChunk<Data>)
+    // Only used between WorkloadJobManager and cloud app
     case endOfInput
+    // Provided only when running within a proxy, once and only once, before any worker* messages
+    // the keyID is the identifier for the attestion (and associated key) used for the request
+    // extracted from the parameters and sent separately
+    case parametersMetaData(keyID: Data)
+    case workerAttestationAndDEK(info: WorkerAttestationInfo, dek: SymmetricKey)
+    // Currently represents both encoded PrivateCloudCompute response chunks between CloudBoardMessenger and
+    // WorkloadJobManager, and actual application payload chunks between WorkloadJobManager and the cloud app
+    case workerResponseChunk(UUID, FinalizableChunk<Data>)
+    // Only used between WorkloadJobManager and cloud app. For now we only indicate to the cloud app whether the
+    // PrivateCloudCompute response summary (or in absence of a response summary the gRPC response status) from the
+    // worker indicated the request was handled successfuly or not.
+    case workerResponseSummary(UUID, succeeded: Bool)
+    // Only used between CloudBoardMessenger and WorkloadJobManager
+    case workerResponseClose(
+        UUID,
+        grpcStatus: Int,
+        grpcMessage: String?,
+        ropesErrorCode: UInt32?,
+        ropesMessage: String?
+    )
+    case workerResponseEOF(UUID)
+    // Only used between WorkloadJobManager and cloud app
+    case workerFound(UUID, releaseDigest: String, spanID: String?)
     case teardown
     case abandon
 }
 
 extension PipelinePayload {
-    static func chunk(_ chunk: T, isFinal: Bool = false) -> Self {
+    static func chunk(_ chunk: Data, isFinal: Bool = false) -> Self {
         .chunk(.init(chunk: chunk, isFinal: isFinal))
     }
 }
-
-extension PipelinePayload: Equatable where T: Equatable {}
-
-extension PipelinePayload: Hashable where T: Hashable {}
-
-extension PipelinePayload: Sendable where T: Sendable {}

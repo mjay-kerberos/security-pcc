@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -158,7 +158,7 @@ public actor HeartbeatPublisher {
             Self.logger.debug("First hot property update already received, starting the task group.")
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTaskWithLogging(operation: "healthUpdates", sensitiveError: false, logger: Self.logger) {
-                    for try await status in await self.statusUpdates.removeDuplicatesGeneralized() {
+                    for try await status in self.statusUpdates.removeDuplicatesGeneralized() {
                         await self.updateStatus(status)
                         try await self.publish()
                     }

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -26,16 +26,14 @@ extension CLI.InstanceCmd {
         )
 
         @OptionGroup var globalOptions: CLI.globalOptions
-        @OptionGroup var instanceOptions: CLI.InstanceCmd.options
 
         @Flag(name: [.customLong("json")], help: "Output as json info.")
         var jsonOutput: Bool = false
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
             CLI.logger.log("list VRE instances")
 
-            guard let instances = VRE.instances(vrevmPath: instanceOptions.vrevmPath) else {
+            guard let instances = VRE.instanceList() else {
                 print(jsonOutput ? "[]" : "No instances found.")
                 return
             }
@@ -43,13 +41,12 @@ extension CLI.InstanceCmd {
             var fieldWidths = [20, 10, 17]
             var vreList: [VRE.VM.Status] = []
             for instance in instances {
-                if let vmStatus = try? instance.status() {
-                    fieldWidths[0] = max(fieldWidths[0], vmStatus.name.count)
-                    fieldWidths[1] = max(fieldWidths[1], vmStatus.state?.count ?? 0)
-                    fieldWidths[2] = max(fieldWidths[2], vmStatus.ecid?.count ?? 0)
+                let vmStatus = instance.status()
+                fieldWidths[0] = max(fieldWidths[0], vmStatus.name.count)
+                fieldWidths[1] = max(fieldWidths[1], vmStatus.state?.count ?? 0)
+                fieldWidths[2] = max(fieldWidths[2], vmStatus.ecid?.count ?? 0)
 
-                    vreList.append(vmStatus)
-                }
+                vreList.append(vmStatus)
             }
 
             if jsonOutput {
@@ -63,7 +60,7 @@ extension CLI.InstanceCmd {
             }
 
             print(String.tabular(widths: fieldWidths, "name", "status", "ecid", "ipaddr"))
-            for vre in vreList {
+            for vre in vreList.sorted(by: { $0.name < $1.name }) {
                 print(String.tabular(
                     widths: fieldWidths,
                     vre.name,

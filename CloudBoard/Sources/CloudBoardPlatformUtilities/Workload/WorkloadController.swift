@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,7 +14,7 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+package import CloudBoardAsyncXPC
 import CloudBoardCommon
 import CloudBoardController
 import CloudBoardMetrics
@@ -44,7 +44,7 @@ public actor WorkloadController {
     private let healthPublisher: ServiceHealthMonitor
     private var server: CloudBoardControllerAPIXPCServer?
     private var serviceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol?
-    private var providerPause: (() async throws -> Void)?
+    private var providerPause: ((String?) async throws -> Void)?
     private var restartPrewarmedInstances: (() async throws -> Void)?
     private var restartingPrewarmedInstances: Bool = false
     private var concurrentRequestCount: Int
@@ -58,11 +58,11 @@ public actor WorkloadController {
     private var scheduledPublishing: Task<Void, Never>?
     private var lastDebouncedPublishingTime: ContinuousClock.Instant?
 
-    public enum ControllerState: Equatable, CustomStringConvertible {
+    public enum ControllerState: Sendable, Equatable, CustomStringConvertible {
         case initializing
         case ready
-        case busyTransitioning
-        case busy
+        case busyTransitioning(reason: String?)
+        case busy(reason: String?)
         case error(WorkloadControllerError?)
 
         public var description: String {
@@ -71,10 +71,10 @@ public actor WorkloadController {
                 return "Initializing"
             case .ready:
                 return "Ready"
-            case .busyTransitioning:
-                return "Busy (Transitioning)"
-            case .busy:
-                return "Busy"
+            case .busyTransitioning(let reason):
+                return "Busy (Transitioning)\(reason.map { ": \($0)" } ?? "")"
+            case .busy(let reason):
+                return "Busy\(reason.map { ": \($0)" } ?? "")"
             case .error(let error):
                 if let error {
                     return "Error: \(String(describing: error))"
@@ -114,7 +114,7 @@ public actor WorkloadController {
     public func run(
         serviceDiscoveryPublisher: ServiceDiscoveryPublisherProtocol?,
         concurrentRequestCountStream: AsyncStream<Int>,
-        providerPause: @escaping () async throws -> Void,
+        providerPause: @escaping (String?) async throws -> Void,
         restartPrewarmedInstances: (() async throws -> Void)?
     ) async throws {
         defer {
@@ -171,19 +171,11 @@ public actor WorkloadController {
             if self.announcedService == false {
                 self.serviceDiscoveryPublisher?.announceService(
                     name: properties.workloadName,
-                    workloadConfig: config.workloadTags
+                    workloadConfig: .init(from: config)
                 )
                 self.announcedService = true
             }
-        case .error:
-            guard self.announcedService else {
-                return
-            }
-            self.serviceDiscoveryPublisher?.retractService(
-                name: properties.workloadName
-            )
-            self.announcedService = false
-        case .initializing, .busy, .busyTransitioning:
+        case .initializing, .busy, .busyTransitioning, .error:
             return
         }
     }
@@ -306,10 +298,15 @@ extension WorkloadController: CloudBoardControllerAPIServerDelegateProtocol {
             }
             self.state = .ready
         case .busy:
-            guard self.state != .busyTransitioning else {
+            if case .busyTransitioning = self.state {
                 throw CloudBoardControllerAPIError.alreadyTransitioning(.busy)
             }
-            self.state = .busyTransitioning
+            self.state = .busyTransitioning(reason: nil)
+        case .busyWithReason(let newReason):
+            if case .busyTransitioning(let reason) = self.state {
+                throw CloudBoardControllerAPIError.alreadyTransitioning(reason.map { .busyWithReason($0) } ?? .busy)
+            }
+            self.state = .busyTransitioning(reason: newReason)
         case .error:
             self.state = .error(nil)
         default:
@@ -334,17 +331,17 @@ extension WorkloadController: CloudBoardControllerAPIServerDelegateProtocol {
 
         self.sendOrDebounceStatusUpdate()
 
-        if self.isLeader, case .busyTransitioning = self.state {
+        if self.isLeader, case .busyTransitioning(let reason) = self.state {
             do {
-                try await self.providerPause!()
+                try await self.providerPause!(reason)
             } catch {
                 throw CloudBoardControllerAPIError.alreadyTransitioning(.busy)
             }
         }
-        if case .busyTransitioning = self.state {
-            self.state = .busy
-            self.metrics.emit(Metrics.WorkloadStatus.HealthStatus(value: 0, healthStatus: .busyTransitioning))
-            self.metrics.emit(Metrics.WorkloadStatus.HealthStatus(value: 1, healthStatus: .busy))
+        if case .busyTransitioning(let reason) = self.state {
+            self.metrics.emit(Metrics.WorkloadStatus.HealthStatus(value: 0, healthStatus: self.state))
+            self.state = .busy(reason: reason)
+            self.metrics.emit(Metrics.WorkloadStatus.HealthStatus(value: 1, healthStatus: self.state))
         }
     }
 
@@ -367,7 +364,6 @@ extension WorkloadController: CloudBoardControllerAPIServerDelegateProtocol {
                     try await Task.sleep(for: delay)
                 } catch {
                     Self.log.debug("Scheduled status update publishing cancelled")
-                    self.scheduledPublishing = nil
                     return
                 }
                 self.sendStatusUpdate()
@@ -404,7 +400,7 @@ extension WorkloadController: CloudBoardControllerAPIServerDelegateProtocol {
             throw CloudBoardControllerAPIError.restartPrewarmedInProgress
         }
 
-        guard self.state == .busy else {
+        guard case .busy = self.state else {
             Self.log.error(
                 "Cannot restart prewarmed instances in state \(self.state, privacy: .public)"
             )
@@ -428,7 +424,7 @@ extension WorkloadController: CloudBoardControllerAPIServerDelegateProtocol {
 }
 
 extension WorkloadController: CloudBoardAsyncXPCListenerDelegate {
-    public func invalidatedConnection(_ connection: CloudBoardAsyncXPCConnection) async {
+    package func invalidatedConnection(_ connection: CloudBoardAsyncXPCConnection) async {
         Self.log.log("""
         Received 'InvalidatedConnection' from CloudBoardController: \
         id=\(String(describing: connection.id), privacy: .public)
@@ -451,8 +447,12 @@ extension WorkloadControllerState {
             self = .initializing
         case .ready:
             self = .ready
-        case .busy, .busyTransitioning:
-            self = .busy
+        case .busy(let reason), .busyTransitioning(let reason):
+            if let reason {
+                self = .busyWithReason(reason)
+            } else {
+                self = .busy
+            }
         case .error(let error):
             if case .controllerError(let message) = error {
                 self = .error(message: message)

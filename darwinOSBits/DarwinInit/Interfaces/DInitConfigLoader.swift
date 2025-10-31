@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -84,7 +84,7 @@ enum DInitConfigLoader {
         if Computer.isComputeNode() && nvramConfigRaw == nil {
             logger.log("Loading config from remote service")
             let deviceTypeDesc = String(cString: remote_device_type_get_description(REMOTE_DEVICE_TYPE_COMPUTE_CONTROLLER))
-            nvramConfigRaw = DInitNVRAMConfig(source: .left(.remoteService(deviceTypeDesc)))
+            nvramConfigRaw = DInitNVRAMConfig(source: .left(.remoteService(device: deviceTypeDesc, service: kDInitRemoteServiceName)))
         }
 
         // If no system configuration was found, error and exit early.
@@ -95,7 +95,25 @@ enum DInitConfigLoader {
         let nvramConfig: DInitConfig
         switch nvramConfigRaw.source {
         case let .left(source):
-            nvramConfig = try await load(from: source)
+            do {
+                nvramConfig = try await load(from: source)
+            } catch {
+                // If the device is a BMC or CNode, and restored by factory,
+                // fall back to using factory dedicated remoteXPC service.
+                if (Computer.isBMC() || Computer.isComputeNode()) && Computer.isFactorySignedRestore() {
+                    let deviceTypeDesc : String
+                    if Computer.isBMC() {
+                        deviceTypeDesc = String(cString: remote_device_type_get_description(REMOTE_DEVICE_TYPE_NCM_HOST))
+                    } else {
+                        deviceTypeDesc = String(cString: remote_device_type_get_description(REMOTE_DEVICE_TYPE_COMPUTE_CONTROLLER))
+                    }
+                    
+                    logger.log("Loading config from factory darwininit remote service")
+                    nvramConfig = try await load(from: .remoteService(device: deviceTypeDesc, service: kDInitFactoryRemoteServiceName))
+                } else {
+                    throw error
+                }
+            }
         case let .right(_config):
             nvramConfig = _config
         }
@@ -133,8 +151,8 @@ enum DInitConfigLoader {
             data = try path.loadData()
         case let .ec2imds(key):
             data = try await EC2MetadataService.fetchUserData(for: key)
-        case let .remoteService(deviceTypeDesc):
-            data = try loadRemoteServiceConfig(from: deviceTypeDesc)
+        case let .remoteService(deviceTypeDesc, serviceName):
+            data = try loadRemoteServiceConfig(from: deviceTypeDesc, serviceName: serviceName)
         }
 
         let config = try decode(DInitConfig.self, from: data, source: source)
@@ -211,7 +229,7 @@ enum DInitConfigLoader {
         }
     }
     
-    private static func loadRemoteServiceConfig(from deviceTypeDesc: String) throws -> Data {
+    private static func loadRemoteServiceConfig(from deviceTypeDesc: String, serviceName: String) throws -> Data {
         let queue = DispatchQueue(label: "remote_device_browse")
         let semaphore = DispatchSemaphore(value: 0)
         var configData: Data = Data()
@@ -253,11 +271,11 @@ enum DInitConfigLoader {
                 semaphore.wait()
             } else {
                 logger.error("timeout waiting for remote device to show up")
-                throw Error.loadTimeout(.remoteService(deviceTypeDesc))
+                throw Error.loadTimeout(.remoteService(device: deviceTypeDesc, service: serviceName))
             }
         }
 
-        configData = try DInitRemoteService.fetchConfig(from: _device!)
+        configData = try DInitRemoteService.fetchConfig(from: _device!, service: serviceName)
 
         logger.debug("Raw data got from remote service: \(configData)")
         return configData

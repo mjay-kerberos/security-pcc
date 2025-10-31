@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -60,6 +60,10 @@ struct RequestSummaryAttributes: SpanAttributeNamespace {
             var invocationRequestHeaders: Key<HPACKHeaders> { "cloudboardd.requestSummary.invocation_request_headers" }
 
             var connectionCancelled: Key<Bool> { "cloudboardd.requestSummary.connection.cancelled" }
+
+            var spanID: Key<String> { "cloudboardd.requestSummary.span_id" }
+
+            var parentSpanID: Key<String> { "cloudboardd.requestSummary.parent_span_id" }
         }
     }
 
@@ -100,6 +104,12 @@ struct RequestSummaryAttributes: SpanAttributeNamespace {
             var ropesTerminationCode: Key<Int> { "cloudboardd.requestSummary.connection.termination_code" }
 
             var ropesTerminationReason: Key<String> { "cloudboardd.requestSummary.connection.termination_reason" }
+
+            var spanID: Key<String> { "cloudboardd.requestSummary.span_id" }
+
+            var parentSpanID: Key<String> { "cloudboardd.requestSummary.parent_span_id" }
+
+            var isNack: Key<Bool> { "cloudboardd.requestSummary.is_nack" }
         }
     }
 
@@ -123,6 +133,10 @@ struct RequestSummaryAttributes: SpanAttributeNamespace {
             var chunksCount: Key<Int> { "cloudboardd.requestSummary.response_chunks.count" }
 
             var isFinal: Key<Bool> { "cloudboardd.requestSummary.response_chunk.is_final" }
+
+            var spanID: Key<String> { "cloudboardd.requestSummary.span_id" }
+
+            var parentSpanID: Key<String> { "cloudboardd.requestSummary.parent_span_id" }
         }
     }
 

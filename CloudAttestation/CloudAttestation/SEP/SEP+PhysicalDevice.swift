@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -19,28 +19,22 @@
 //  Copyright © 2024 Apple Inc. All rights reserved.
 //
 
-import Security
 import Security_Private
 import os.log
 
 extension SEP {
-    public struct PhysicalDevice: AttestationProtocol {
+    public struct PhysicalDevice: AttestationProtocol, Sendable {
+
         static let logger = Logger(subsystem: "com.apple.CloudAttestation", category: "SEP.PhysicalDevice")
 
-        static let dcikOnce: SecKey? = SecKeyCopySystemKey(.DCIK, nil)?.takeRetainedValue()
-
-        public var dcik: SecKey? {
-            SecKeyCreateDuplicate(Self.dcikOnce)?.takeRetainedValue()
-        }
-
-        init() {}
+        public init() {}
 
         public func attest(key: SecKey, using signer: SecKey) throws -> SEP.Attestation {
             var error: Unmanaged<CFError>?
             guard let data = SecKeyCreateAttestation(signer, key, &error)?.takeRetainedValue() else {
                 let error = error!.takeUnretainedValue()
                 Self.logger.error("Failed to create attestation: \(error, privacy: .public)")
-                throw SEP.AttestationProtocolError.attestError(underlying: error)
+                throw error
             }
             guard let signerPublicKey = SecKeyCopyPublicKey(signer) else {
                 Self.logger.warning("Failed to copy public key from DCIK, parsing attestation without checking signature")

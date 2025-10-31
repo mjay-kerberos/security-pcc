@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,10 +14,11 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
+import CloudBoardLogging
 import XPC
 import XPCPrivate
 
-public enum CloudBoardAsyncXPCError: Error {
+public enum CloudBoardAsyncXPCError: ReportableError {
     /// Will be delivered to the connection’s event handler if the remote
     /// service exited. The connection is still live even in this case, and
     /// resending a message will cause the service to be launched on-demand.
@@ -68,13 +69,16 @@ public enum CloudBoardAsyncXPCError: Error {
     /// Originally named: `XPC_ERROR_TERMINATION_IMMINENT`.
     case terminationImminent
 
-    case unexpectedObjectType(xpc_type_t)
+    case unexpectedObjectType(String)
     case corruptedReply
     case remoteProcessError(String?, connectionName: String)
 
+    case noConnection
+    case missingEntitlement
+
     internal init(connection: XPCConnection, object: XPCObject) {
         guard object.type == XPC_TYPE_ERROR else {
-            self = .unexpectedObjectType(object.type)
+            self = .unexpectedObjectType("\(object.type)")
             return
         }
 
@@ -86,6 +90,25 @@ public enum CloudBoardAsyncXPCError: Error {
             self = .terminationImminent
         } else {
             self = .remoteProcessError(nil, connectionName: connection.name)
+        }
+    }
+
+    public var publicDescription: String {
+        switch self {
+        case .connectionInterrupted:
+            return "ConnectionInterrupted"
+        case .connectionInvalid:
+            return "ConnectionInvalid"
+        case .terminationImminent:
+            return "TerminationImminent"
+        case .unexpectedObjectType:
+            return "UnexpectedObjectType"
+        case .corruptedReply:
+            return "CorruptedReply"
+        case .remoteProcessError:
+            return "RemoteProcessError"
+        @unknown default:
+            return "UndefinedError"
         }
     }
 }
@@ -113,6 +136,10 @@ extension CloudBoardAsyncXPCError: CustomStringConvertible {
             } else {
                 return "Remote process error on \(connectionName)."
             }
+        case .noConnection:
+            return "No connection."
+        case .missingEntitlement:
+            return "Peer is missing required entitlement."
         }
     }
 }

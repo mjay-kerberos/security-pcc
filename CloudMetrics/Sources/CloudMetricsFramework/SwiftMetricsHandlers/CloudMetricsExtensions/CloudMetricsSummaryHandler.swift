@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -127,19 +127,19 @@ internal final class CloudMetricsSummaryHandler: SummaryHandler {
     internal func record(_ value: Int64) {
         let summary = self.summary
         let epoch = Date().timeIntervalSince1970
-        metricUpdateContinuation.yield(.recordSummaryInteger(.init(summary, quantiles: summary.quantiles, value: value, epoch: epoch)))
+        metricUpdateContinuation.yieldAndLogOnFailure(.recordSummaryInteger(.init(summary, quantiles: summary.quantiles, value: value, epoch: epoch)))
     }
 
     internal func record(_ value: Double) {
         let summary = self.summary
         let epoch = Date().timeIntervalSince1970
-        metricUpdateContinuation.yield(.recordSummaryDouble(.init(summary, quantiles: summary.quantiles, value: value, epoch: epoch)))
+        metricUpdateContinuation.yieldAndLogOnFailure(.recordSummaryDouble(.init(summary, quantiles: summary.quantiles, value: value, epoch: epoch)))
     }
 
     internal func record(quantileValues: [Double], sum: Double, count: Int) {
         let summary = self.summary
         let epoch = Date().timeIntervalSince1970
-        metricUpdateContinuation.yield(.recordSummaryQuantiles(
+        metricUpdateContinuation.yieldAndLogOnFailure(.recordSummaryQuantiles(
             .init(summary, quantiles: summary.quantiles, values: quantileValues, sum: sum, count: count, epoch: epoch)))
     }
 }

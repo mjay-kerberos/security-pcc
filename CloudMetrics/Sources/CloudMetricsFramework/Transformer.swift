@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -44,7 +44,7 @@ extension CloudMetrics {
     // cloudmetrics data-types and finally publishes them.
     public static func publishPrometheusMetrics(content: String) {
         let blocks = parseByBlock(input: content)
-        logger.info("Found \(blocks.count) metric blocks in file.")
+        logger.info("Found blocks in file. num_blocks=\(blocks.count)")
         for block in blocks {
             publishPrometheusBlocks(block: block)
         }
@@ -59,14 +59,14 @@ private func publishPrometheusBlocks(block: PromMetricBlock) {
             let counter = FloatingPointCounter(label: currentCounter.name, dimensions: dims)
             counter.reset(value: currentCounter.value)
         }
-        logger.info("Published \(promCounters.count) counters to cloudmetrics")
+        logger.info("Published counters to cloudmetrics. num_metrics=\(promCounters.count)")
     case let .gauge(promGauges):
         for currentGauge in promGauges {
             let dims = extractDimensions(labels: currentGauge.labels)
             let gauge = Gauge(label: currentGauge.name, dimensions: dims)
             gauge.record(currentGauge.value)
         }
-        logger.info("Published \(promGauges.count) gauges to cloudmetrics")
+        logger.info("Published gauges to cloudmetrics. num_metrics=\(promGauges.count)")
     case let .histogram(promHistogram):
         guard promHistogram.buckets.first != nil else {
             // Histogram should always have at least 1 bucket
@@ -77,17 +77,24 @@ private func publishPrometheusBlocks(block: PromMetricBlock) {
             break
         }
 
-        logger.debug("Creating a cloudmetrics Histogram for \(promHistogram.name)")
+        logger.debug("""
+            Creating a cloudmetrics histogram. \
+            metric_name=\(promHistogram.name, privacy: .private) \
+            metric_value=\(promHistogram.count.value) \
+            metric_sum=\(promHistogram.sum.value)
+            """)
         let histogram = try? Histogram(label: promHistogram.name,
                                        dimensions: buckets.dimensions,
                                        buckets: buckets.names)
-        logger.debug("Histogram has count as \(promHistogram.count.value) and sum as \(promHistogram.sum.value)")
         guard let count = promHistogram.count.value.toSafeInt() else {
-            logger.error("Histogram \(promHistogram.name) has a count that is not a valid Swift Int.")
+            logger.error("""
+                Histogram has a count that is not a valid Swift Int. \
+                metric_name=\(promHistogram.name, privacy: .private)
+                """)
             break
         }
         histogram?.record(bucketValues: buckets.values, sum: promHistogram.sum.value, count: count)
-        logger.debug("Published histogram with \(buckets.values.count) buckets and values.")
+        logger.debug("Published histogram. buckets_values=\(buckets.values.count)")
     case let .summary(promSummary):
         guard promSummary.buckets.first != nil else {
             // Summary should have at least 1 quantile
@@ -99,17 +106,20 @@ private func publishPrometheusBlocks(block: PromMetricBlock) {
             break
         }
 
-        logger.debug("Creating a cloudmetrics Summary for \(promSummary.name)")
+        logger.debug("""
+            Creating a cloudmetrics Summary. \
+            metric_name=\(promSummary.name, privacy: .private) \
+            metric_value=\(promSummary.count.value) \
+            num_metric_quantiles=\(quantiles.values.count)
+            """)
         let summary = try? Summary(label: promSummary.name,
                                    dimensions: quantiles.dimensions,
                                    quantiles: quantiles.names)
-        logger.info("Summary has count as \(promSummary.count.value) and sum as \(promSummary.sum.value)")
         guard let count = promSummary.count.value.toSafeInt() else {
             logger.error("Summary \(promSummary.name) has a count that is not a valid Swift Int.")
             break
         }
         summary?.record(quantileValues: quantiles.values, sum: promSummary.sum.value, count: count)
-        logger.info("Published summary with \(quantiles.values.count) quantiles.")
     @unknown default:
         fatalError("Unknown type of prometheus block")
     }
@@ -144,7 +154,10 @@ private func extractQuantileNamesAndValues(_ metrics: [PromMetric]) -> Quantiles
         }
 
         guard let name = Double(quantile.value) else {
-            logger.error("Failed to convert the value of the 'quantile' metric \(quantile.value) to a Double.")
+            logger.error("""
+                Failed to convert the value of the 'quantile' metric to a Double. \
+                metric_value=\(quantile.value)
+                """)
             return nil
         }
 
@@ -170,15 +183,20 @@ private  func extractBucketNamesAndValues(_ buckets: [PromMetric]) -> Buckets? {
         }
 
         guard let name = Double(leLabel.value) else {
-            logger.error("Failed to convert the value of the 'le' bucket \(leLabel.value) to a Double.")
+            logger.error("""
+                Failed to convert the value of the 'le' bucket to a Double. \
+                metric_value=\(leLabel.value)
+                """)
             return nil
         }
 
         names.append(name)
         guard let value = line.value.toSafeInt() else {
             logger.error("""
-Value of histogram \(line.name) in bucket \(leLabel.value) cannot be represented as a Swift Int.
-""")
+                Value of histogram cannot be represented as a Swift Int. \
+                metric_name=\(line.name) \
+                bucket=\(leLabel.value)
+                """)
             return nil
         }
         values.append(value)

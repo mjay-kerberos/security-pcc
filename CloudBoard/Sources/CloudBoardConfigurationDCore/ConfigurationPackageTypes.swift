@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -18,12 +18,12 @@ import CloudBoardConfigurationDAPI
 import Foundation
 
 /// A parsed configuration package for the whole node.
-struct NodeConfigurationPackage {
+struct NodeConfigurationPackage: Sendable {
     /// The key of the domain, for example `com.example.my-app`.
     typealias DomainKey = String
 
     /// The dynamic configuration values for the domain, can be anything serializable to JSON.
-    typealias DomainValues = [String: Any]
+    typealias DomainValues = [String: Sendable]
 
     /// The identifier of the revision of this configuration package.
     let revisionIdentifier: String
@@ -40,9 +40,9 @@ struct NodeConfigurationPackage {
 }
 
 /// A parsed configuration package for a single domain.
-struct DomainConfigurationPackage {
+struct DomainConfigurationPackage: Sendable {
     /// The dynamic configuration values for the domain, can be anything serializable to JSON.
-    typealias DomainValues = [String: Any]
+    typealias DomainValues = [String: Sendable]
 
     /// The identifier of the revision of this configuration package.
     let revisionIdentifier: String

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -30,7 +30,7 @@ struct LaunchStats: Codable, Sendable, Hashable {
 }
 
 /// A type that manages the launch stats.
-protocol LaunchStatsStoreProtocol {
+protocol LaunchStatsStoreProtocol: Sendable {
     /// Loads, updates, and returns the current launch stats.
     ///
     /// Call this once per process launch.

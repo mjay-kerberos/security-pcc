@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -22,18 +22,15 @@ extension TransparencyLog {
     //  Log Tree using LogLeavesRequest call(s).
     struct Leaves {
         let endpoint: URL
-        let tlsInsecure: Bool
         let useIdentity: Bool
         let logTree: TxPB_ListTreesResponse.Tree
 
         init(
             endpoint: URL, // KTInitBag: at-researcher-log-leaves
-            tlsInsecure: Bool = false,
             useIdentity: Bool = false,
             logTree: TxPB_ListTreesResponse.Tree
         ) {
             self.endpoint = endpoint
-            self.tlsInsecure = tlsInsecure
             self.useIdentity = useIdentity
             self.logTree = logTree
         }
@@ -48,7 +45,7 @@ extension TransparencyLog {
         ) async throws -> [NodeType] {
             TransparencyLog.logger.debug("LogLeaves.fetch(indexes:\(startIndex, privacy: .public)..\(endIndex, privacy: .public))")
             let logLeavesReq = TxPB_LogLeavesRequest.with { builder in
-                builder.version = .v3
+                builder.version = TransparencyLog.protocolVersion
                 builder.treeID = self.logTree.treeID
                 builder.startMergeGroup = 0
                 builder.endMergeGroup = UInt32(self.logTree.mergeGroups)
@@ -68,7 +65,6 @@ extension TransparencyLog {
 
             let (respData, _) = try await urlPostProtbuf(
                 url: self.endpoint,
-                tlsInsecure: self.tlsInsecure,
                 useIdentity: self.useIdentity,
                 requestBody: logLeavesReq.serializedData(),
                 headers: [TransparencyLog.requestUUIDHeader: requestUUID.uuidString]
@@ -101,7 +97,7 @@ extension TransparencyLog {
         ) async throws -> [NodeType] {
             TransparencyLog.logger.debug("LogLeaves.fetch(revision: \(revision)")
             let logLeavesReq = TxPB_LogLeavesForRevisionRequest.with { builder in
-                builder.version = .v3
+                builder.version = TransparencyLog.protocolVersion
                 builder.logType = self.logTree.logType
                 builder.application = self.logTree.application
                 builder.requestUuid = requestUUID.uuidString
@@ -109,7 +105,6 @@ extension TransparencyLog {
 
             let (respData, _) = try await TransparencyLog.urlPostProtbuf(
                 url: self.endpoint,
-                tlsInsecure: self.tlsInsecure,
                 useIdentity: self.useIdentity,
                 requestBody: logLeavesReq.serializedData(),
                 headers: [TransparencyLog.requestUUIDHeader: requestUUID.uuidString]

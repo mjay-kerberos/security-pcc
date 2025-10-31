@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -37,7 +37,6 @@ extension CLI {
         var vmNames: [String] = []
 
         func run() throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
             CLI.logger.log("list VREs \(vmNames.isEmpty ? ["<all>"] : vmNames, privacy: .public)")
 
             // vmlist starts with list of entries in VM-Library/
@@ -51,19 +50,29 @@ extension CLI {
 
             CLI.logger.log("list of (matching) VMs requested: \(vmlist, privacy: .public)")
 
-            // vmfields holds VM attributes to display
+            // vmfields holds VM attributes to display/output
             struct vmfields: Codable {
                 let name: String
                 var bundlepath: String
                 var state: String = "invalid"
                 var ecid: String?
+                var udid: String?
                 var cpumem: String?
                 var netmode: String?
                 var macaddr: String?
-                var nvramargs: [String: String]?
+                var networks: [vmnetconfig]?
+                var nvramargs: VM.NVRAMmap?
                 var ipaddr: String?
                 var rsdname: String?
             }
+
+            struct vmnetconfig: Codable {
+                var mode: VM.NetworkMode
+                var macaddr: String?
+                var ipaddr: String?
+                var bridgeif: String?
+            }
+
             var vms: [vmfields] = []
             var fieldWidths = [20, 10, 17, 8] // min field widths for name, state, ecid, cpumem, (+ipaddr)
 
@@ -73,24 +82,38 @@ extension CLI {
                 do {
                     try vm.open()
                     let vmConfig = vm.vmConfig!
+
+                    var netconfig: [vmnetconfig] = []
+                    if let networkConfigs = vm.vmConfig?.networkConfigs {
+                        for net in networkConfigs {
+                            netconfig.append(
+                                vmnetconfig(mode: net.mode,
+                                            macaddr: net.macAddr.string,
+                                            ipaddr: vm.isRunning() ? try? net.ipAddress()?.asString() : nil,
+                                            bridgeif: net.options.bridgeIf?.identifier))
+                        }
+                    }
+
                     vminfo = vmfields(
                         name: vmname,
                         bundlepath: vm.bundle.bundlePath.path,
                         state: vm.isRunning() ? "running" : "shutdown",
                         ecid: String(vm.ecid, radix: 16),
+                        udid: vm.udidStr,
                         cpumem: String(format: "%d/%dGiB",
                                        vmConfig.cpuCount,
                                        vmConfig.memorySize / (1024 * 1024 * 1024)),
-                        netmode: vmConfig.networkConfig.mode.rawValue,
+                        netmode: vmConfig.networkConfigs?.first?.mode.rawValue ?? .none,
+                        networks: netconfig,
                         nvramargs: vmConfig.nvramArgs
                     )
 
-                    if let macaddr = vmConfig.networkConfig.macAddr {
+                    if let macaddr = vm.primaryInterface()?.macAddr {
                         vminfo.macaddr = macaddr.string
                     }
 
                     if vm.isRunning() {
-                        vminfo.ipaddr = try? vm.localIPAddress()?.asString()
+                        vminfo.ipaddr = try? vm.primaryIPAddress()?.asString()
                         vminfo.rsdname = try? vm.rsdName()
                     }
                 } catch {

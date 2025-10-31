@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,13 +14,13 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-package enum CloudBoardJobAPIError {
+package enum CloudBoardJobAPIError: CaseIterable {
     case internalError
     case noDelegateSet
 }
 
 extension CloudBoardJobAPIError: CustomStringConvertible {
-    package var description: String {
+    public var description: String {
         switch self {
         case .internalError:
             "Internal error"

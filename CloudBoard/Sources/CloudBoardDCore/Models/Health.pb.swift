@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -59,16 +59,6 @@ struct Grpc_Health_V1_HealthCheckResponse: Sendable {
 
   var status: Grpc_Health_V1_HealthCheckResponse.ServingStatus = .unknown
 
-  /// NOTE: This field was marked as deprecated in the .proto file.
-  var load: Com_Apple_Cloudboard_Api_V1_LoadResponse {
-    get {return _load ?? Com_Apple_Cloudboard_Api_V1_LoadResponse()}
-    set {_load = newValue}
-  }
-  /// Returns true if `load` has been explicitly set.
-  var hasLoad: Bool {return self._load != nil}
-  /// Clears the value of `load`. Subsequent reads from it will return its default value.
-  mutating func clearLoad() {self._load = nil}
-
   var unknownFields = InternalSwiftProtobuf.UnknownStorage()
 
   enum ServingStatus: InternalSwiftProtobuf.Enum, Swift.CaseIterable {
@@ -116,8 +106,6 @@ struct Grpc_Health_V1_HealthCheckResponse: Sendable {
   }
 
   init() {}
-
-  fileprivate var _load: Com_Apple_Cloudboard_Api_V1_LoadResponse? = nil
 }
 
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
@@ -160,7 +148,6 @@ extension Grpc_Health_V1_HealthCheckResponse: InternalSwiftProtobuf.Message, Int
   static let protoMessageName: String = _protobuf_package + ".HealthCheckResponse"
   static let _protobuf_nameMap: InternalSwiftProtobuf._NameMap = [
     1: .same(proto: "status"),
-    99: .same(proto: "load"),
   ]
 
   mutating func decodeMessage<D: InternalSwiftProtobuf.Decoder>(decoder: inout D) throws {
@@ -170,29 +157,20 @@ extension Grpc_Health_V1_HealthCheckResponse: InternalSwiftProtobuf.Message, Int
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularEnumField(value: &self.status) }()
-      case 99: try { try decoder.decodeSingularMessageField(value: &self._load) }()
       default: break
       }
     }
   }
 
   func traverse<V: InternalSwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
     if self.status != .unknown {
       try visitor.visitSingularEnumField(value: self.status, fieldNumber: 1)
     }
-    try { if let v = self._load {
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 99)
-    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
   static func ==(lhs: Grpc_Health_V1_HealthCheckResponse, rhs: Grpc_Health_V1_HealthCheckResponse) -> Bool {
     if lhs.status != rhs.status {return false}
-    if lhs._load != rhs._load {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

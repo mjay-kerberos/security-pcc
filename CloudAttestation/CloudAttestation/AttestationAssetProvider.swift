@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -24,47 +24,28 @@ import Foundation
 import CryptoKit
 import MSUDataAccessor
 
-@_spi(Private)
 public protocol AttestationAssetProvider: Sendable {
     var apTicket: Data { get throws }
-    var provisioningCertificateChain: [Data] { get throws }
+    var provisioningCertificateChain: [Data] { get async throws }
     var sealedHashEntries: [UUID: [SEP.SealedHash.Entry]] { get throws }
 }
 
-@_spi(Private)
-public struct DefaultAssetProvider: AttestationAssetProvider {
-    public init() {}
-
+extension AttestationAssetProvider {
     public var apTicket: Data {
         get throws {
             do {
                 let apTicketPath = try MSUDataAccessor.shared().copyPath(forPersonalizedData: MSUDA_APTICKET)
                 return try Data(contentsOf: URL(fileURLWithPath: apTicketPath))
             } catch {
-                throw Error.missingAPTicket(error: error)
+                throw AttestationAssetProviderError.missingAPTicket(error: error)
             }
-        }
-    }
-
-    public var provisioningCertificateChain: [Data] {
-        get throws {
-            guard let property = CFPreferencesCopyAppValue("dcprovisioningcert" as CFString, "com.apple.cloudos" as CFString) else {
-                throw Error.missingProvisioningCertificate
-            }
-            guard let certDataB64 = property as? String else {
-                throw Error.invalidProvisioningCertificate
-            }
-            guard let certData = Data(base64Encoded: certDataB64) else {
-                throw Error.invalidProvisioningCertificate
-            }
-            return [certData]
         }
     }
 
     public var sealedHashEntries: [UUID: [SEP.SealedHash.Entry]] {
         get throws {
             guard #_hasSymbol(SCDataBase.self) else {
-                throw Error.noSecureConfigDB
+                throw AttestationAssetProviderError.noSecureConfigDB
             }
 
             let db = SCDataBase()
@@ -79,10 +60,15 @@ public struct DefaultAssetProvider: AttestationAssetProvider {
                         SHA384.self
 
                     default:
-                        throw Error.invalidHashFunction(slot.algorithm)
+                        throw AttestationAssetProviderError.invalidHashFunction(slot.algorithm)
                     }
                 var entries = slot.entries.map { entry in
-                    SEP.SealedHash.Entry(data: entry.data, flags: .ratchet, algorithm: hashFn)
+                    var ssrEntry = SEP.SealedHash.Entry(data: entry.data, flags: .ratchet, algorithm: hashFn)
+                    if slot.slotID == cryptexSlotUUID {
+                        ssrEntry.flags.formUnion(.cryptexMeasurement)
+                    }
+                    ssrEntry.metadata = entry.metadata
+                    return ssrEntry
                 }
                 if let salt = slot.salt {
                     entries.append(
@@ -97,12 +83,13 @@ public struct DefaultAssetProvider: AttestationAssetProvider {
             }
         }
     }
+}
 
-    public enum Error: Swift.Error {
-        case invalidHashFunction(String)
-        case noSecureConfigDB
-        case missingProvisioningCertificate
-        case invalidProvisioningCertificate
-        case missingAPTicket(error: Swift.Error)
-    }
+// MARK: - AttestationAssetProvider Error
+public enum AttestationAssetProviderError: Swift.Error {
+    case invalidHashFunction(String)
+    case noSecureConfigDB
+    case missingProvisioningCertificate
+    case invalidProvisioningCertificate
+    case missingAPTicket(error: Swift.Error)
 }

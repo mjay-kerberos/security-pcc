@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -19,7 +19,6 @@ import ArgumentParserInternal
 import Foundation
 
 private let defaultReleaseCount: UInt = 10
-private let maxReleaseCount: UInt = 100
 
 extension CLI.ReleaseCmd {
     struct ReleaseListCmd: AsyncParsableCommand {
@@ -55,18 +54,12 @@ extension CLI.ReleaseCmd {
         var jsonOutput: Bool = false
 
         mutating func validate() throws {
-            guard reqCount <= maxReleaseCount else {
-                throw ValidationError("maximum \(maxReleaseCount) releases.")
-            }
-
             if reqCount == 0 {
                 reqCount = defaultReleaseCount
             }
         }
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
-
             let logEnvironment = swlogOptions.environment
             CLI.logger.log("release list")
             if logEnvironment != .production {
@@ -76,7 +69,6 @@ extension CLI.ReleaseCmd {
             var swlog = try await SWReleases(
                 environment: logEnvironment,
                 altKtInitEndpoint: swlogOptions.ktInitEndpoint,
-                tlsInsecure: swlogOptions.tlsInsecure,
                 traceLog: swlogOptions.traceLog
             )
 
@@ -105,7 +97,8 @@ extension CLI.ReleaseCmd {
                     continue
                 }
 
-                print("\(String(format: "%8d", rel.index)): \(relInfo.dataHash)\(relInfo.statusDescription)")
+                print("\(String(format: "%8d", rel.index)): \(relInfo.label)\(relInfo.statusDescription)")
+                print("\t\(relInfo.dataHash)")
 
                 if showDetails {
                     print()
@@ -117,7 +110,7 @@ extension CLI.ReleaseCmd {
             CLI.logger.debug("displayed releases: \(asJSONString(swReleases), privacy: .public)")
 
             if jsonOutput {
-                print(asJSONString(swReleases))
+                print(asJSONString(swReleases, pretty: true))
             } else if !showDetails {
                 print()
             }

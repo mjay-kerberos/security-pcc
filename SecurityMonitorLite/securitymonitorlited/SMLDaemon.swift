@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -17,11 +17,11 @@
 //  SecurityMonitorLite
 //
 
-import EndpointSecurity
 import Foundation
 import os
 
-class SMLDaemon {
+@main
+final class SMLDaemon {
     static let daemonName = "com.apple.securitymonitorlited"
     static let daemonCategory = "Daemon"
     static let eventCategory = "Event"
@@ -29,41 +29,44 @@ class SMLDaemon {
     static let eventLog = Logger(subsystem: daemonName, category: eventCategory)
     static let eventInfoNone = "(none)"
     static let eventInfoUnknown = "(unknown)"
+    var config: SMLDaemonConfig?
 
-    func run() {
+    func run(_ config: SMLDaemonConfig) throws {
         SMLDaemon.daemonLog.log("Initializing \(SMLDaemon.daemonName, privacy: .public)")
-
-        do {
-            try SplunkConfigWriter.configure()
-        } catch {
-            SMLDaemon.daemonLog.error("Error writing Splunkloggingd configuration files: \(error.localizedDescription, privacy: .public)")
-            exit(EXIT_FAILURE)
-        }
-
-        guard let esClient = ESClient() else {
-            SMLDaemon.daemonLog.error("Failed to initialize ESClient. Exiting.")
-            exit(EXIT_FAILURE)
-        }
-
-        let subResult = esClient.subscribeToEvents()
-        guard subResult == ES_RETURN_SUCCESS else {
-            SMLDaemon.daemonLog.error("Error subscribing to events: \(String(describing: subResult))")
-            exit(EXIT_FAILURE)
-        }
-
-        guard let nstatClient = NStatClient() else {
-            SMLDaemon.daemonLog.error("Failed to initialize NStatClient. Exiting.")
-            exit(EXIT_FAILURE)
-        }
-
-        let confResult = nstatClient.configure()
-        guard confResult == 0 else {
-            SMLDaemon.daemonLog.error("Error configuring NStatClient: \(confResult)")
-            exit(EXIT_FAILURE)
+        self.config = config
+        try config.Pipeline.configure()
+        for generator in config.Generators {
+            try generator.configure()
+            try generator.start(config.Pipeline)
         }
 
         SMLDaemon.daemonLog.log("\(SMLDaemon.daemonName, privacy: .public) initialized and is listening for events")
+    }
 
+    func runForever(_ config: SMLDaemonConfig) throws {
+        try self.run(config)
         dispatchMain()
+    }
+
+    func stop() {
+        if let config = self.config {
+            for gen in config.Generators {
+                try? gen.stop()
+            }
+        }
+    }
+
+    static func main() throws {
+        if let ff = FrontendSelector.getFrontend() {
+            let f = ff.init()
+            SMLDaemon.daemonLog.log("Determined SecurityMonitorLite variant: \(FrontendSelector.getVariant().rawValue, privacy: .public) frontend: \(String(describing: f), privacy: .public)")
+            do {
+                try f.startDaemon()
+            } catch {
+                SMLDaemon.daemonLog.error("Exception thrown: \(error)")
+            }
+        } else {
+            SMLDaemon.daemonLog.fault("Unable to determine frontend to use, quitting.")
+        }
     }
 }

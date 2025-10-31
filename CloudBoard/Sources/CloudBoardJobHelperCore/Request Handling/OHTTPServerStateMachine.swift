@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,26 +14,66 @@
 
 // Copyright © 2023 Apple. All rights reserved.
 
+import CloudBoardJobHelperAPI
+import CloudBoardLogging
 import CloudBoardMetrics
 import CryptoKit
 import Foundation
-import ObliviousX
+internal import ObliviousX
 import os
 
+/// This maintains the state necessary to successfully negotiate an SEP backed AEAD (possibly) bidirectional
+/// stream which will enable communication with the original parent of a request via ROPES.
+///
+/// This (along with the OBliviousX libraries) implements those parts of the OHTTP spec detailed in RFC
+/// https://datatracker.ietf.org/doc/rfc9458/) relevant to decapsulating the, then fully decrypted, inputs
+/// and encapsulating the responses for the first steps of the return journey.
+/// This is Chiefly sections 4.3 and 4.4 of that RFC.
+/// Significant sections of this are therefore also implementing parts of HPKE from RFC
+/// https://datatracker.ietf.org/doc/rfc9180/ as the innermost layer of OHTTP is based on that.
+///
+/// To allow the response bypass functionality some of those internal operations are exposed (in part) as a
+/// means to make an unauthenticated, but encrypted, reply to the client as if it was a "normal" OHTTP reply
+/// stream. But allowing the AEAD key to be known so it can be transmited (on a separate already existing
+/// secure channel) thus avoiding the need for an additional Public/Private key handshake.
 struct OHTTPServerStateMachine {
     public static let logger: Logger = .init(
         subsystem: "com.apple.cloudos.cloudboard",
         category: "OHTTPServerStateMachine"
     )
+    /// This is assumed throughput the system
+    /// if it were to be changed there would be a cascade well beyond this type
+    private static let ciphersuite = HPKE.Ciphersuite.Curve25519_SHA256_AES_GCM_128
 
     enum State {
         case awaitingKey([FinalizableChunk<Data>])
         case gotKeyAndNonce(key: SymmetricKey, nonce: Data, counter: UInt64)
         case gotKey(key: SymmetricKey)
+        // used as an intermediate state while performing transitions
+        // should never end up in this state after the receive functions return
         case modifying
     }
 
+    /// What is known at the point the key is received
+    struct HandshakeCompleteInfo {
+        /// decrypted data to be sent to the cloud app
+        let pendingInboundData: [FinalizableChunk<Data>]
+        /// the target for sending data back
+        let outboundStream: StreamingResponseProtocol
+    }
+
     private var state: State
+
+    var dataEncryptionKey: SymmetricKey? {
+        switch self.state {
+        case .gotKeyAndNonce(key: let key, nonce: _, counter: _):
+            return key
+        case .gotKey(key: let key):
+            return key
+        default:
+            return nil
+        }
+    }
 
     init() {
         self.state = .awaitingKey([])
@@ -88,8 +128,9 @@ struct OHTTPServerStateMachine {
 
     mutating func receiveKey(
         _ ohttpProtectedKey: Data,
-        privateKey: any HPKEDiffieHellmanPrivateKey
-    ) throws -> ([FinalizableChunk<Data>], OHTTPEncapsulation.StreamingResponse) {
+        privateKey: any HPKEDiffieHellmanPrivateKey,
+        responseBypassMode: ResponseBypassMode
+    ) throws -> HandshakeCompleteInfo {
         switch self.state {
         case .awaitingKey(let chunks):
             var chunkSlice = chunks[...]
@@ -104,14 +145,25 @@ struct OHTTPServerStateMachine {
             let recipient: HPKE.Recipient
             let key: SymmetricKey
             do {
-                var decapsulator = try OHTTPEncapsulation.StreamingRequestDecapsulator(
-                    requestHeader: requestHeader,
-                    mediaType: requestContentType,
-                    privateKey: privateKey
-                )
-                let keyBytes = try decapsulator.decapsulate(content: ohttpProtectedKey.dropFirst(consumed), final: true)
-                recipient = decapsulator.recipient
-                key = SymmetricKey(data: keyBytes)
+                // The SEP is only used at one point here, at the point the call to decapsulator construction via
+                // `PrivateKey.sharedSecretFromKeyAgreement`, however that call being in the constructor of the
+                // Recipient, or the first call to decapsulate is an implementation detail.
+                // Since the subsequent use of the symetric key that is created is trivial compared to the SEP call
+                // we just include the entire setup as being costed to that.
+                (recipient, key) = try cbSignposter.withIntervalSignpost("CB.sep.unwrap") {
+                    var decapsulator = try OHTTPEncapsulation.StreamingRequestDecapsulator(
+                        requestHeader: requestHeader,
+                        mediaType: requestContentType,
+                        privateKey: privateKey
+                    )
+                    let keyBytes = try decapsulator.decapsulate(
+                        content: ohttpProtectedKey.dropFirst(consumed),
+                        final: true
+                    )
+                    let recipient = decapsulator.recipient
+                    let key = SymmetricKey(data: keyBytes)
+                    return (recipient, key)
+                }
             } catch {
                 throw ReportableJobHelperError(wrappedError: error, reason: .ohttpDecapsulationFailure)
             }
@@ -150,13 +202,36 @@ struct OHTTPServerStateMachine {
             } else {
                 self.state = .gotKey(key: key)
             }
+            let outboundStream: StreamingResponseProtocol =
+                switch responseBypassMode {
+                case .none:
+                    try OHTTPEncapsulation.StreamingResponse(
+                        // This would be either the client or the proxy depending on who initiated
+                        // the request
+                        context: recipient,
+                        encapsulatedKey: requestHeader.encapsulatedKey,
+                        mediaType: responseContentType,
+                        ciphersuite: Self.ciphersuite
+                    )
+                case .matchRequestCiphersuiteSharedAeadState:
+                    /// This is used in the *worker* sending the response.
+                    /// This does a constrained subset of what ``OHTTPEncapsulation.StreamingResponse`` would
+                    /// have done if the original request appeared to come from the proxy, but in a manner
+                    /// where the client has been provided by another channel the expected AEAD key and AEAD
+                    /// nonce which will match with the internal state of the result of this call
+                    try ForcedStateStreamingResponse(
+                        // this should always be the proxy, but in a manner where it exposes (securely)
+                        // the necessary key and nonce that anyone else with that can decrypt it
+                        context: recipient,
+                        encapsulatedKey: requestHeader.encapsulatedKey,
+                        mediaType: responseContentType,
+                        ciphersuite: Self.ciphersuite
+                    )
+                }
 
-            return try (
-                decryptedChunks,
-                OHTTPEncapsulation.StreamingResponse(
-                    context: recipient, encapsulatedKey: requestHeader.encapsulatedKey, mediaType: responseContentType,
-                    ciphersuite: .Curve25519_SHA256_AES_GCM_128
-                )
+            return HandshakeCompleteInfo(
+                pendingInboundData: decryptedChunks,
+                outboundStream: outboundStream
             )
         case .gotKey, .gotKeyAndNonce:
             throw OHTTPError.receivedKeyTwice
@@ -218,13 +293,25 @@ extension Data {
     }
 }
 
-enum OHTTPError: Error, Equatable {
+enum OHTTPError: ReportableError, Equatable {
     case unableToParseEncapsulatedRequest
     case receivedKeyTwice
     case invalidNonceSize
     case insufficientBytesForAEAD
     case invalidAEAD
     case invalidWorkload(String)
+
+    var publicDescription: String {
+        let errorType = switch self {
+        case .unableToParseEncapsulatedRequest: "unableToParseEncapsulatedRequest"
+        case .receivedKeyTwice: "receivedKeyTwice"
+        case .invalidNonceSize: "invalidNonceSize"
+        case .insufficientBytesForAEAD: "insufficientBytesForAEAD"
+        case .invalidAEAD: "invalidAEAD"
+        case .invalidWorkload: "invalidWorkload"
+        }
+        return "ohttp.\(errorType)"
+    }
 }
 
 extension HPKE.Ciphersuite {

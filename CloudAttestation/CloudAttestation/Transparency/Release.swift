@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -21,7 +21,7 @@
 
 import Foundation
 import CryptoKit
-import SwiftASN1
+import SwiftASN1Internal
 
 /// A DER-codable structure that canonically represents all of the software components running on a device, including OS and installed cryptexes.
 /// Intended for use in Transparency Logs.

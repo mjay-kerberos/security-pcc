@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -17,6 +17,7 @@
 
 import Foundation
 import Virtualization
+import Virtualization_Private
 
 extension VMBundle {
     // VMBundle.Config is the on-disk representation of a Virtual Machine configuration
@@ -26,35 +27,48 @@ extension VMBundle {
         let machineIdentifier: Data // "opaque" representation of ECID
         let cpuCount: UInt
         let memorySize: UInt64
-        let networkConfig: NetworkConfig
+        let networkConfig: NetworkConfig // (legacy) == networkConfigs[0]
+        var networkConfigs: [NetworkConfig]?
         let romImages: VM.ROMImages? // optional firmware files for iBoot and/or vSEP
+        var virtMeshPlugin: String? // optional path to the VirtMesh plugin bundle
+        var virtMeshRank: Int?
 
         // init instantiates a new VMBundle.Config from parameters (typically when creating a new VM)
         init(
             vmConfig: VZVirtualMachineConfiguration,
             platformType: VM.PlatformType,
             platformFusing: VM.PlatformFusing?,
-            romImages: VM.ROMImages? = nil
+            romImages: VM.ROMImages? = nil,
+            virtMeshPlugin: String? = nil,
+            virtMeshRank: Int? = nil
         ) {
             self.platformType = platformType
             self.platformFusing = platformFusing
             if let platformConfig = vmConfig.platform as? VZMacPlatformConfiguration {
-                self.machineIdentifier = platformConfig.machineIdentifier.dataRepresentation
+                machineIdentifier = platformConfig.machineIdentifier.dataRepresentation
             } else {
-                self.machineIdentifier = Data()
+                machineIdentifier = Data()
             }
 
-            self.memorySize = vmConfig.memorySize
-            self.cpuCount = UInt(vmConfig.cpuCount)
+            memorySize = vmConfig.memorySize
+            cpuCount = UInt(vmConfig.cpuCount)
 
             if vmConfig.networkDevices.count > 0 {
-                // only using first config instance
-                self.networkConfig = VMBundle.Config.NetworkConfig(vmConfig.networkDevices[0])
+                var networkConfigs: [NetworkConfig] = []
+                for netDev in vmConfig.networkDevices {
+                    networkConfigs.append(VMBundle.Config.NetworkConfig(netDev))
+                }
+
+                self.networkConfigs = networkConfigs
+                networkConfig = networkConfigs.first!
             } else {
-                self.networkConfig = VMBundle.Config.NetworkConfig(mode: .none)
+                networkConfig = VMBundle.Config.NetworkConfig(mode: .none)
+                networkConfigs = [networkConfig]
             }
 
             self.romImages = romImages
+            self.virtMeshPlugin = virtMeshPlugin
+            self.virtMeshRank = virtMeshRank
         }
 
         // init instantiates VMBundle.Config from ondisk XML (config.) plist files (after creation)
@@ -69,8 +83,15 @@ extension VMBundle {
             let decoder = PropertyListDecoder()
             do {
                 self = try decoder.decode(Config.self, from: data)
+                guard (virtMeshRank == nil) == (virtMeshPlugin == nil) else {
+                    throw VMBundleError("VirtMesh has either rank or plugin path as nil")
+                }
             } catch {
                 throw VMBundleError("parse config \(url.path): \(error)")
+            }
+
+            if networkConfigs == nil {
+                networkConfigs = [networkConfig]
             }
 
             let configJSON = asJSON()
@@ -126,26 +147,27 @@ extension VMBundle {
 
             init(_ netdev: VZNetworkDeviceConfiguration) {
                 switch netdev.attachment {
-                case is VZBridgedNetworkDeviceAttachment:
-                    let attachment = netdev.attachment as! VZBridgedNetworkDeviceAttachment
-                    self.mode = .bridged
-                    self.options = [.bridgeIf(attachment.interface.identifier)]
+                case let attachment as VZBridgedNetworkDeviceAttachment:
+                    mode = .bridged
+                    options = [.bridgeIf(attachment.interface.identifier)]
 
                 case is VZNATNetworkDeviceAttachment:
-                    self.mode = .nat
-                    self.options = [.isolateIf(true)] // always set
+                    mode = .nat
+
+                case is _VZHostOnlyNetworkDeviceAttachment:
+                    mode = .hostOnly
 
                 default:
-                    self.mode = .none
+                    mode = .none
                 }
 
-                self.macAddr = netdev.macAddress.string
+                macAddr = netdev.macAddress.string
             }
         }
 
         enum NetworkOptions: Codable {
             case bridgeIf(String) // phy interface for VM guest to "bridge" onto
-            case isolateIf(Bool) // NAT mode
+            case isolateIf(Bool) // NAT mode (not implemented; support older config)
         }
     }
 }

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -21,7 +21,7 @@
 
 import os
 
-@_spi(Daemon) import Ensemble
+@_spi(Daemon) import AppleComputeEnsembler
 
 /// StateMachine protocol to define the states that an ensemble node can be in.
 protocol StateMachine {
@@ -95,12 +95,15 @@ class BaseStateMachine {
 	}
 }
 
-class LeaderStateMachine: BaseStateMachine, StateMachine {
+class LeaderStateMachineTLS: BaseStateMachine, StateMachine {
 	override func isAllowedTransition(targetState: EnsemblerStatus) -> Bool {
 		let allowedTransitions: [EnsemblerStatus: [EnsemblerStatus]] = [
-			.attesting: [.coordinating],
-			.keyRotationAttesting: [.ready],
-			.ready: [.attesting, .keyRotationAttesting],
+			.distributingCIOKey: [.coordinating],
+			.distributedCIOKey: [.distributingCIOKey, .reDistributingCIOKey],
+			.activating: [.distributedCIOKey],
+			.activated: [.activating],
+			.ready: [.activated, .distributedCIOKey],
+			.reDistributingCIOKey: [.ready],
 		]
 		if let statesAllowed = allowedTransitions[targetState] {
 			return statesAllowed.contains(self.state)
@@ -118,7 +121,7 @@ class LeaderStateMachine: BaseStateMachine, StateMachine {
 
 		// Fail if the transition is disallowed.
 		if !allowTransition {
-			Self.logger.error("Oops: Illegal state transition from \(self.state) to \(targetState)")
+			Self.logger.error("Oops: Illegal state transition from \(self.state, privacy: .public) to \(targetState, privacy: .public)")
 			throw EnsembleError.illegalStateTransition
 		}
 
@@ -127,7 +130,7 @@ class LeaderStateMachine: BaseStateMachine, StateMachine {
 	}
 }
 
-class FollowerStateMachine: BaseStateMachine, StateMachine {
+class FollowerStateMachineTLS: BaseStateMachine, StateMachine {
 	required init(singleNode: Bool) throws {
 		try super.init(singleNode: singleNode)
 		if self.singleNode {
@@ -137,12 +140,10 @@ class FollowerStateMachine: BaseStateMachine, StateMachine {
 
 	override func isAllowedTransition(targetState: EnsemblerStatus) -> Bool {
 		let allowedTransitions: [EnsemblerStatus: [EnsemblerStatus]] = [
-			.accepted: [.coordinating],
-			.pairing: [.accepted],
-			.pairingComplete: [.pairing, .keyRotationPairing],
-			.keyAccepted: [.pairingComplete],
-			.ready: [.keyAccepted],
-			.keyRotationPairing: [.ready],
+			.keyAccepted: [.coordinating, .ready],
+			.activating: [.keyAccepted],
+			.activated: [.activating],
+			.ready: [.activated, .keyAccepted],
 		]
 		if let statesAllowed = allowedTransitions[targetState] {
 			return statesAllowed.contains(self.state)
@@ -160,7 +161,7 @@ class FollowerStateMachine: BaseStateMachine, StateMachine {
 
 		// Fail if the transition is disallowed.
 		if !allowTransition {
-			Self.logger.error("Oops: Illegal state transition from \(self.state) to \(targetState)")
+			Self.logger.error("Oops: Illegal state transition from \(self.state, privacy: .public) to \(targetState, privacy: .public)")
 			throw EnsembleError.illegalStateTransition
 		}
 

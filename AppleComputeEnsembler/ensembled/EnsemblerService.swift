@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -23,9 +23,10 @@ import DarwinPrivate.os.variant
 import EnsembleConfiguration
 import Foundation
 import OSLog
+@_weakLinked import SecureConfigDB
 import Security
 
-@_spi(Daemon) import Ensemble // _spi interface used for mach service name, protocol
+@_spi(Daemon) import AppleComputeEnsembler // _spi interface used for mach service name, protocol
 
 import CryptoKit
 @_spi(Private) import XPC // Private/_spi interfaces used for entitlement-checking
@@ -50,14 +51,18 @@ public enum EnsemblerServiceError: Error {
 
 /// XPC server for EnsemblerService
 struct EnsemblerService {
-	static var ensembler: Ensembler?
+	static var ensembler: EnsemblerInterface?
 
 	static let logger = Logger(subsystem: kEnsemblerPrefix, category: "Service")
 	let kEnsembleActivationPreferenceKey = "AutoActivation"
 	let kEnsembleAutoRestartPreferenceKey = "AutoRestartForDevOnly"
 	let kSkipDarwinInitCheckPreferenceKey = "SkipDarwinInitCheck"
+	let kSkipWaitingForDenaliPreferenceKey = "SkipWaitingForDenali"
 	let kDarwinInitTimeoutPreferenceKey = "DarwinInitTimeout"
+	let kEnsemblerTimeoutPreferenceKey = "EnsemblerTimeout"
+	let kDataKeyDeleteTimeoutPreferenceKey = "DataKeyDeleteTimeout"
 	let kEnsembleUseStubAttestationPreferenceKey = "UseStubAttestation"
+	let kEnsembleUseMTLSPreferenceKey = "UseMTLS"
 
 	// If we did not suppress activation in the daemon, we should assume that it is needed
 	private func checkPrefsForActivation() -> Bool {
@@ -68,10 +73,10 @@ struct EnsemblerService {
 			kCFPreferencesAnyHost
 		) as? Bool else {
 			EnsemblerService.logger.info(
-				"""
-				Did not find \(self.kEnsembleActivationPreferenceKey) preference, \
-				proceeding to activate...
-				"""
+                """
+                Did not find \(self.kEnsembleActivationPreferenceKey, privacy: .public) preference, \
+                proceeding to activate...
+                """
 			)
 			return true
 		}
@@ -87,7 +92,7 @@ struct EnsemblerService {
 		) as? Bool else {
 			EnsemblerService.logger.info(
 				"""
-				Did not find \(self.kEnsembleAutoRestartPreferenceKey) preference, \
+				Did not find \(self.kEnsembleAutoRestartPreferenceKey, privacy: .public) preference, \
 				defaulting to false...
 				"""
 			)
@@ -95,9 +100,9 @@ struct EnsemblerService {
 		}
 		if enableAutoRestart,
 		   !os_variant_allows_internal_security_policies(kEnsemblerEntitlementPrefix) {
-			EnsemblerService.logger.error(
+			EnsemblerService.logger.warning(
 				"""
-				Oops: \(self.kEnsembleAutoRestartPreferenceKey) \
+				Oops: \(self.kEnsembleAutoRestartPreferenceKey, privacy: .public) \
 				can only be set to true on an internal \
 				OS variant. Forcing to false.
 				"""
@@ -118,9 +123,9 @@ struct EnsemblerService {
 		}
 		if skipDarwinInitCheck,
 		   !os_variant_allows_internal_security_policies(kEnsemblerEntitlementPrefix) {
-			EnsemblerService.logger.error(
+			EnsemblerService.logger.warning(
 				"""
-				Oops: \(self.kSkipDarwinInitCheckPreferenceKey) \
+				Oops: \(self.kSkipDarwinInitCheckPreferenceKey, privacy: .public) \
 				can only be set to true on an internal \
 				OS variant. Forcing to false.
 				"""
@@ -128,6 +133,55 @@ struct EnsemblerService {
 			return false
 		}
 		return skipDarwinInitCheck
+	}
+
+	func checkPrefsForSkipWaitingForDenali() throws -> Bool? {
+		guard let skipWaitingForDenali = CFPreferencesCopyValue(
+			kSkipWaitingForDenaliPreferenceKey as CFString,
+			kEnsemblerPrefix as CFString,
+			kCFPreferencesAnyUser,
+			kCFPreferencesAnyHost
+		) as? Bool else {
+			EnsemblerService.logger.warning(
+				"""
+				\(self.kSkipWaitingForDenaliPreferenceKey, privacy: .public) \
+				not found.
+				"""
+			)
+			return nil
+		}
+
+		let secureConfigParameters = try SecureConfigParameters.loadContents()
+		// for customer policy this parameter can only be set to true if the code is running in VRE
+		let disableAppleInfrastructureEnforcementForResearch =
+			secureConfigParameters.research_disableAppleInfrastrucutureEnforcement ?? false
+
+		// we should allow the pref to be set only
+		// if either the secure config is set or if it is internal
+		// variant.
+		if skipWaitingForDenali,
+		   os_variant_allows_internal_security_policies(kEnsemblerEntitlementPrefix) ||
+		   disableAppleInfrastructureEnforcementForResearch {
+			EnsemblerService.logger.info(
+				"""
+				\(self.kSkipWaitingForDenaliPreferenceKey, privacy: .public) \
+				found and set to true.
+				"""
+			)
+			return true
+		}
+
+		if skipWaitingForDenali {
+			EnsemblerService.logger.info(
+				"""
+				Oops: \(self.kSkipWaitingForDenaliPreferenceKey, privacy: .public) \
+				can only be set to true on an internal \
+				OS variant. Forcing to false.
+				"""
+			)
+		}
+
+		return false
 	}
 
 	func checkPrefsForDarwinInitTimeout() -> Int? {
@@ -139,7 +193,7 @@ struct EnsemblerService {
 		) as? Int else {
 			EnsemblerService.logger.info(
 				"""
-				Did not find \(self.kDarwinInitTimeoutPreferenceKey) preference, \
+				Did not find \(self.kDarwinInitTimeoutPreferenceKey, privacy: .public) preference, \
 				ignoring...
 				"""
 			)
@@ -148,6 +202,67 @@ struct EnsemblerService {
 		return darwinInitTimeout
 	}
 
+	func checkPrefsForEnsemberTimeout() -> Int? {
+		guard let ensemblerTimeout = CFPreferencesCopyValue(
+			kEnsemblerTimeoutPreferenceKey as CFString,
+			kEnsemblerPrefix as CFString,
+			kCFPreferencesAnyUser,
+			kCFPreferencesAnyHost
+		) as? Int else {
+			EnsemblerService.logger.info(
+				"""
+				Did not find \(self.kEnsemblerTimeoutPreferenceKey, privacy: .public) preference, \
+				ignoring...
+				"""
+			)
+			return nil
+		}
+		return ensemblerTimeout
+	}
+    
+    func checkPrefsForTraceID() throws -> String {
+        let traceIDSecureConfig = "com.apple.cloudos.tracing.traceID"
+        let configParams = try SecureConfigParameters.loadContents()
+        
+        do {
+            // Pull the configuration value down
+            let traceID = try configParams.unvalidatedStringParameter(traceIDSecureConfig)
+            return traceID
+        }
+        catch {
+            EnsemblerService.logger.info(
+                """
+                Did not find \(traceIDSecureConfig, privacy: .public) preference, \
+                ignoring...
+                """
+            )
+            return ""
+        }
+        
+        
+    }
+
+    func checkPrefsForSpanID() throws -> String {
+        let spanIDSecureConfig = "com.apple.cloudos.tracing.spanID"
+        let configParams = try SecureConfigParameters.loadContents()
+        
+        do {
+            // Pull the configuration value down
+            let spanID = try configParams.unvalidatedStringParameter(spanIDSecureConfig)
+            return spanID
+        }
+        catch {
+            EnsemblerService.logger.info(
+                """
+                Did not find \(spanIDSecureConfig, privacy: .public) secureconfig, \
+                ignoring...
+                """
+            )
+            return ""
+        }
+    }
+
+    
 	private func checkPrefsForUseStubAttestation() -> Bool {
 		#if os(iOS)
 		guard let useStubAttestation = CFPreferencesCopyValue(
@@ -158,7 +273,7 @@ struct EnsemblerService {
 		) as? Bool else {
 			EnsemblerService.logger.info(
 				"""
-				Did not find \(self.kEnsembleUseStubAttestationPreferenceKey) preference, \
+				Did not find \(self.kEnsembleUseStubAttestationPreferenceKey, privacy: .public) preference, \
 				defaulting to false for iOS
 				"""
 			)
@@ -167,9 +282,9 @@ struct EnsemblerService {
 
 		if useStubAttestation,
 		   !os_variant_allows_internal_security_policies(kEnsemblerEntitlementPrefix) {
-			EnsemblerService.logger.error(
+			EnsemblerService.logger.warning(
 				"""
-				Oops: \(self.kEnsembleUseStubAttestationPreferenceKey) \
+				Oops: \(self.kEnsembleUseStubAttestationPreferenceKey, privacy: .public) \
 				can only be set to true on an internal \
 				OS variant. Forcing to false.
 				"""
@@ -185,6 +300,38 @@ struct EnsemblerService {
 		#endif
 	}
 
+	func checkPrefsForDataKeyDeleteTimeout() -> Double? {
+		guard let dataKeyDeleteTiemout = CFPreferencesCopyValue(
+			kDataKeyDeleteTimeoutPreferenceKey as CFString,
+			kEnsemblerPrefix as CFString,
+			kCFPreferencesAnyUser,
+			kCFPreferencesAnyHost
+		) as? Double else {
+			EnsemblerService.logger.info(
+				"""
+				Did not find \(self.kDataKeyDeleteTimeoutPreferenceKey, privacy: .public) preference, \
+				ignoring...
+				"""
+			)
+			return nil
+		}
+		return dataKeyDeleteTiemout
+	}
+
+	private func checkforAllowDefaultOneNodeConfig() throws -> Bool {
+		let secureConfigParameters = try SecureConfigParameters.loadContents()
+		// for customer policy this parameter can only be set to true if the code is running in VRE
+		let disableAppleInfrastructureEnforcementForResearch =
+			secureConfigParameters.research_disableAppleInfrastrucutureEnforcement ?? false
+
+		// we should allow default one node config if either the secure config is set or if it is internal
+		// variant.
+		return disableAppleInfrastructureEnforcementForResearch ||
+			os_variant_allows_internal_security_policies(
+				kEnsemblerEntitlementPrefix
+			)
+	}
+
 	init() {
 		EnsemblerService.logger.info("Initializing EnsemblerService.")
 
@@ -195,27 +342,36 @@ struct EnsemblerService {
 		do {
 			let autoRestart = self.checkPrefsForAutoRestart()
 			let skipDarwinInitCheck = self.checkPrefsForSkipDarwinInitCheck()
+			let skipWaitingForDenali = try self.checkPrefsForSkipWaitingForDenali() ?? false
 			let darwinInitTimeout = self.checkPrefsForDarwinInitTimeout()
 			let useStubAttestation = self.checkPrefsForUseStubAttestation()
-			let allowDefaultOneNodeConfig = os_variant_allows_internal_security_policies(
-				kEnsemblerEntitlementPrefix
-			)
-			EnsemblerService.ensembler = try Ensembler(
-				autoRestart: autoRestart,
-				skipDarwinInitCheckOpt: skipDarwinInitCheck,
-				darwinInitTimeout: darwinInitTimeout,
-				useStubAttestation: useStubAttestation,
-				allowDefaultOneNodeConfig: allowDefaultOneNodeConfig
-			)
-			// Has the daemon been told to unconditionally activate?
+			let allowDefaultOneNodeConfig = try self.checkforAllowDefaultOneNodeConfig()
+			let dataKeyDeleteTimeout = self.checkPrefsForDataKeyDeleteTimeout()
+			let ensemblerTimeout = self.checkPrefsForEnsemberTimeout()
+            let traceID = try self.checkPrefsForTraceID()
+            let spanID = try self.checkPrefsForSpanID()
+            
+            EnsemblerService.logger.info("Initializing EnsemblerService which uses mTLS.")
+            EnsemblerService.ensembler = try EnsemblerTLS(
+                autoRestart: autoRestart,
+                skipDarwinInitCheckOpt: skipDarwinInitCheck,
+                darwinInitTimeout: darwinInitTimeout,
+                useStubAttestation: useStubAttestation,
+                allowDefaultOneNodeConfig: allowDefaultOneNodeConfig,
+                dataKeyDeleteTimeout: dataKeyDeleteTimeout,
+                skipWaitingForDenali: skipWaitingForDenali,
+                ensemblerTimeout: ensemblerTimeout,
+                traceID: traceID,
+                spanID: spanID
+            )
+			
 			if self.checkPrefsForActivation() == true {
 				try EnsemblerService.ensembler?.activate()
 			}
-
 		} catch {
 			// This state is technically not fatal. We just won't initialize.
-			EnsemblerService.logger.error(
-				"Failed to initialize ensembler service at load: \(error)"
+			EnsemblerService.logger.warning(
+				"Failed to initialize ensembler service at load: \(error, privacy: .public)"
 			)
 		}
 	}
@@ -225,7 +381,7 @@ struct EnsemblerService {
 		/// This information can be provided regardless of whether a configuration has been loaded
 		func getStatus() -> Encodable {
 			EnsemblerService.logger.debug("Fetching status")
-			guard let status = EnsemblerService.ensembler?.status else {
+			guard let status = EnsemblerService.ensembler?.getStatus() else {
 				EnsemblerService.logger.error("Ensembler NOT configured! Initialization error?")
 				return EnsemblerResponse(result: true, status: .uninitialized)
 			}
@@ -244,7 +400,7 @@ struct EnsemblerService {
 			}
 			// If the ensembler is initialized, we fetch the draining state
 			EnsemblerService.logger.info("Found ensembler, returning draining state...")
-			return EnsemblerResponse(result: true, draining: EnsemblerService.ensembler?.draining)
+			return EnsemblerResponse(result: true, draining: EnsemblerService.ensembler?.getDraninigStatus())
 		}
 
 		/// Get ensemble ID
@@ -255,7 +411,47 @@ struct EnsemblerService {
 				return EnsemblerResponse(result: false, status: .uninitialized)
 			}
 			EnsemblerService.logger.debug("Found ensembler, getting ensemble ID...")
-			return EnsemblerResponse(result: true, ensembleID: ensembler.ensembleID)
+			return EnsemblerResponse(result: true, ensembleID: ensembler.getEnsembleID())
+		}
+
+		// trigger distributing the key and return SingleUseKeyToken
+		func distributeDataKey(key: Data, type: DistributionType) -> Encodable {
+			EnsemblerService.logger.debug("Distributing the KVCache key")
+			guard let ensembler = EnsemblerService.ensembler else {
+				EnsemblerService.logger.error("Ensembler NOT configured! Initialization error?")
+				return EnsemblerResponse(result: false, status: .uninitialized)
+			}
+			EnsemblerService.logger.debug("Found ensembler, distributing KVKey...")
+			do {
+				return try EnsemblerResponse(
+					result: true,
+					singleUseKeyToken: ensembler.distributeDataKey(key: key, type: type)
+				)
+			} catch {
+				EnsemblerService.logger.error("Error distributing KVKey: \(error, privacy: .public)")
+				return EnsemblerResponse(result: false)
+			}
+		}
+
+		// get the KVCache key
+		func getDataKey(token: SingleUseKeyToken) -> Encodable {
+			EnsemblerService.logger.debug("Getting the KVCache key")
+			guard let ensembler = EnsemblerService.ensembler else {
+				EnsemblerService.logger.error("Ensembler NOT configured! Initialization error?")
+				return EnsemblerResponse(result: false, status: .uninitialized)
+			}
+			EnsemblerService.logger.debug("Found ensembler, getting KVKey...")
+			do {
+				guard let keyData = try ensembler.getDataKey(token: token) else {
+					EnsemblerService.logger
+						.error("We got nil key data from ensembler, perhaps key was not found for token \(token, privacy: .public)")
+					return EnsemblerResponse(result: false)
+				}
+				return EnsemblerResponse(result: true, kvKey: keyData)
+			} catch {
+				EnsemblerService.logger.error("Error getting KVKey: \(error, privacy: .public)")
+				return EnsemblerResponse(result: false)
+			}
 		}
 
 		/// Get maxBuffersPerKey
@@ -270,7 +466,7 @@ struct EnsemblerService {
 			do {
 				return try EnsemblerResponse(result: true, maxBuffersPerKey: ensembler.getMaxBuffersPerKey())
 			} catch {
-				EnsemblerService.logger.error("Error getting max buffers per key: \(error)")
+				EnsemblerService.logger.error("Error getting max buffers per key: \(error, privacy: .public)")
 				return EnsemblerResponse(result: false)
 			}
 		}
@@ -287,7 +483,7 @@ struct EnsemblerService {
 			do {
 				return try EnsemblerResponse(result: true, maxSecsPerKey: ensembler.getMaxSecondsPerKey())
 			} catch {
-				EnsemblerService.logger.error("Error getting max buffers per key: \(error)")
+				EnsemblerService.logger.error("Error getting max buffers per key: \(error, privacy: .public)")
 				return EnsemblerResponse(result: false)
 			}
 		}
@@ -300,11 +496,11 @@ struct EnsemblerService {
 				return EnsemblerResponse(result: true, status: .uninitialized)
 			}
 
-			guard ensembler.status == .ready else {
-				EnsemblerService.logger.error(
+			guard ensembler.getStatus() == .ready else {
+				EnsemblerService.logger.warning(
 					"Ensembler not ready yet. Cannot encrypt before status is ready"
 				)
-				return EnsemblerResponse(result: true, status: ensembler.status)
+				return EnsemblerResponse(result: true, status: ensembler.getStatus())
 			}
 
 			do {
@@ -324,10 +520,10 @@ struct EnsemblerService {
 				return EnsemblerResponse(result: true, status: .uninitialized)
 			}
 
-			guard ensembler.status == .ready else {
+			guard ensembler.getStatus() == .ready else {
 				EnsemblerService.logger
 					.warning("Ensembler not ready yet. Cannot decrypt before status is ready")
-				return EnsemblerResponse(result: true, status: ensembler.status)
+				return EnsemblerResponse(result: true, status: ensembler.getStatus())
 			}
 
 			do {
@@ -347,17 +543,17 @@ struct EnsemblerService {
 				return EnsemblerResponse(result: false, status: .uninitialized)
 			}
 
-			guard ensembler.status == .ready else {
+			guard ensembler.getStatus() == .ready else {
 				EnsemblerService.logger
-					.error("Ensembler not ready yet. Cannot get auth code before status is ready")
-				return EnsemblerResponse(result: false, status: ensembler.status)
+					.warning("Ensembler not ready yet. Cannot get auth code before status is ready")
+				return EnsemblerResponse(result: false, status: ensembler.getStatus())
 			}
 
 			do {
 				let authCode = try ensembler.getAuthCode(data: data)
 				return EnsemblerResponse(result: true, authCode: authCode)
 			} catch {
-				EnsemblerService.logger.error("Error getting auth code : \(error)")
+				EnsemblerService.logger.error("Error getting auth code : \(error, privacy: .public)")
 				return EnsemblerResponse(result: false)
 			}
 		}
@@ -370,12 +566,12 @@ struct EnsemblerService {
 				return EnsemblerResponse(result: true, status: .uninitialized)
 			}
 
-			guard ensembler.status == .ready else {
+			guard ensembler.getStatus() == .ready else {
 				EnsemblerService.logger
 					.warning(
 						"Ensembler not ready yet. Cannot rotate the shared key before the status is ready"
 					)
-				return EnsemblerResponse(result: true, status: ensembler.status)
+				return EnsemblerResponse(result: true, status: ensembler.getStatus())
 			}
 
 			do {
@@ -397,9 +593,9 @@ struct EnsemblerService {
 				return EnsemblerResponse(result: true)
 			}
 			do {
-				EnsemblerService.ensembler = try Ensembler()
+				EnsemblerService.ensembler = try EnsemblerTLS()
 			} catch {
-				EnsemblerService.logger.error("Failed to reload configuration: \(error)")
+				EnsemblerService.logger.error("Failed to reload configuration: \(error, privacy: .public)")
 				return EnsemblerResponse(result: false)
 			}
 			EnsemblerService.logger.info("Configuration loaded.")
@@ -412,24 +608,24 @@ struct EnsemblerService {
 				try EnsemblerService.ensembler?.activate()
 				return EnsemblerResponse(result: true)
 			} catch {
-				EnsemblerService.logger.error("Ensembler activation failed: \(error)")
+				EnsemblerService.logger.error("Ensembler activation failed: \(error, privacy: .public))")
 				return EnsemblerResponse(result: false, error: String(describing: error))
 			}
 		}
 
 		func getNodeMap() -> Encodable {
 			EnsemblerService.logger.debug("Attempting to fetch nodeMap")
-			return EnsemblerResponse(result: true, nodesInfo: EnsemblerService.ensembler?.nodeMap)
+			return EnsemblerResponse(result: true, nodesInfo: EnsemblerService.ensembler?.getNodeMap())
 		}
 
 		func sendTestMessage(destination: Int) -> Encodable {
-			EnsemblerService.logger.info("Attempting to send test message to \(destination)")
+			EnsemblerService.logger.info("Attempting to send test message to \(destination, privacy: .public)")
 			do {
 				try EnsemblerService.ensembler?.sendTestMessage(destination: destination)
 				return EnsemblerResponse(result: true)
 			} catch {
 				EnsemblerService.logger.error(
-					"Failed to send test message to \(destination), error: \(error)"
+                    "Failed to send test message to \(destination, privacy: .public), error: \(error, privacy: .public)"
 				)
 				return EnsemblerResponse(result: false, error: String(describing: error))
 			}
@@ -447,7 +643,7 @@ struct EnsemblerService {
 				let diags = try EnsemblerService.ensembler?.checkConnectivity()
 				return EnsemblerResponse(result: true, cableDiagnostics: diags)
 			} catch {
-				EnsemblerService.logger.error("Failed to get cable diagnostics, error: \(error)")
+				EnsemblerService.logger.error("Failed to get cable diagnostics, error: \(error, privacy: .public)")
 				return EnsemblerResponse(result: false, error: String(describing: error))
 			}
 		}
@@ -462,13 +658,13 @@ struct EnsemblerService {
 			)
 			else {
 				let err = EnsemblerServiceError.unentitledCaller
-				EnsemblerService.logger.error("Refused client: \(err)")
+				EnsemblerService.logger.error("Refused client: \(err, privacy: .public)")
 				return EnsemblerResponse(result: false, error: String(describing: err))
 			}
 
 			guard xpc_bool_get_value(readEntitlement) == true else {
 				let err = EnsemblerServiceError.unauthorizedOrUnknownOperation
-				EnsemblerService.logger.error("Refused client: \(err)")
+				EnsemblerService.logger.error("Refused client: \(err, privacy: .public)")
 				return EnsemblerResponse(result: false, error: String(describing: err))
 			}
 
@@ -537,7 +733,7 @@ struct EnsemblerService {
 							"""
 							Missing entitlement: \
 							.getCableDiagnostics needs at least one of the following: \
-							[\(kEnsemblerHealthEntitlement), \(kEnsemblerControlEntitlement)]
+							[\(kEnsemblerHealthEntitlement, privacy: .public), \(kEnsemblerControlEntitlement, privacy: .public)]
 							"""
 						)
 						return EnsemblerResponse(result: false, error: String(describing: err))
@@ -549,12 +745,16 @@ struct EnsemblerService {
 							"""
 							Missing entitlement: \
 							.getAuthCode needs following entitlement: \
-							[\(kEnsemblerCoordinationServiceEntitlement)]
+							[\(kEnsemblerCoordinationServiceEntitlement, privacy: .public)]
 							"""
 						)
 						return EnsemblerResponse(result: false, error: String(describing: err))
 					}
 					return self.getAuthCode(data: data)
+				case .distributeDataKey(let key, let type):
+					return self.distributeDataKey(key: key, type: type)
+				case .getDataKey(let token):
+					return self.getDataKey(token: token)
 				default:
 					break
 				}
@@ -574,7 +774,7 @@ struct EnsemblerService {
 				}
 
 				// Just error out if we're in a failed state. It's unclear if it's safe to proceed
-				guard EnsemblerService.ensembler?.status != .failed else {
+				guard EnsemblerService.ensembler?.getStatus() != .failed else {
 					return EnsemblerResponse(
 						result: false,
 						error: """
@@ -605,7 +805,7 @@ struct EnsemblerService {
 					// We don't differentiate an unentitled caller with an unknown message at
 					// this point
 					EnsemblerService.logger.error(
-						"Potentially unentitled request: \(String(describing: request))"
+						"Potentially unentitled request: \(String(describing: request), privacy: .public)"
 					)
 					let error = EnsemblerServiceError.unauthorizedOrUnknownOperation
 					return EnsemblerResponse(result: false, error: String(describing: error))
@@ -618,14 +818,14 @@ struct EnsemblerService {
 				}
 			} catch {
 				EnsemblerService.logger.error(
-					"Failed to decode message: \(String(reflecting: message))"
+					"Failed to decode message: \(String(reflecting: message), privacy: .public)"
 				)
 				return EnsemblerResponse(result: false, error: String(describing: error))
 			}
 		}
 
 		func handleCancellation(error: XPCRichError) {
-			EnsemblerService.logger.debug("Received session cancellation: \(error)")
+			EnsemblerService.logger.debug("Received session cancellation: \(error, privacy: .public)")
 		}
 	}
 
@@ -639,7 +839,7 @@ struct EnsemblerService {
 			await EnsembleWatchdogService.activate()
 			await Task.suspendIndefinitely()
 		} catch {
-			EnsemblerService.logger.error("Failed to create listener, error: \(error)")
+			EnsemblerService.logger.error("Failed to create listener, error: \(error, privacy: .public)")
 			throw EnsemblerServiceError.serviceInitializationFailure(error: error)
 		}
 	}

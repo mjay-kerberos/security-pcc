@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -37,11 +37,11 @@ public actor CloudServiceStatsWatchdogService {
                 try await WatchdogService.shared.activate(machServiceName: endpoint)
             } catch {
                 self.logger.error(
-                    "cloudOSWatchdogClient threw an error during activate(): \(error, privacy: .public)"
+                    "cloudOSWatchdogClient threw an error during activate(). error=\(error, privacy: .public)"
                 )
                 return
             }
-            self.logger.log("activated watchdog service endpoint \(endpoint, privacy: .public)")
+            self.logger.log("activated watchdog service endpoint. endpoint=\(endpoint, privacy: .public)")
         } else {
             self.logger.error("cloudOSWatchdogClient not available (runtime)")
             return

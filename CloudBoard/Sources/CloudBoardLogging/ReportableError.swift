@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -35,5 +35,12 @@ extension String {
     /// NOTE: Only to be used in cases where it is guaranteed to be safe to log the full error description
     public init(unredacted error: Error) {
         self = "\(String(reportable: error)) (\(error))"
+    }
+}
+
+package extension RawRepresentable<String> {
+    /// Any Error without associated values is trivially reportable if declared as such
+    package var publicDescription: String {
+        return self.rawValue
     }
 }

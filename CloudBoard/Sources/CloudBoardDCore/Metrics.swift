@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -235,6 +235,9 @@ extension HistogramBuckets {
         25,
         30,
     ]
+    fileprivate static let trustedProxyParametersToFirstRewrapDuration = waitForWarmupCompleteTime
+    fileprivate static let findWorkerDuration = waitForWarmupCompleteTime
+
     fileprivate static let jobHelperInstanceAllocationTime: Self = [
         0,
         0.005,
@@ -327,6 +330,34 @@ enum Metrics {
             var action: CounterAction
             var dimensions: MetricDimensions<DimensionKey>
         }
+
+        struct ActiveNodeReleaseDigestGauge: Gauge {
+            static let label: MetricLabel = "\(prefix)_active_node_release_digest"
+
+            var value: Int
+            var dimensions: MetricDimensions<DimensionKey>
+
+            enum DimensionKey: String, RawRepresentable {
+                case nodeReleaseDigestValue
+            }
+
+            init(value: Int, nodeReleaseDigestValue: String) {
+                self.value = value
+                self.dimensions = [
+                    .nodeReleaseDigestValue: "\(nodeReleaseDigestValue)",
+                ]
+            }
+        }
+
+        struct PhysicalMemoryFootprintGauge: Gauge {
+            static let label: MetricLabel = "\(prefix)_physical_memory_footprint_bytes"
+            var value: Int
+        }
+
+        struct LifetimeMaxPhysicalMemoryFootprintGauge: Gauge {
+            static let label: MetricLabel = "\(prefix)_lifetime_max_physical_memory_footprint_bytes"
+            var value: Int
+        }
     }
 
     enum JobHelperInstance {
@@ -343,7 +374,7 @@ enum Metrics {
 
     enum HotPropertiesController {
         struct HotPropertiesCanaryValue: Gauge {
-            static var label: MetricLabel = "\(prefix)_hotproperties_canary"
+            static let label: MetricLabel = "\(prefix)_hotproperties_canary"
             var value: Double
         }
     }
@@ -453,7 +484,7 @@ enum Metrics {
                 case prewarmedPoolSize
             }
 
-            static var buckets: HistogramBuckets = .jobHelperInstanceAllocationTime
+            static let buckets: HistogramBuckets = .jobHelperInstanceAllocationTime
             var dimensions: MetricDimensions<DimensionKey>
             var value: Double
 
@@ -478,7 +509,7 @@ enum Metrics {
             }
 
             // the same time buckets as used for time to allocate seem appropriate here
-            static var buckets: HistogramBuckets = .jobHelperInstanceAllocationTime
+            static let buckets: HistogramBuckets = .jobHelperInstanceAllocationTime
             var dimensions: MetricDimensions<DimensionKey>
             var value: Double
 
@@ -514,7 +545,7 @@ enum Metrics {
 
         struct AttemptsToAllocateJobHelperInstanceHistogram: Histogram {
             static let label: MetricLabel = "\(prefix)_attempts_to_allocate_jobhelper_histogram"
-            static var buckets: HistogramBuckets = .prewarmAllocateCount
+            static let buckets: HistogramBuckets = .prewarmAllocateCount
             var value: Int
         }
 
@@ -673,6 +704,52 @@ enum Metrics {
             }
         }
 
+        struct RequestTimeWithJobHelperExitHistogram: Histogram {
+            static let label: MetricLabel = "\(prefix)_request_duration_with_jobhelper_exit_seconds"
+            static let buckets: HistogramBuckets = .requestTime
+            var value: Double
+            var dimensions: MetricDimensions<DimensionKey>
+
+            enum Result: CustomStringConvertible {
+                case success
+                case error
+
+                var description: String {
+                    switch self {
+                    case .success:
+                        "success"
+                    case .error:
+                        "error"
+                    }
+                }
+            }
+
+            enum DimensionKey: String, RawRepresentable {
+                case result
+                case errorDescription
+            }
+
+            init(
+                duration: Duration,
+            ) {
+                self.value = duration.seconds
+                self.dimensions = [
+                    .result: "\(Result.success)",
+                ]
+            }
+
+            init(
+                duration: Duration,
+                failureReason: some Swift.Error
+            ) {
+                self.value = duration.seconds
+                self.dimensions = [
+                    .result: "\(Result.error)",
+                    .errorDescription: String(reportable: failureReason),
+                ]
+            }
+        }
+
         struct FailedWaitForWarmupCompleteTimeHistogram: Histogram {
             static let label: MetricLabel = "\(prefix)_failed_wait_for_warmup_complete_time_seconds"
             static let buckets: HistogramBuckets = .waitForWarmupCompleteTime
@@ -680,6 +757,59 @@ enum Metrics {
 
             init(duration: Duration) {
                 self.value = duration.seconds
+            }
+        }
+
+        // Duration between receiving the parameters and sending the decryption key message in the dial back
+        struct TrustedProxyParametersToFirstRewrapDurationHistogram: Histogram {
+            static let label: MetricLabel = "\(prefix)_trusted_proxy_parameters_to_first_rewrap_duration_seconds"
+            static let buckets: HistogramBuckets = .trustedProxyParametersToFirstRewrapDuration
+            var value: Double
+
+            init(duration: Duration) {
+                self.value = duration.seconds
+            }
+        }
+
+        // Duration between asking ROPEs for a worker and receiving the worker attestation in the proxy dial back
+        struct FindWorkerDuration: Histogram {
+            static let label: MetricLabel = "\(prefix)_find_worker_duration_seconds"
+            static let buckets: HistogramBuckets = .findWorkerDuration
+            var value: Double
+
+            init(duration: Duration) {
+                self.value = duration.seconds
+            }
+        }
+
+        struct TrustedProxyRequestsCounter: Counter {
+            static let label: MetricLabel = "\(prefix)_trusted_proxy_requests_total"
+            var action: CounterAction
+        }
+
+        struct TrustedProxyRequestsErrorCounter: ErrorCounter {
+            static let label: MetricLabel = "\(prefix)_trusted_proxy_requests_failed_total"
+            var dimensions: MetricDimensions<DefaultErrorDimensionKeys>
+            var action: CounterAction
+        }
+
+        struct TrustedProxyRequestsCloseErrorCounter: Counter {
+            static let label: MetricLabel = "\(prefix)_trusted_proxy_requests_close_failed_total"
+            var action: CounterAction
+
+            enum DimensionKey: String, RawRepresentable {
+                case grpcStatus
+                case ropesErrorCode
+            }
+
+            var dimensions: MetricDimensions<DimensionKey>
+
+            init(action: CounterAction, grpcStatus: Int, ropesErrorCode: Int) {
+                self.action = action
+                self.dimensions = [
+                    .grpcStatus: "\(grpcStatus)",
+                    .ropesErrorCode: "\(ropesErrorCode)",
+                ]
             }
         }
     }
@@ -746,7 +876,7 @@ enum Metrics {
 
     enum AttestationProvider {
         struct AttestationTimeToExpiryGauge: Gauge {
-            static var label: MetricLabel = "\(prefix)_attestation_time_to_expiry_seconds"
+            static let label: MetricLabel = "\(prefix)_attestation_time_to_expiry_seconds"
             var value: Double
 
             init(expireAt: Date) {

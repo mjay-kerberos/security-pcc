@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -44,12 +44,11 @@ extension CLI {
         var vmName: String = cmdDefaults.vmName
 
         func run() throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
             CLI.logger.log("show ip-address for \(vmName, privacy: .public)")
 
             let vm = VM(name: vmName, dataDir: globalOptions.datadir)
             try vm.open()
-            let ipAddress = (try? vm.localIPAddress()?.asString()) ?? "-"
+            let ipAddress = (try? vm.primaryIPAddress()?.asString()) ?? "-"
             print(ipAddress)
 
             CLI.logger.debug("ip-address \(ipAddress, privacy: .public)") // RFC1918 addr
@@ -74,27 +73,25 @@ extension CLI {
         var outputPath: String?
 
         func run() throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
             CLI.logger.log("show darwin-init for \(vmName, privacy: .public)")
 
             let vm = VM(name: vmName, dataDir: globalOptions.datadir)
             try vm.open()
 
-            let darwinInit: DarwinInit
+            let darwinInit: DarwinInitConfig
             do {
-                darwinInit = try DarwinInit(fromFile: vm.bundle.darwinInitPath.path)
+                darwinInit = try DarwinInitConfig(fromFile: vm.bundle.darwinInitPath.path)
                 CLI.logger.log("loaded darwin-init")
             } catch {
                 throw CLIError("cannot load darwin-init for \(vm.name): \(error)")
             }
 
-            CLI.logger.debug("darwin-init: \(darwinInit.json(pretty: false), privacy: .public)")
+            CLI.logger.debug("darwin-init: \(darwinInit.config, privacy: .public)")
 
-            let darwinInitJSON = darwinInit.json(pretty: true)
             if let outputPath {
-                try darwinInitJSON.write(toFile: outputPath, atomically: true, encoding: .utf8)
+                try darwinInit.save(toFile: outputPath)
             } else {
-                print(darwinInitJSON)
+                print(darwinInit.config)
             }
         }
     }

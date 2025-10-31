@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -16,11 +16,19 @@
 import CloudBoardLogging
 import InternalGRPC
 import InternalSwiftProtobuf
+import os
 
 struct InvokeWorkloadStreamState {
-    private var state: State
+    private static let logger: Logger = .init(
+        subsystem: "com.apple.cloudos.cloudboard",
+        category: "InvokeWorkloadStreamState"
+    )
 
-    init() {
+    private var state: State
+    private let isProxy: Bool
+
+    init(isProxy: Bool) {
+        self.isProxy = isProxy
         self.state = .awaitingSetup
     }
 
@@ -28,8 +36,8 @@ struct InvokeWorkloadStreamState {
         switch message.type {
         case .setup:
             try self.receiveSetup()
-        case .parameters:
-            try self.receiveParameters()
+        case .parameters(let parameters):
+            try self.receiveParameters(requestBypass: parameters.requestBypassed, nackRequest: parameters.requestNack)
         case .requestChunk(let chunk):
             try self.receiveChunk()
             if chunk.isFinal {
@@ -50,8 +58,8 @@ struct InvokeWorkloadStreamState {
         try self.state.receiveSetup()
     }
 
-    private mutating func receiveParameters() throws {
-        try self.state.receiveParameters()
+    private mutating func receiveParameters(requestBypass: Bool, nackRequest: Bool) throws {
+        try self.state.receiveParameters(requestBypass: requestBypass, nackRequest: nackRequest)
     }
 
     private mutating func receiveChunk() throws {
@@ -71,28 +79,44 @@ extension InvokeWorkloadStreamState {
     private enum State {
         case awaitingSetup
         case awaitingParameters
-        case receivedChunks
+        /// this may or may not have actually received them yet
+        case receivingChunks
         case receivedFinalChunk
         case receivedTerminationNotification
+        /// Even with request bypass, ROPES duplicates the auth token request chunk and sends it to the proxy
+        case requestBypassAwaitingAuthToken
+        /// Due to request bypass we aren't expecting anything else after receiving the auth token except termination
+        case requestBypass
 
         mutating func receiveSetup() throws {
             switch self {
             case .awaitingSetup:
                 self = .awaitingParameters
-            case .awaitingParameters, .receivedChunks, .receivedFinalChunk:
+            case .awaitingParameters, .receivingChunks, .receivedFinalChunk, .requestBypassAwaitingAuthToken,
+                 .requestBypass:
                 throw Error.receivedDuplicateSetup
             case .receivedTerminationNotification:
                 throw Error.receivedSetupAfterTermination
             }
         }
 
-        mutating func receiveParameters() throws {
+        mutating func receiveParameters(requestBypass: Bool, nackRequest: Bool) throws {
             switch self {
             case .awaitingParameters:
-                self = .receivedChunks
+                if requestBypass {
+                    if nackRequest {
+                        // If a NACK is requested, ROPES does not send an auth token and CloudBoard is expected to
+                        // directly send the NACK and complete the request
+                        self = .requestBypass
+                    } else {
+                        self = .requestBypassAwaitingAuthToken
+                    }
+                } else {
+                    self = .receivingChunks
+                }
             case .awaitingSetup:
                 throw Error.receivedParametersBeforeSetup
-            case .receivedChunks, .receivedFinalChunk:
+            case .receivingChunks, .receivedFinalChunk, .requestBypassAwaitingAuthToken, .requestBypass:
                 throw Error.receivedDuplicateParameters
             case .receivedTerminationNotification:
                 throw Error.receivedParametersAfterTermination
@@ -105,10 +129,14 @@ extension InvokeWorkloadStreamState {
                 throw Error.receivedChunkBeforeSetup
             case .awaitingParameters:
                 throw Error.receivedChunkBeforeParameters
+            case .requestBypassAwaitingAuthToken:
+                self = .requestBypass
+            case .requestBypass:
+                throw Error.receivedChunkUnderRequestBypass
             case .receivedFinalChunk:
                 throw Error.receivedChunkAfterFinal
-            case .receivedChunks:
-                self = .receivedChunks
+            case .receivingChunks:
+                self = .receivingChunks
             case .receivedTerminationNotification:
                 throw Error.receivedParametersAfterTermination
             }
@@ -120,9 +148,12 @@ extension InvokeWorkloadStreamState {
                 throw Error.receivedChunkBeforeSetup
             case .awaitingParameters:
                 throw Error.receivedChunkBeforeParameters
+            case .requestBypassAwaitingAuthToken, .requestBypass:
+                // The auth token can never be the final chunk so this is always unexpected
+                throw Error.receivedChunkUnderRequestBypass
             case .receivedFinalChunk:
                 throw Error.receivedDuplicateFinalChunk
-            case .receivedChunks:
+            case .receivingChunks:
                 self = .receivedFinalChunk
             case .receivedTerminationNotification:
                 throw Error.receivedFinalChunkAfterTermination
@@ -133,9 +164,12 @@ extension InvokeWorkloadStreamState {
             switch self {
             case .awaitingSetup:
                 throw Error.receivedTerminationBeforeSetup
-            case .awaitingParameters, .receivedChunks, .receivedFinalChunk:
+            case .awaitingParameters, .receivingChunks, .receivedFinalChunk, .requestBypassAwaitingAuthToken,
+                 .requestBypass:
                 // Expected e.g. for candidate nodes that have not been chosen to handle the request and might be used
                 // to signal other reasons for termination in the future
+                // Note that currently ROPES does *not* send a terminate message for requestBypass, but
+                // there's nothing stopping ROPES sending it and it would be a reasonable state transition
                 self = .receivedTerminationNotification
             case .receivedTerminationNotification:
                 throw Error.receivedDuplicateTermination
@@ -145,12 +179,21 @@ extension InvokeWorkloadStreamState {
         func receivedEOF() throws {
             switch self {
             case .receivedFinalChunk:
+                InvokeWorkloadStreamState.logger.debug("EOF after receivedFinalChunk - clean termination")
+                // Expected
+                ()
+            case .requestBypass:
+                InvokeWorkloadStreamState.logger.debug("EOF under requestBypass - clean termination")
                 // Expected
                 ()
             case .receivedTerminationNotification:
                 // Expected for candidate node requests if node has not been chosen
+                InvokeWorkloadStreamState.logger
+                    .debug("EOF after receivedTerminationNotification - clean(ish) aborted RPC")
                 throw Error.rpcAborted
-            case .awaitingSetup, .awaitingParameters, .receivedChunks:
+            case .awaitingSetup, .awaitingParameters, .receivingChunks, .requestBypassAwaitingAuthToken:
+                InvokeWorkloadStreamState.logger
+                    .warning("EOF in state \(String(describing: self), privacy: .public) - treating as a failure")
                 throw Error.unexpectedEndOfStream
             }
         }
@@ -166,6 +209,7 @@ extension InvokeWorkloadStreamState {
         case receivedChunkBeforeParameters
         case receivedChunkAfterFinal
         case receivedChunkAfterTermination
+        case receivedChunkUnderRequestBypass
         case receivedDuplicateFinalChunk
         case receivedParametersAfterTermination
         case receivedFinalChunkAfterTermination
@@ -174,6 +218,7 @@ extension InvokeWorkloadStreamState {
         case receivedDuplicateTermination
         case rpcAborted
         case unexpectedEndOfStream
+        case receivedRequestBypassNotification
     }
 }
 
@@ -194,6 +239,8 @@ extension InvokeWorkloadStreamState.Error: ReportableError {
             return "InvokeWorkloadStreamStateError.receivedChunkAfterFinal"
         case .receivedChunkAfterTermination:
             return "InvokeWorkloadStreamStateError.receivedChunkAfterTermination"
+        case .receivedChunkUnderRequestBypass:
+            return "InvokeWorkloadStreamStateError.receivedChunkUnderRequestBypass"
         case .receivedDuplicateFinalChunk:
             return "InvokeWorkloadStreamStateError.receivedDuplicateFinalChunk"
         case .receivedParametersAfterTermination:
@@ -210,6 +257,8 @@ extension InvokeWorkloadStreamState.Error: ReportableError {
             return "InvokeWorkloadStreamStateError.rpcAborted"
         case .unexpectedEndOfStream:
             return "InvokeWorkloadStreamStateError.unexpectedEndOfStream"
+        case .receivedRequestBypassNotification:
+            return "InvokeWorkloadStreamStateError.receivedRequestBypassNotification"
         }
     }
 }

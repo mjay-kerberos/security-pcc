@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -23,7 +23,6 @@ import os.log
 
 /// A validator intended for use with hardware ceremonies.
 public struct CeremonyValidator: Validator {
-
     static let logger = Logger(subsystem: "com.apple.CloudAttestation", category: "CeremonyValidator")
 
     @_spi(Private)
@@ -48,9 +47,9 @@ public struct CeremonyValidator: Validator {
         self.inner.ensembleTopologyValidation = false
     }
 
-    /// The default policy to use for validation.
-    public var defaultPolicy: some AttestationPolicy {
-        inner.defaultPolicy
+    /// The policy to use for validation.
+    public var policy: some AttestationPolicy {
+        inner.policy
     }
 
     /// Returns the key used to sign the attestation.
@@ -65,14 +64,21 @@ public struct CeremonyValidator: Validator {
     ) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle) {
         var validatorCopy = self.inner
         validatorCopy.pinnedSigner = key
-        return try await self.validate(bundle: bundle, nonce: nonce, policy: defaultPolicy)
+        return try await self.validate(bundle: bundle, nonce: nonce)
     }
 
     public func validate(
         bundle: AttestationBundle,
-        nonce: Data?,
-        policy: some AttestationPolicy
+        nonce: Data?
     ) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle) {
-        try await inner.validate(bundle: bundle, nonce: nonce, policy: policy)
+        try await inner.validate(bundle: bundle, nonce: nonce)
+    }
+}
+
+// MARK: - Legacy API support
+
+extension CeremonyValidator {
+    public var defaultPolicy: some AttestationPolicy {
+        self.policy
     }
 }

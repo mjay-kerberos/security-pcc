@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -31,17 +31,13 @@ public struct CachingTransparencyVerifier<Verifier>: TransparencyVerifier where 
         self.cache = .init(capacity: 4)
     }
 
-    public func verifyInclusion(of release: Release, proofs: TransparencyLogProofs) async throws {
-        _ = try await self.verifyExpiringInclusion(of: release, proofs: proofs)
-    }
-
-    public func verifyExpiringInclusion(of release: Release, proofs: TransparencyLogProofs) async throws -> Date {
-        let key = Key(release: release, proofs: proofs)
+    public func verifyExpiringInclusion(of digest: Data, proofs: TransparencyLogProofs) async throws -> Date {
+        let key = Key(digest: digest, proofs: proofs)
         if let cachedInclusionExpiry = await self.cache[key] {
             logger.log("Returning cached result (inclusionExpiration=\(cachedInclusionExpiry))")
             return cachedInclusionExpiry
         }
-        let date = try await self.verifier.verifyExpiringInclusion(of: release, proofs: proofs)
+        let date = try await self.verifier.verifyExpiringInclusion(of: digest, proofs: proofs)
 
         // cacheExpiration is not to be confused with the actual value of the cache, which is the parsed inclusion proof expiry
         // we set the cache expiration to be 1 day before
@@ -57,7 +53,7 @@ public struct CachingTransparencyVerifier<Verifier>: TransparencyVerifier where 
 // MARK: - Cache Key
 extension CachingTransparencyVerifier {
     private struct Key: Hashable, Sendable {
-        let release: Release
+        let digest: Data
         let proofs: TransparencyLogProofs
     }
 }

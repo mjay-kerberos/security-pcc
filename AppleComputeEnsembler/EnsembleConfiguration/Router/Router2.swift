@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -66,14 +66,14 @@ final class Router2: Router {
 	func channelChange(
 		channelIndex: Int,
 		node: Int,
-		chassis _: String,
+		chassis : String,
 		connected: Bool
 	) {
 		if !connected {
 			if let _ = cioMap[channelIndex] {
 				self.cioMap.removeValue(forKey: channelIndex)
 				self.ensembleFailed = true
-				self.configuration.delegate.ensembleFailed()
+				self.configuration.delegate.ensembleFailed(failMsg: "channelChange: channelIndex=\(channelIndex), node=\(node), chassis=\(chassis) not connected")
 			}
 			return
 		}
@@ -87,7 +87,7 @@ final class Router2: Router {
 			do {
 				try disableChannel(channelIndex)
 			} catch {
-				logger.error("Failed to disable channel: \(error)")
+				logger.error("Failed to disable channel: \(error, privacy: .public)")
 			}
 			return
 		}
@@ -107,10 +107,10 @@ final class Router2: Router {
 				cioChannelIndex: channelIndex
 			)
 		} catch {
-			logger.error("Failed to establish connection to node: \(node)")
+			logger.error("Failed to establish connection to node: \(node, privacy: .public)")
 			self.ensembleFailed = true
 
-			self.configuration.delegate.ensembleFailed()
+			self.configuration.delegate.ensembleFailed(failMsg: "Failed to establish connection to node: \(node)")
 			return
 		}
 	}
@@ -121,6 +121,13 @@ final class Router2: Router {
 			self.expectedTxConnections == 0
 	}
 
+	public func networkConnectionChange(
+		node _: Int,
+		connected _: Bool
+	) {
+		logger.error("Network Connection change is not supported on router2")
+	}
+
 	func connectionChange(
 		direction: BackendConnectionDirection,
 		channelIndex: Int,
@@ -129,7 +136,7 @@ final class Router2: Router {
 	) {
 		if !connected {
 			self.ensembleFailed = true
-			self.configuration.delegate.ensembleFailed()
+			self.configuration.delegate.ensembleFailed(failMsg: "connectionChange: channelIndex:\(channelIndex), node:\(node) disconnected")
 			return
 		}
 
@@ -148,10 +155,10 @@ final class Router2: Router {
 			self.transferMap[node]?.outputChannels.append(channelIndex)
 
 			guard let receiver = cioMap[channelIndex] else {
-				logger.error("No CIO receiver for CIO\(channelIndex)")
+				logger.error("No CIO receiver for CIO \(channelIndex, privacy: .public)")
 
 				self.ensembleFailed = true
-				self.configuration.delegate.ensembleFailed()
+				self.configuration.delegate.ensembleFailed(failMsg: "No CIO receiver for CIO\(channelIndex)")
 				return
 			}
 			self.routeMap[receiver] = "\(self.nodeRank)->\(receiver)"
@@ -166,7 +173,7 @@ final class Router2: Router {
 	func forwardMessage(_: EnsembleControlMessage.Forward) {
 		logger.warning("Router2 should not be receiving any forwarding messages")
 		self.ensembleFailed = true
-		self.configuration.delegate.ensembleFailed()
+		self.configuration.delegate.ensembleFailed(failMsg: "Router2 should not be receiving any forwarding messages")
 	}
 
 	func getCIOTransferMap() -> [Int: CIOTransferState] {

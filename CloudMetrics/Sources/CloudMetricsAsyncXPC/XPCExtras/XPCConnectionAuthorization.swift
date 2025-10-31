@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -43,7 +43,7 @@ extension XPCConnectionPassthroughAuthorization: @unchecked Sendable {}
 
 extension XPCConnectionPassthroughAuthorization: XPCConnectionAuthorization {
     internal func isAuthorized(connection: XPCConnection) -> Bool {
-        self.logger.info("Authorized \(connection.name, privacy: .public) connection.")
+        self.logger.info("Authorized connection. connection_name=\(connection.name, privacy: .public)")
         return true
     }
 }
@@ -68,10 +68,10 @@ extension XPCConnectionEntitlementAuthorization: @unchecked Sendable {}
 extension XPCConnectionEntitlementAuthorization: XPCConnectionAuthorization {
     internal func isAuthorized(connection: XPCConnection) -> Bool {
         if connection.hasEntitlement(self.entitlement) {
-            self.logger.info("Authorized connection \(connection.name, privacy: .public).")
+            self.logger.info("Authorized connection. connnection_name=\(connection.name, privacy: .public).")
             return true
         } else {
-            self.logger.warning("Denied connection \(connection.name, privacy: .public).")
+            self.logger.warning("Denied connection. connection_name=\(connection.name, privacy: .public).")
             return false
         }
     }

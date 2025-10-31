@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,10 +14,12 @@
 
 // Copyright © 2023 Apple. All rights reserved.
 
+import CFPreferenceCoder
+import CloudAttestation
 import CloudBoardAttestationDAPI
 import CloudBoardCommon
+import CloudBoardIdentity
 import CloudBoardMetrics
-import DarwinPrivate.dirhelper
 import Foundation
 import MobileGestaltPrivate
 import NIOCore
@@ -26,7 +28,7 @@ import os
 /// Long-lived daemon responsible for managing the periodically rotated SEP-backed node key, providing a corresponding
 /// attestation bundle to cloudboardd, and providing a key reference to cb_jobhelper instances to allow it to derive
 /// session keys for the end-to-end encrypted communication with the client.
-public actor CloudBoardAttestationDaemon {
+package actor CloudBoardAttestationDaemon {
     public static let logger: Logger = .init(
         subsystem: "com.apple.cloudos.cloudboard",
         category: "CloudBoardAttestationDaemon"
@@ -36,6 +38,8 @@ public actor CloudBoardAttestationDaemon {
 
     private let apiServer: CloudBoardAttestationAPIServerProtocol
     private let config: CloudBoardAttestationDConfiguration
+    // we have no need to mock out the clock at the level of the daemon
+    private let clock = ContinuousClock()
 
     private let metrics: MetricsSystem
 
@@ -59,7 +63,7 @@ public actor CloudBoardAttestationDaemon {
         self.metrics = metrics ?? CloudMetricsSystem(clientName: Self.metricsClientName)
     }
 
-    private init(
+    internal init(
         apiServer: CloudBoardAttestationAPIServerProtocol,
         config: CloudBoardAttestationDConfiguration,
         metrics: MetricsSystem
@@ -69,8 +73,91 @@ public actor CloudBoardAttestationDaemon {
         self.metrics = metrics
     }
 
-    public func start() async throws {
+    private func makeAttestationBundleCache(
+        customSearchPath: CustomSearchPathDirectory
+    ) throws -> any AttestationBundleCache {
+        do {
+            let cacheDirectory: URL = try customSearchPath.lookup(for: .cachesDirectory, in: .userDomainMask)
+                .appending(component: CFPreferences.cbAttestationPreferencesDomain)
+            return try OnDiskAttestationBundleCache(directoryURL: cacheDirectory)
+        } catch {
+            Self.logger.error(
+                "Failed to initialize on disk attestation bundle cache with error: \(error, privacy: .public) Falling back to noop cache."
+            )
+            return NoopAttestationBundleCache()
+        }
+    }
+
+    /// The means to make and validate attestations
+    /// This is fundamentally different depending on whether we are doing proper Customer validatable
+    /// SEP backed attestation or the in memory keys that allow testing
+    private func makeAttestationFunctionality(
+    ) throws -> (provider: any AttestationProviderProtocol, validatorFactory: any AttestationValidatorFactoryProtocol) {
+        if self.config.useInMemoryKey {
+            let attestationProvider = InMemoryKeyAttestationProvider(
+                // Leave this simple until someone has a use case to test it using in memory keys
+                // By simply agreeing it everywhere any tests using the proxy paths relying on this
+                // "just working" will not have to do anything
+                releaseDigest: CloudBoardAttestation.neverKnownReleaseDigest
+            )
+            return (attestationProvider, InMemoryAttestationValidatorFactory())
+        } else {
+            let attestationProvider = CloudAttestationProvider(
+                configuration: self.config,
+                metrics: self.metrics,
+                releaseDigestExpiryGracePeriod: self.config.transparencyLog.releaseDigestExpiryGracePeriodMinutes
+            )
+            return (attestationProvider, CloudAttestationValidatorFactory())
+        }
+    }
+
+    private func makeReleasesProvider() throws -> (any ReleasesProviderProtocol, IdentityManager?)? {
+        guard self.config.isProxy else {
+            return nil
+        }
+        if let releasesOverride = self.config.transparencyLog.proxiedReleaseDigestsOverride {
+            Self.logger.log("Creating releases provider from configuration")
+            return (InMemoryReleasesProvider(releases: releasesOverride), nil)
+        } else if self.config.cloudAttestation.includeTransparencyLogInclusionProof {
+            Self.logger.log("Creating releases provider from Transparency Log")
+            let identityManager: IdentityManager = .init(
+                useSelfSignedCert: false,
+                metricsSystem: self.metrics,
+                metricProcess: "cb_attestationd"
+            )
+            return (TransparencyLogReleasesProvider(
+                transparencyLog: SWTransparencyLog(
+                    environment: CloudAttestation.Environment.default,
+                    identityManager: identityManager,
+                    metadataApplicationNames: self.config.transparencyLog
+                        .transparencyLogMetadataApplications,
+                    retryConfig: self.config.transparencyLog.transparencyLogRetryConfiguration,
+                    metrics: self.metrics
+                ),
+                releaseDigestsPollingIntervalMinutes: self.config.transparencyLog
+                    .releaseDigestPollingIntervalMintues,
+                pollingIntervalJitter: self.config.transparencyLog.pollingIntervalJitter
+            ), identityManager)
+        } else {
+            return nil
+        }
+    }
+
+    public func start(
+        customSearchPath: CustomSearchPathDirectory
+    ) async throws {
         Self.logger.log("Starting")
+        switch customSearchPath {
+        case .systemNormal:
+            () // do nothing
+        case .fromPreferences:
+            configureTemporaryDirectory(suffix: CFPreferences.cbAttestationPreferencesDomain, logger: Self.logger)
+        case .explicit:
+            Self.logger.log("using an explicit custom search path")
+            if self.config.secureConfig.shouldEnforceAppleInfrastructureSecurityConfig {
+                fatalError("Attempt to set explicit search paths which should only be used for testing")
+            }
+        }
 
         let nodeInfo = NodeInfo.load()
         if let isLeader = nodeInfo.isLeader {
@@ -83,19 +170,58 @@ public actor CloudBoardAttestationDaemon {
         }
 
         do {
-            let attestationProvider: AttestationProvider = if self.config.useInMemoryKey {
-                InMemoryKeyAttestationProvider()
-            } else {
-                CloudAttestationProvider(configuration: self.config, metrics: self.metrics)
-            }
+            let attestationBundleCache = try self.makeAttestationBundleCache(customSearchPath: customSearchPath)
+            let (attestationProvider, attestationValidatorFactory) = try self.makeAttestationFunctionality()
+            let releasesProviderResult = try self.makeReleasesProvider()
 
-            try await CloudBoardAttestationServer(
-                apiServer: self.apiServer,
-                attestationProvider: attestationProvider,
-                keyLifetime: self.config.keyLifetime,
-                keyExpiryGracePeriod: self.config.keyExpiryGracePeriod,
-                metrics: self.metrics
-            ).run()
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                if let (releasesProvider, identityManager) = releasesProviderResult {
+                    group.addTask {
+                        try await releasesProvider.run()
+                    }
+                    group.addTask {
+                        if let identityManager {
+                            await identityManager.identityUpdateLoop()
+                        }
+                    }
+                }
+
+                group.addTask {
+                    try await CloudBoardAttestationServer(
+                        apiServer: self.apiServer,
+                        attestationProvider: attestationProvider,
+                        attestationValidatorFactory: attestationValidatorFactory,
+                        releasesProvider: releasesProviderResult?.0,
+                        enableReleaseSetValidation: self.config.enableReleaseSetValidation,
+                        keyLifetime: self.config.keyLifetime,
+                        keyExpiryGracePeriod: self.config.keyExpiryGracePeriod,
+                        metrics: self.metrics,
+                        attestationCache: attestationBundleCache,
+                        existingAttestationsAvailableOnlyOnNodeAfterReleaseEntryAddition: self.config.isProxy && self
+                            .config
+                            .existingAttestationsAvailableOnlyOnNodeAfterReleaseEntryAddition,
+                        maximumValidatedEntryCacheSize: self.config.maximumValidatedEntryCacheSize,
+                        isProxy: self.config.isProxy,
+                        clock: self.clock
+                    ).run()
+                }
+
+                group.addTask {
+                    try await runEmitMemoryUsageMetricsLoop(
+                        logger: Self.logger,
+                        metricsSystem: self.metrics,
+                        physicalMemoryFootprintGauge: {
+                            Metrics.CloudBoardAttestationDaemon.PhysicalMemoryFootprintGauge(value: $0)
+                        },
+                        lifetimeMaxPhysicalMemoryFootprintGauge: {
+                            Metrics.CloudBoardAttestationDaemon.LifetimeMaxPhysicalMemoryFootprintGauge(value: $0)
+                        }
+                    )
+                }
+
+                try await _ = group.next()
+                group.cancelAll()
+            }
         } catch {
             Self.logger.error("fatal error, exiting: \(String(unredacted: error), privacy: .public)")
             throw error
@@ -109,6 +235,11 @@ public actor CloudBoardAttestationDaemon {
 
 enum CloudBoardAttestationError: Error {
     case keyLifetimeTooLong
+    /// An error that can occur when validating an attestation
+    /// when it is checked by CloudBoard rather than the CloudAttestation framework.
+    /// This could occur in testing paths, but also where we cache the validation of an attestation
+    /// which may eventually expire
+    case attestationExpired
 }
 
 extension CloudBoardAttestationDConfiguration {

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -105,3 +105,16 @@ message CompressedAttestationList {
   // Length of the uncompressed bytes. This is provided as a hint for the decompressor on the client.
   uint32 uncompressed_length_hint = 3;
 }
+
+// When the client aborts an invoke request, it should send a ClientTerminate message before closing the stream.
+// This provides ROPES (and CloudBoard) useful information for monitoring/alerting purposes.
+message ClientTerminate {
+  enum Code {
+    UNDEFINED         = 0;
+    CRYPTO_ERROR      = 1; // Client failed to decrypt a response chunk
+    APPLICATION_ERROR = 2; // Error happened at the TIE layer
+  }
+  Code code              = 1;
+  optional string reason = 2;
+}
+

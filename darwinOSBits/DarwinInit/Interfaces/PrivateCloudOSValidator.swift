@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -22,8 +22,12 @@
 public enum ConfigSecurityPolicy: String, CaseIterable {
     /// DInitConfig must be validated to ensure secure and private handling of **customer** data.
     case customer
+    /// DInitConfig must be validated to ensure secure and private handling of **customerProxy** data.
+    case customerProxy
     /// DInitConfig must be validated to ensure secure and private handling of **internal carry / live-on** data.
     case carry
+    /// DInitConfig should not be validated
+    case none
 }
 
 struct PrivateCloudOSValidationError: Error, CustomStringConvertible {
@@ -114,6 +118,8 @@ protocol PrivateCloudOSValidator {
     func validate(applyTimeoutArgument: String?)
     func validate(bandwidthLimit: UInt64?)
     func validate(tailspinConfig:DInitTailSpinConfig?)
+    func validate(featureFlagsConfig:[DInitFeatureFlags]?)
+    func validateSecureConfigParameter(cloudboard_isProxy: Bool?)
 }
 
 extension PrivateCloudOSValidator {
@@ -203,6 +209,8 @@ extension PrivateCloudOSValidator {
                 validate(bandwidthLimit: config.bandwidthLimit)
             case .tailspinConfig:
                 validate(tailspinConfig: config.tailspinConfig)
+            case .featureFlagsConfig:
+                validate(featureFlagsConfig: config.featureFlagsConfig)
             }
         }
         // isValid will be set to false upon policy violation detection - rather than immediate error throwing - so that we receive helpful errors for every violation in the config
@@ -242,8 +250,10 @@ public class CustomerValidator: PrivateCloudOSValidator {
             "com.apple.cloudos.cloudboardd":[],
             "com.apple.cloudos.CloudBoardNullApp":[],
             "com.apple.cloudos.NullCloudController":[],
+            "com.apple.cloudos.hotproperties.cb_attestationd":[],
             "com.apple.cloudos.hotproperties.cb_jobhelper":[],
             "com.apple.cloudos.hotproperties.cloudboardd":[],
+            "com.apple.cloudos.hotproperties.splunkloggingd":[],
             "com.apple.cloudos.hotproperties.test":[],
             "com.apple.cloudos.hotproperties.tie":[],
             "com.apple.narrative":[],
@@ -269,14 +279,17 @@ public class CustomerValidator: PrivateCloudOSValidator {
             "com.apple.cloudos.cloudboardd":[],
             "com.apple.cloudos.CloudBoardNullApp":[],
             "com.apple.cloudos.NullCloudController":[],
+            "com.apple.cloudos.hotproperties.cb_attestationd":[],
             "com.apple.cloudos.hotproperties.cb_jobhelper":[],
             "com.apple.cloudos.hotproperties.cloudboardd":[],
+            "com.apple.cloudos.hotproperties.splunkloggingd":[],
             "com.apple.cloudos.hotproperties.test":[],
             "com.apple.cloudos.hotproperties.tie":[],
             // com.apple.narrative no longer allowed as it is stale
             "com.apple.prcos.splunkloggingd":[],
             "com.apple.privateCloudCompute":[],
             // "com.apple.thimble.inference.tie-controllerd" no longer allowed wholesale
+            "com.apple.thimble.inference.tie-controllerd":["RoutingLayerFormat", "RoutingGroupAliases"],
         ], introducedIn: .nine),
     ]
     
@@ -284,7 +297,7 @@ public class CustomerValidator: PrivateCloudOSValidator {
         self.policy = policy
         // The latested approved validator version is 8. Please reach out to darwinOS team
         // before adding new validation logic and increasing latestApprovedVersion
-        self.latestApprovedVersion = PrivateCloudOSValidatorVersion.eight.rawValue
+        self.latestApprovedVersion = PrivateCloudOSValidatorVersion.nine.rawValue
         // unless client requests to override, use latest version
         self.requestedVersion = requestedVersion ?? latestApprovedVersion
         self.config = config
@@ -372,7 +385,7 @@ public class CustomerValidator: PrivateCloudOSValidator {
             validationError(key: key, explanation: "Installing packages not permitted", introducedInVersion: .two)
         }
     }
-    
+
     func validate(preferencesConfig: [DInitPreferencesConfig]?) {
         guard let preferencesConfig else { return }
         
@@ -590,6 +603,8 @@ public class CustomerValidator: PrivateCloudOSValidator {
                         validationError(key: appleInfrastrucutureEnforcementKey, subConfig: secureConfigKey, explanation: "\(appleInfrastrucutureEnforcementKey) must be set to false unless in a VM", introducedInVersion: .eight)
                     }
                 }
+            case .cloudboard_isProxy:
+                validateSecureConfigParameter(cloudboard_isProxy: parameters.cloudboard_isProxy)
             @unknown default:
                 validationError(key: key.rawValue, subConfig: secureConfigKey, explanation: "Unknown key passed into validator, switch case needs to be updated", introducedInVersion: .one)
             }
@@ -617,6 +632,17 @@ public class CustomerValidator: PrivateCloudOSValidator {
         }
     }
     
+    func validate(featureFlagsConfig: [DInitFeatureFlags]?) {
+        // Validation is performed after installing cryptex FFs, before they are applied
+    }
+
+    func validateSecureConfigParameter(cloudboard_isProxy: Bool?) {
+        let key = SecureConfigParameters.Keys.cloudboard_isProxy.rawValue
+        if cloudboard_isProxy == true {
+            validationError(key: key, explanation: "Proxy parameter is not allowed", introducedInVersion: .eight)
+        }
+    }
+
     // allow any setting on customer or carry
     func validate(caRoots: DInitCARoots?) {}
     func validate(cryptexConfig: [DInitCryptexConfig]?) {}
@@ -634,10 +660,19 @@ public class CustomerValidator: PrivateCloudOSValidator {
     func validate(usageLabel: String?) {}
     func validate(applyTimeoutArgument: String?) {}
     func validate(bandwidthLimit: UInt64?) {}
-    
+
     // Only used for validation and not applied
     func validate(configSecurityPolicy: String?) {}
     func validate(configSecurityPolicyVersion: Int?) {}
+}
+
+public class CustomerProxyValidator: CustomerValidator {
+    override func validateSecureConfigParameter(cloudboard_isProxy: Bool?) {
+        let key = SecureConfigParameters.Keys.cloudboard_isProxy.rawValue
+        if cloudboard_isProxy != true {
+            validationError(key: key, explanation: "Proxy parameter is required", introducedInVersion: .eight)
+        }
+    }
 }
 
 public class CarryValidator: CustomerValidator {
@@ -658,8 +693,10 @@ public class CarryValidator: CustomerValidator {
             "com.apple.cloudos.cloudboardd":[],
             "com.apple.cloudos.CloudBoardNullApp":[],
             "com.apple.cloudos.NullCloudController":[],
+            "com.apple.cloudos.hotproperties.cb_attestationd":[],
             "com.apple.cloudos.hotproperties.cb_jobhelper":[],
             "com.apple.cloudos.hotproperties.cloudboardd":[],
+            "com.apple.cloudos.hotproperties.splunkloggingd":[],
             "com.apple.cloudos.hotproperties.test":[],
             "com.apple.cloudos.hotproperties.tie":[],
             "com.apple.narrative":[],
@@ -685,15 +722,17 @@ public class CarryValidator: CustomerValidator {
             "com.apple.cloudos.cloudboardd":[],
             "com.apple.cloudos.CloudBoardNullApp":[],
             "com.apple.cloudos.NullCloudController":[],
+            "com.apple.cloudos.hotproperties.cb_attestationd":[],
             "com.apple.cloudos.hotproperties.cb_jobhelper":[],
             "com.apple.cloudos.hotproperties.cloudboardd":[],
+            "com.apple.cloudos.hotproperties.splunkloggingd":[],
             "com.apple.cloudos.hotproperties.test":[],
             "com.apple.cloudos.hotproperties.tie":[],
             // com.apple.narrative no longer allowed as it is stale
             "com.apple.prcos.splunkloggingd":[],
             "com.apple.privateCloudCompute":[],
             // "com.apple.thimble.inference.tie-controllerd" no longer allowed wholesale
-            "com.apple.thimble.inference.tie-controllerd":["RoutingLayerNameOverride"],
+            "com.apple.thimble.inference.tie-controllerd":["RoutingLayerNameOverride", "RoutingLayerFormat", "RoutingGroupAliases"],
             "com.apple.security":["AppleServerAuthenticationAllowUAT"],
         ], introducedIn: .nine),
     ]
@@ -840,9 +879,15 @@ public class CarryValidator: CustomerValidator {
                         validationError(key: appleInfrastrucutureEnforcementKey, subConfig: secureConfigKey, explanation: "\(appleInfrastrucutureEnforcementKey) must be set to false unless in a VM", introducedInVersion: .eight)
                     }
                 }
+            case .cloudboard_isProxy:
+                validateSecureConfigParameter(cloudboard_isProxy: parameters.cloudboard_isProxy)
             @unknown default:
                 validationError(key: key.rawValue, subConfig: secureConfigKey, explanation: "Unknown key passed into validator, switch case needs to be updated", introducedInVersion: .one)
             }
         }
+    }
+
+    override func validateSecureConfigParameter(cloudboard_isProxy: Bool?) {
+        // any value is allowed in carry - it is used both for proxy and compute nodes
     }
 }

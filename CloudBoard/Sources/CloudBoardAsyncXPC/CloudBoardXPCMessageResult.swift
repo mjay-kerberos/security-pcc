@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -16,7 +16,7 @@
 
 import XPC
 
-public enum CloudBoardAsyncXPCMessageResult<Success, Failure> where Failure: Error {
+public enum CloudBoardAsyncXPCMessageResult<Success, Failure>: Sendable where Success: Sendable, Failure: Error {
     case success(Success)
     case failure(Failure)
 }
@@ -31,6 +31,8 @@ extension CloudBoardAsyncXPCMessageResult {
         }
     }
 }
+
+extension CloudBoardAsyncXPCMessageResult: Equatable where Success: Equatable, Failure: Equatable {}
 
 extension CloudBoardAsyncXPCMessageResult: Codable
 where Success: Codable, Failure: Codable {

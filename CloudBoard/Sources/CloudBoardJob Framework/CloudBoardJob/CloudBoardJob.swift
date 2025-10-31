@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -20,26 +20,26 @@ import CloudBoardJobAPI
 import Foundation
 import os
 
+private let log: Logger = .init(
+    subsystem: "com.apple.cloudos.cloudboard",
+    category: "CloudBoardJob"
+)
+
 extension CloudBoardApp {
     public static func main() async throws {
         do {
             let metricsBuilder = CloudAppMetrics.Builder()
             let arguments = CloudBoardJobCommand.parseOrExit()
             let server: CloudBoardJobAPIServerProtocol
-            if let input = arguments.input, let output = arguments.output {
-                server = LocalFileAPIClient(inputPath: input, outputPath: output)
-            } else {
-                guard let xpcServiceName = arguments.xpcServiceName else {
-                    fatalError()
-                }
-                server = CloudBoardJobAPIXPCServer.localListener(machServiceName: xpcServiceName)
-            }
+            server = CloudBoardJobAPIXPCServer.localListener(machServiceName: arguments.xpcServiceName)
 
             try await bootstrap(
                 server: server,
                 metricsBuilder: metricsBuilder
             )
+            log.info("CloudBoardApp finished")
         } catch {
+            log.info("CloudBoardApp exiting with error: \(String(reportable: error))")
             CloudBoardJobCommand.exit(withError: error)
         }
     }
@@ -47,24 +47,5 @@ extension CloudBoardApp {
 
 internal struct CloudBoardJobCommand: ParsableArguments {
     @Option(name: .shortAndLong)
-    var xpcServiceName: String?
-
-    @Option(name: .shortAndLong)
-    var input: String?
-
-    @Option(name: .shortAndLong)
-    var output: String?
-
-    func validate() throws {
-        switch (self.xpcServiceName, self.input, self.output) {
-        case (let xpcServiceName?, .none, .none) where !xpcServiceName.isEmpty:
-            // good, only xpc service name
-            break
-        case (.none, let input?, let output?) where !input.isEmpty && !output.isEmpty:
-            // good, both input and output
-            break
-        default:
-            throw ValidationError("Must specify either --xpc-service-name or both --input and --output")
-        }
-    }
+    var xpcServiceName: String
 }

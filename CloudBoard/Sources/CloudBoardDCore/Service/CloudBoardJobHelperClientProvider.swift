@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -25,14 +25,14 @@ protocol CloudBoardJobHelperInstanceProtocol: Actor {
 }
 
 protocol CloudBoardJobHelperClientProvider: Sendable {
-    func withClient<ReturnValue>(
+    func withClient<ReturnValue: Sendable>(
         delegate: CloudBoardJobHelperAPIClientDelegateProtocol,
-        _ body: (CloudBoardJobHelperInstanceProtocol) async throws -> ReturnValue
+        _ body: @Sendable (CloudBoardJobHelperInstanceProtocol) async throws -> ReturnValue
     ) async throws -> ReturnValue
 }
 
 protocol CloudBoardJobHelperResponseDelegateProvider: Sendable {
     func makeDelegate(
         invokeWorkloadResponseContinuation: AsyncStream<JobHelperInvokeWorkloadResponse>.Continuation
-    ) async -> CloudBoardJobHelperAPIClientDelegateProtocol
+    ) async -> JobHelperResponseDelegateProtocol
 }

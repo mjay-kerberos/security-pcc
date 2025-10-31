@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -63,9 +63,9 @@ struct ConfigurationDConfiguration: Decodable, Hashable {
             case _minimumInterTickDelayRatio = "MinimumInterTickDelayRatio"
         }
 
-        static var defaultTickInterval: Double = 60.0
-        static var defaultMaximumToleranceRatio: Double = 0.25
-        static var defaultMinimumInterTickDelayRatio: Double = 0.10
+        static let defaultTickInterval: Double = 60.0
+        static let defaultMaximumToleranceRatio: Double = 0.25
+        static let defaultMinimumInterTickDelayRatio: Double = 0.10
 
         var tickInterval: Double {
             self._tickInterval ?? Self.defaultTickInterval

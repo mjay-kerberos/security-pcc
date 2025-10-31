@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -21,7 +21,7 @@
 
 import Foundation
 import os
-import Ensemble
+@_weakLinked import AppleComputeEnsembler
 
 private let logger = Logger(subsystem: "cloudremotediagd", category: "ensembled")
 
@@ -71,6 +71,10 @@ let kCIOCableFRU = "miniSAS Cables"
 extension CloudRemoteDiagnosticsHandler {
 
     public func handleGetEnsembleStatus() -> String {
+        guard #_hasSymbol(EnsemblerSession.self) else {
+            return String()
+        }
+
         var results = TestResults(failedTests: [:],
                                   successTests: [:],
                                   allFRUs: [kNotApplicableFRU, kCIOCableFRU])

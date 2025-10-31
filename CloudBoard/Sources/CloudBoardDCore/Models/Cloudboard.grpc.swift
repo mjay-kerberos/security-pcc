@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -32,6 +32,11 @@ internal protocol Com_Apple_Cloudboard_Api_V1_CloudBoardProvider: CallHandlerPro
   func invokeWorkload(context: StreamingResponseCallContext<Com_Apple_Cloudboard_Api_V1_InvokeWorkloadResponse>) -> EventLoopFuture<(StreamEvent<Com_Apple_Cloudboard_Api_V1_InvokeWorkloadRequest>) -> Void>
 
   func fetchAttestation(request: Com_Apple_Cloudboard_Api_V1_FetchAttestationRequest, context: StatusOnlyCallContext) -> EventLoopFuture<Com_Apple_Cloudboard_Api_V1_FetchAttestationResponse>
+
+  /// This RPC should be used instead of FetchAttestation, if the client wants to be notified
+  /// of the attestation when they change either because of release or expiry automatically
+  /// instead of polling
+  func watchAttestation(request: Com_Apple_Cloudboard_Api_V1_WatchAttestationRequest, context: StreamingResponseCallContext<Com_Apple_Cloudboard_Api_V1_WatchAttestationResponse>) -> EventLoopFuture<GRPCStatus>
 
   func watchLoadLevel(request: Com_Apple_Cloudboard_Api_V1_LoadRequest, context: StreamingResponseCallContext<Com_Apple_Cloudboard_Api_V1_LoadResponse>) -> EventLoopFuture<GRPCStatus>
 
@@ -70,6 +75,15 @@ extension Com_Apple_Cloudboard_Api_V1_CloudBoardProvider {
         responseSerializer: ProtobufSerializer<Com_Apple_Cloudboard_Api_V1_FetchAttestationResponse>(),
         interceptors: self.interceptors?.makeFetchAttestationInterceptors() ?? [],
         userFunction: self.fetchAttestation(request:context:)
+      )
+
+    case "WatchAttestation":
+      return ServerStreamingServerHandler(
+        context: context,
+        requestDeserializer: ProtobufDeserializer<Com_Apple_Cloudboard_Api_V1_WatchAttestationRequest>(),
+        responseSerializer: ProtobufSerializer<Com_Apple_Cloudboard_Api_V1_WatchAttestationResponse>(),
+        interceptors: self.interceptors?.makeWatchAttestationInterceptors() ?? [],
+        userFunction: self.watchAttestation(request:context:)
       )
 
     case "WatchLoadLevel":
@@ -112,6 +126,15 @@ internal protocol Com_Apple_Cloudboard_Api_V1_CloudBoardAsyncProvider: CallHandl
     request: Com_Apple_Cloudboard_Api_V1_FetchAttestationRequest,
     context: GRPCAsyncServerCallContext
   ) async throws -> Com_Apple_Cloudboard_Api_V1_FetchAttestationResponse
+
+  /// This RPC should be used instead of FetchAttestation, if the client wants to be notified
+  /// of the attestation when they change either because of release or expiry automatically
+  /// instead of polling
+  func watchAttestation(
+    request: Com_Apple_Cloudboard_Api_V1_WatchAttestationRequest,
+    responseStream: GRPCAsyncResponseStreamWriter<Com_Apple_Cloudboard_Api_V1_WatchAttestationResponse>,
+    context: GRPCAsyncServerCallContext
+  ) async throws
 
   func watchLoadLevel(
     request: Com_Apple_Cloudboard_Api_V1_LoadRequest,
@@ -167,6 +190,15 @@ extension Com_Apple_Cloudboard_Api_V1_CloudBoardAsyncProvider {
         wrapping: { try await self.fetchAttestation(request: $0, context: $1) }
       )
 
+    case "WatchAttestation":
+      return GRPCAsyncServerHandler(
+        context: context,
+        requestDeserializer: ProtobufDeserializer<Com_Apple_Cloudboard_Api_V1_WatchAttestationRequest>(),
+        responseSerializer: ProtobufSerializer<Com_Apple_Cloudboard_Api_V1_WatchAttestationResponse>(),
+        interceptors: self.interceptors?.makeWatchAttestationInterceptors() ?? [],
+        wrapping: { try await self.watchAttestation(request: $0, responseStream: $1, context: $2) }
+      )
+
     case "WatchLoadLevel":
       return GRPCAsyncServerHandler(
         context: context,
@@ -201,6 +233,10 @@ internal protocol Com_Apple_Cloudboard_Api_V1_CloudBoardServerInterceptorFactory
   ///   Defaults to calling `self.makeInterceptors()`.
   func makeFetchAttestationInterceptors() -> [ServerInterceptor<Com_Apple_Cloudboard_Api_V1_FetchAttestationRequest, Com_Apple_Cloudboard_Api_V1_FetchAttestationResponse>]
 
+  /// - Returns: Interceptors to use when handling 'watchAttestation'.
+  ///   Defaults to calling `self.makeInterceptors()`.
+  func makeWatchAttestationInterceptors() -> [ServerInterceptor<Com_Apple_Cloudboard_Api_V1_WatchAttestationRequest, Com_Apple_Cloudboard_Api_V1_WatchAttestationResponse>]
+
   /// - Returns: Interceptors to use when handling 'watchLoadLevel'.
   ///   Defaults to calling `self.makeInterceptors()`.
   func makeWatchLoadLevelInterceptors() -> [ServerInterceptor<Com_Apple_Cloudboard_Api_V1_LoadRequest, Com_Apple_Cloudboard_Api_V1_LoadResponse>]
@@ -217,6 +253,7 @@ internal enum Com_Apple_Cloudboard_Api_V1_CloudBoardServerMetadata {
     methods: [
       Com_Apple_Cloudboard_Api_V1_CloudBoardServerMetadata.Methods.invokeWorkload,
       Com_Apple_Cloudboard_Api_V1_CloudBoardServerMetadata.Methods.fetchAttestation,
+      Com_Apple_Cloudboard_Api_V1_CloudBoardServerMetadata.Methods.watchAttestation,
       Com_Apple_Cloudboard_Api_V1_CloudBoardServerMetadata.Methods.watchLoadLevel,
       Com_Apple_Cloudboard_Api_V1_CloudBoardServerMetadata.Methods.invokeProxyDialBack,
     ]
@@ -233,6 +270,12 @@ internal enum Com_Apple_Cloudboard_Api_V1_CloudBoardServerMetadata {
       name: "FetchAttestation",
       path: "/com.apple.cloudboard.api.v1.CloudBoard/FetchAttestation",
       type: GRPCCallType.unary
+    )
+
+    internal static let watchAttestation = GRPCMethodDescriptor(
+      name: "WatchAttestation",
+      path: "/com.apple.cloudboard.api.v1.CloudBoard/WatchAttestation",
+      type: GRPCCallType.serverStreaming
     )
 
     internal static let watchLoadLevel = GRPCMethodDescriptor(

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,9 +14,9 @@
 
 // Copyright © 2024 Apple. All rights reserved.
 
-import Combine
+internal import Combine
 import Foundation
-@_implementationOnly import InternalGRPC
+internal import InternalGRPC
 
 typealias InvokeWorkloadRequest = Com_Apple_Cloudboard_Api_V1_InvokeWorkloadRequest
 typealias InvokeWorkloadResponse = Com_Apple_Cloudboard_Api_V1_InvokeWorkloadResponse
@@ -27,111 +27,6 @@ enum CloudBoardResponseChunk {
     case stringChunk(String)
 }
 
-enum WorkloadClientStreamError: Error {
-    case failedToCreateStream
-    case grpcNotOk(GRPCStatus)
-}
-
-@available(*, deprecated, renamed: "WorkloadAsyncClientStream")
-class WorkloadClientStream {
-    private let client: LocalCloudBoardGRPCClient.CloudBoardGrpcClient
-
-    public init(client: LocalCloudBoardGRPCClient.CloudBoardGrpcClient) {
-        self.client = client
-    }
-
-    public func submitWorkload(
-        keyID: Data,
-        key: Data,
-        bundleJson: String?,
-        chunks: [Data],
-        _ handler: @escaping (Result<CloudBoardResponseChunk, Error>) -> Void
-    ) {
-        var workloadStream: InvokeWorkloadClientStreamCall?
-        workloadStream = self.client.invokeWorkload { response in
-            handler(.success(.apiChunk(response.responseChunk)))
-            if response.responseChunk.isFinal {
-                workloadStream?.cancel(promise: nil)
-            }
-        }
-
-        guard let workloadStream else {
-            handler(.failure(WorkloadClientStreamError.failedToCreateStream))
-            return
-        }
-
-        workloadStream.status.whenComplete {
-            switch $0 {
-            case .success(let status):
-                if !status.isOk {
-                    handler(.failure(WorkloadClientStreamError.grpcNotOk(status)))
-                }
-            default: break
-            }
-        }
-        // if bundle json available, send back
-        if let bundleJson {
-            handler(.success(.stringChunk(bundleJson)))
-        }
-
-        do {
-            // send setup request to start warming process
-            try self.sendSetup(stream: workloadStream)
-
-            // send parameters with decryption key
-            try self.sendParameters(stream: workloadStream, keyID: keyID, key: key)
-
-            // send request chunks
-            for (index, chunk) in chunks.enumerated() {
-                try self.sendChunk(stream: workloadStream, data: chunk, isFinal: index == chunks.count - 1)
-            }
-        } catch {
-            handler(.failure(error))
-        }
-    }
-
-    private func sendSetup(stream: InvokeWorkloadClientStreamCall) throws {
-        let request = InvokeWorkloadRequest.with {
-            $0.setup = Com_Apple_Cloudboard_Api_V1_InvokeWorkloadRequest.Setup()
-        }
-        try stream.sendMessage(request).wait()
-    }
-
-    private func sendParameters(stream: InvokeWorkloadClientStreamCall, keyID: Data, key: Data) throws {
-        let decryptionKey = Proto_Ropes_Common_DecryptionKey.with {
-            $0.keyID = keyID
-            $0.encryptedPayload = key
-        }
-
-        let parameters = Com_Apple_Cloudboard_Api_V1_InvokeWorkloadRequest.Parameters.with {
-            $0.decryptionKey = decryptionKey
-            // set the tenant info values to clearly identify LocalCloudBoardClient traffic
-            $0.tenantInfo = .with {
-                $0.bundleID = "local-cloudboard-client"
-                $0.automatedDeviceGroup = "local-test-device"
-            }
-        }
-
-        let request = InvokeWorkloadRequest.with {
-            $0.parameters = parameters
-        }
-
-        LocalCloudBoardGRPCClient.logger.log("Send parameters \((try? request.jsonString()) ?? "<unserialisable>")")
-        try stream.sendMessage(request).wait()
-    }
-
-    private func sendChunk(stream: InvokeWorkloadClientStreamCall, data: Data, isFinal: Bool) throws {
-        let requestChunk = Proto_Ropes_Common_Chunk.with {
-            $0.encryptedPayload = data
-            $0.isFinal = isFinal
-        }
-        let request = InvokeWorkloadRequest.with {
-            $0.requestChunk = requestChunk
-        }
-        try stream.sendMessage(request).wait()
-    }
-}
-
 class WorkloadAsyncClientStream {
     private let client: LocalCloudBoardGRPCAsyncClient.CloudBoardGrpcClient
 
@@ -139,22 +34,25 @@ class WorkloadAsyncClientStream {
         self.client = client
     }
 
+    /// This does a very simplistic mode without streaming and without proxy support
+    /// You likely should use ``startWorkload`` and explicitly send the auth token and
+    /// request chunks
     public func submitWorkload(
         keyID: Data,
         key: Data,
-        chunks: [Data]
+        chunks: [Data],
+        requestID: String,
+        metaData: InvokeWorkloadRequestMetaData
     ) -> GRPCAsyncResponseStream<Com_Apple_Cloudboard_Api_V1_InvokeWorkloadResponse> {
-        let (requestStream, requestContinuation) = AsyncStream.makeStream(
-            of: InvokeWorkloadRequest.self
+        let (requestContinuation, responseStream) = self.startWorkload(
+            decryptionKey: .helper(keyID: keyID, key: key),
+            requestID: requestID,
+            metaData: metaData,
+            requestBypassed: false,
+            responseByPass: nil
         )
 
-        let responseStream = self.client.invokeWorkload(requestStream)
-
-        // send setup request to start warming process
-        requestContinuation.yield(self.setupRequest())
-
-        // send parameters with decryption key
-        requestContinuation.yield(self.parametersRequest(keyID: keyID, key: key))
+        requestContinuation.yield(self.makeAuthToken(.init()))
 
         // send request chunks
         for (index, chunk) in chunks.enumerated() {
@@ -164,31 +62,74 @@ class WorkloadAsyncClientStream {
         return responseStream
     }
 
-    public func submitWithAuthToken(
-        keyID: Data,
-        key: Data,
-        authToken: Data,
-        _ body: (
+    enum DecryptionKeySpecification {
+        /// A convenience function that tales what we currently know is required
+        case helper(keyID: Data, key: Data)
+        /// so we can pass through _exactly_ what the proxy sends like ROPES should
+        case explicit(dek: Proto_Ropes_Common_DecryptionKey)
+
+        func toProto() -> Proto_Ropes_Common_DecryptionKey {
+            switch self {
+            case .helper(keyID: let keyID, key: let key):
+                return Proto_Ropes_Common_DecryptionKey.with {
+                    $0.keyID = keyID
+                    $0.encryptedPayload = key
+                }
+            case .explicit(dek: let dek):
+                return dek
+            }
+        }
+    }
+
+    /// Sends the setup request *nothing* else
+    public func startSetup()
+        -> (
             AsyncStream<InvokeWorkloadRequest>.Continuation,
             GRPCAsyncResponseStream<Com_Apple_Cloudboard_Api_V1_InvokeWorkloadResponse>
-        ) async throws -> Void
-    ) async throws {
+        ) {
         let (requestStream, requestContinuation) = AsyncStream.makeStream(
             of: InvokeWorkloadRequest.self
         )
 
         let responseStream = self.client.invokeWorkload(requestStream)
 
-        defer {
-            requestContinuation.finish()
-        }
         // send setup request to start warming process
         requestContinuation.yield(self.setupRequest())
+        return (requestContinuation, responseStream)
+    }
+
+    /// Sends the setup request and the parameters, nothing else
+    public func startWorkload(
+        decryptionKey: DecryptionKeySpecification,
+        requestID: String,
+        metaData: InvokeWorkloadRequestMetaData,
+        requestBypassed: Bool = false,
+        // nil is not the same as none, nil is what (very) old requests would have
+        responseByPass: Com_Apple_Cloudboard_Api_V1_ResponseBypassMode? = nil
+    )
+        -> (
+            AsyncStream<InvokeWorkloadRequest>.Continuation,
+            GRPCAsyncResponseStream<Com_Apple_Cloudboard_Api_V1_InvokeWorkloadResponse>
+        ) {
+        let (requestContinuation, responseStream) = self.startSetup()
 
         // send parameters with decryption key
-        requestContinuation.yield(self.parametersRequest(keyID: keyID, key: key))
-        requestContinuation.yield(self.chunkRequest(data: authToken, isFinal: false))
-        try await body(requestContinuation, responseStream)
+        requestContinuation.yield(self.parametersRequest(
+            decryptionKey: decryptionKey,
+            requestID: requestID,
+            metaData: metaData,
+            requestBypassed: requestBypassed,
+            responseBypass: responseByPass
+        ))
+        return (requestContinuation, responseStream)
+    }
+
+    /// Deliberately not providing a send for this, it needs to be handled along with the rest of the
+    /// encrypted request stream for request bypass
+    public func makeAuthToken(
+        _ encryptedAuthToken: Data
+    ) -> InvokeWorkloadRequest {
+        return self.chunkRequest(data: encryptedAuthToken, isFinal: false)
     }
 
     private func setupRequest() -> InvokeWorkloadRequest {
@@ -198,26 +139,56 @@ class WorkloadAsyncClientStream {
         return request
     }
 
-    private func parametersRequest(keyID: Data, key: Data) -> InvokeWorkloadRequest {
-        let decryptionKey = Proto_Ropes_Common_DecryptionKey.with {
-            $0.keyID = keyID
-            $0.encryptedPayload = key
-        }
-
-        let parameters = Com_Apple_Cloudboard_Api_V1_InvokeWorkloadRequest.Parameters.with {
-            $0.decryptionKey = decryptionKey
+    internal func makeParameters(
+        decryptionKey: DecryptionKeySpecification,
+        requestID: String,
+        metaData: InvokeWorkloadRequestMetaData,
+        requestBypassed: Bool,
+        responseBypass: Com_Apple_Cloudboard_Api_V1_ResponseBypassMode? = nil,
+        requestNack: Bool = false
+    ) -> InvokeWorkloadRequest.Parameters {
+        return Com_Apple_Cloudboard_Api_V1_InvokeWorkloadRequest.Parameters.with {
+            $0.decryptionKey = decryptionKey.toProto()
             // set the tenant info values to clearly identify LocalCloudBoardClient traffic
             $0.tenantInfo = .with {
                 $0.bundleID = "local-cloudboard-client"
                 $0.automatedDeviceGroup = "local-test-device"
             }
+            $0.workload = .init(type: metaData.workloadType, parameters: metaData.workloadParameters)
+            $0.requestID = requestID
+            $0.requestBypassed = requestBypassed
+            $0.requestNack = requestNack
+            if let responseBypass {
+                $0.trustedProxyMetadata = .with {
+                    $0.responseBypassMode = responseBypass
+                }
+            }
         }
+    }
 
-        let request = InvokeWorkloadRequest.with {
+    internal func wrapParameters(
+        _ parameters: InvokeWorkloadRequest.Parameters
+    ) -> InvokeWorkloadRequest {
+        return InvokeWorkloadRequest.with {
             $0.parameters = parameters
         }
+    }
 
-        return request
+    private func parametersRequest(
+        decryptionKey: DecryptionKeySpecification,
+        requestID: String,
+        metaData: InvokeWorkloadRequestMetaData,
+        requestBypassed: Bool,
+        responseBypass: Com_Apple_Cloudboard_Api_V1_ResponseBypassMode? = nil
+    ) -> InvokeWorkloadRequest {
+        let parameters = self.makeParameters(
+            decryptionKey: decryptionKey,
+            requestID: requestID,
+            metaData: metaData,
+            requestBypassed: requestBypassed,
+            responseBypass: responseBypass
+        )
+        return self.wrapParameters(parameters)
     }
 
     private func chunkRequest(data: Data, isFinal: Bool) -> InvokeWorkloadRequest {
@@ -253,6 +224,18 @@ extension Proto_PrivateCloudCompute_PrivateCloudComputeResponse {
         var request = try PrivateCloudComputeResponse.with {
             $0.type = type
         }.serializedData()
+        request.prependLength()
+        return request
+    }
+}
+
+extension InvokeWorkloadRequest {
+    static func serialized(with type: InvokeWorkloadRequest.OneOf_Type) throws -> Data {
+        return try InvokeWorkloadRequest.with { $0.type = type }.serialized()
+    }
+
+    func serialized() throws -> Data {
+        var request = try self.serializedData()
         request.prependLength()
         return request
     }

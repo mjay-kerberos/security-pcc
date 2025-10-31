@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -19,44 +19,10 @@
 //  Copyright © 2024 Apple Inc. All rights reserved.
 //
 
+import MobileGestaltPrivate
+
 extension SEP {
-    @_spi(MockSEP)
     public protocol AttestationProtocol: Sendable {
-        var dcik: SecKey? { get }
         func attest(key: SecKey, using: SecKey) throws -> SEP.Attestation
-    }
-}
-
-extension SEP.AttestationProtocol {
-    public func attest(key: SecKey) throws -> SEP.Attestation {
-        guard let dcik = self.dcik else {
-            throw SEP.AttestationProtocolError.missingDCIK
-        }
-        return try self.attest(key: key, using: dcik)
-    }
-}
-
-extension SEP {
-    @_spi(MockSEP)
-    public enum AttestationProtocolError: Error, CustomNSError {
-        case missingDCIK
-        case attestError(underlying: Error)
-
-        public static var errorDomain: String = "com.apple.CloudAttestation.AttestationProtocolError"
-
-        public var errorCode: Int {
-            switch self {
-            case .missingDCIK: return 1
-            case .attestError(_): return 2
-            }
-        }
-        public var errorUserInfo: [String: Any] {
-            switch self {
-            case .attestError(let underlying):
-                return [NSUnderlyingErrorKey: underlying]
-            default:
-                return [:]
-            }
-        }
     }
 }

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -93,7 +93,7 @@ final class Apply: AsyncParsableCommand {
     }
 
     static func validateConfig(policyString: String, config: DInitConfig) throws {
-        // Ensure only valid policy is set: customer or carry
+        // Ensure only valid policy is set: customer, customerProxy or carry
         guard let policy = ConfigSecurityPolicy(rawValue: policyString) else {
             throw PrivateCloudOSValidationError("Unknown \(DInitConfig.CodingKeys.configSecurityPolicy.rawValue): \(policyString)")
         }
@@ -105,6 +105,12 @@ final class Apply: AsyncParsableCommand {
         case .customer:
             var validator = CustomerValidator(policy: policyString, requestedVersion: version, config: config)
             try validator.validate()
+        case .customerProxy:
+            var validator = CustomerProxyValidator(policy: policyString, requestedVersion: version, config: config)
+            try validator.validate()
+        case .none:
+            logger.warning("darwin-init passed none value for config validation, no validation will be performed")
+            return
         }
     }
 

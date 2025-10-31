@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -25,6 +25,7 @@ import CryptoKit
 
 /// Implements ``Validator`` for Apple silicon nodes.
 public struct NodeValidator: Validator, Sendable {
+
     /// The environment to use for validation.
     public let environment: Environment
 
@@ -70,6 +71,9 @@ public struct NodeValidator: Validator, Sendable {
 
     @_spi(Private)
     public var allowExpired: Bool
+
+    @_spi(Private)
+    public var customerSecurityPolicy: DarwinInit.SecureConfigSecurityPolicy = .customer
 
     @_spi(Private)
     static public var cacheProofs: Bool = Configuration.CFPreferences.cacheProofs ?? false
@@ -127,17 +131,17 @@ public struct NodeValidator: Validator, Sendable {
     private var securityPolicies: [DarwinInit.SecureConfigSecurityPolicy] {
         switch self.environment {
         case .production:
-            [.customer]
+            [customerSecurityPolicy]
         case .carry, .uat, .staging, .qa:
-            [.customer, .carry]
+            [customerSecurityPolicy, .carry]
         case .dev, .ephemeral, .perf, .qa2Primary, .qa2Internal:
-            [.customer, .carry, .none]
+            [customerSecurityPolicy, .carry, .none]
         }
     }
 
-    /// The default policy.
+    /// The policy to use for validation.
     @PolicyBuilder
-    public var defaultPolicy: some AttestationPolicy {
+    public var policy: some AttestationPolicy {
         X509Policy(required: self.strictCertificateValidation, roots: self.trustAnchors, clock: self.clock)
         if let pinnedSigner {
             SEPAttestationPolicy(signer: pinnedSigner)
@@ -170,8 +174,7 @@ public struct NodeValidator: Validator, Sendable {
     ///   - policy: The policy to use if the current environment does not match any of the provided environments.
     public func validate(
         bundle: AttestationBundle,
-        nonce: Data?,
-        policy: some AttestationPolicy
+        nonce: Data?
     ) async throws -> (key: PublicKeyData, expiration: Date, attestation: Validated.AttestationBundle) {
         do {
             Self.logger.log("Validating attestation bundle in environment \(self.environment, privacy: .public)")
@@ -189,6 +192,7 @@ public struct NodeValidator: Validator, Sendable {
 
             if let nonce {
                 guard attestation.nonce == nonce else {
+                    Self.logger.error("Nonce \(attestation.nonce?.hexString ?? "unknown") does not match \(nonce.hexString)")
                     throw CloudAttestationError.invalidNonce
                 }
             }
@@ -225,13 +229,22 @@ public struct NodeValidator: Validator, Sendable {
                 attestation: Validated.AttestationBundle(
                     bundle: bundle,
                     udid: attestation.identity?.udid,
-                    routingHint: context.validatedRoutingHint
+                    routingHint: context.validatedRoutingHint,
+                    releaseDigest: context.releaseDigest
                 )
             )
         } catch {
             Self.logger.error("AttestationBundle validation failed: \(error, privacy: .public)")
             throw error
         }
+    }
+}
+
+// MARK: - Legacy API support
+
+extension NodeValidator {
+    public var defaultPolicy: some AttestationPolicy {
+        policy
     }
 }
 

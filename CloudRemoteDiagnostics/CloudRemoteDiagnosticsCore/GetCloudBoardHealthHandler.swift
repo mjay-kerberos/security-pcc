@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -46,16 +46,21 @@ extension CloudRemoteDiagnosticsHandler {
                     log.error("Unexpected disconnect from CloudBoard")
                 }
             }
+            log.notice("Trying to async connect to CloudBoard health monitor")
             await healthMonitor.connect()
 
+            log.notice("Async connected to CloudBoard health monitor")
             do {
                 healthState = try await healthMonitor.getHealthState()
+                log.notice("Got CloudBoard health state")
             } catch {
                 healthState = .unknown
                 log.error("Unable to get CloudBoard health: \(error)")
             }
             done = true
+            log.notice("Async disconnecting from CloudBoard")
             await healthMonitor.disconnect()
+            log.notice("Async disconnected from CloudBoard successfully")
 
             let result = [
                 kCloudBoardHealthStateKey: healthState.description.lowercased()]

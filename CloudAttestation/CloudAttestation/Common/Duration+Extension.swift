@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -32,6 +32,7 @@ extension Duration {
         return Duration.hours(days * 24)
     }
 
+    @usableFromInline
     var timeInterval: TimeInterval {
         TimeInterval(components.seconds) + (Double(components.attoseconds) * 1e-18)
     }

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -24,6 +24,11 @@
 opaque HashValue<1..255>;
 
 enum {
+    // Release type enum contains a single ReleaseType enum value
+    // extensionData content is a uint16 with value = 1 for the length of the enum value, and one byte for the enum value.
+    RELEASE_TYPE(1);
+    // extensionData content is a unit16 with value = 8 for the length of the timestamp, and a uint64 timestamp.
+    INSERTION_TIME_MS(2);
 
     (255)
 } ExtensionType;
@@ -34,14 +39,23 @@ struct {
     opaque extensionData<0..65535>;
 } Extension;
 
+// Corresponds to the ATReleaseType proto enum
+enum {
+    PRODUCTION(0); // the default. For this value do not add the extension.
+    SEED(1);
+
+    (255)
+} ReleaseType;
+
 struct {
     SerializationVersion version;
     ATLeafType type;
     opaque description<0..255>;
-    
     HashValue dataHash;
     uint64 expiryMs;
 
+    // For ATLeafType RELEASE, may contain a RELEASE_TYPE extension
+    // May contain an INSERTION_TIME_MS extension
     Extension extensions<0..65535>;
 } ATLeafData
 
@@ -55,10 +69,11 @@ enum {
 // Matches the ATLogDataType proto enum
 enum {
     RELEASE(1);
-    MODEL(2);
     KEYBUNDLE_TGT(3);
     KEYBUNDLE_OTT(4);
     KEYBUNDLE_OHTTP(5);
+
+    TEST_MARKER(100);
 
     (255)
 } ATLeafType;

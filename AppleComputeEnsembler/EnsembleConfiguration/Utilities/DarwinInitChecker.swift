@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -23,7 +23,7 @@ import DarwinInitClient
 import Foundation
 import os
 
-private let kDarwinInitDefaultTimeout = 60 * 60 * 3 // 3 hours
+let kDarwinInitDefaultTimeout = 60 * 60 * 3 // 3 hours
 
 internal class DarwinInitChecker {
 	fileprivate static let logger = Logger(
@@ -50,7 +50,7 @@ internal class DarwinInitChecker {
 				darwinInitApplyDone = true
 			} catch {
 				DarwinInitChecker.logger.error(
-					"DarwinInitApplyStatus.loadBootStatus() failed: \(error)"
+					"DarwinInitApplyStatus.loadBootStatus() failed: \(error, privacy: .public)"
 				)
 				currentTime = DispatchTime.now()
 				usleep(UInt32(USEC_PER_SEC))
@@ -79,7 +79,7 @@ internal class DarwinInitChecker {
 			// Note: info should be logged privately, since it comes from outside this project and
 			// we don't know what it reveals. When private logging is enabled, the darwin-init logs
 			// can be inspected to understand the failure.
-			DarwinInitChecker.logger.error("Failed to apply darwin-init: \(String(describing: info))")
+			DarwinInitChecker.logger.error("Failed to apply darwin-init: \(String(describing: info), privacy: .public)")
 		default:
 			DarwinInitChecker.logger.error(
 				"""

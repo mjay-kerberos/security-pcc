@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -44,10 +44,6 @@ extension CLI {
                     transform: { try CLI.parseURL($0) })
             var ktInitEndpoint: URL?
 
-            @Flag(name: [.customLong("tlsinsecure")],
-                  help: ArgumentHelp("Disable TLS verification.", visibility: .customerHidden))
-            var tlsInsecure: Bool = false
-
             @Flag(name: [.customLong("tracelog")],
                   help: ArgumentHelp("Enable tracing of calls to Transparency Log.",
                                      visibility: .customerHidden))
@@ -65,13 +61,11 @@ extension CLI {
 
             let index: UInt64
             let dataHash: String
+            let seed: Bool
+            let insertTime: UInt64 // unix epoch time
             let expireTime: UInt64 // unix epoch time
             let tickets: Tickets
-            var createTime: UInt64? {
-                guard let createTime = metadata?.timestamp else { return nil }
 
-                return UInt64(createTime.timeIntervalSince1970)
-            }
             let rawData: Data?
             var metadataJson: String? { try? metadata?.jsonString() }
             let isDownloadable: Bool
@@ -82,23 +76,51 @@ extension CLI {
                 try container.encode(tickets, forKey: .tickets)
                 try container.encode(index, forKey: .index)
                 try container.encode(dataHash, forKey: .dataHash)
+                try container.encode(insertTime, forKey: .insertTime)
                 try container.encode(expireTime, forKey: .expireTime)
-                try container.encode(createTime, forKey: .createTime)
                 try container.encode(rawData, forKey: .rawData)
                 try container.encode(metadataJson, forKey: .metadata)
+                try container.encode(applicationName, forKey: .applicationName)
                 try container.encode(isDownloadable, forKey: .downloadable)
                 try container.encode(parsedDescription, forKey: .parsedDescription)
+                try container.encode(buildVersion, forKey: .buildVersion)
             }
 
             private enum CodingKeys: String, CodingKey {
-                case tickets, index, dataHash, expireTime, createTime, rawData, metadata, downloadable, parsedDescription
+                case tickets, index, dataHash, seed, insertTime, expireTime, rawData, metadata, applicationName, downloadable, parsedDescription, buildVersion
             }
 
             private var metadata: SWReleaseMetadata? = nil
 
+            var applicationName: String? {
+                metadata?.application
+            }
+
+            var buildVersion: String? {
+                guard
+                    let darwinInitString = metadata?.darwinInitString,
+                    let darwinInit = try? DarwinInitConfigV1(jsonString: darwinInitString)
+                else {
+                    return nil
+                }
+                return darwinInit.buildVersion
+            }
+
+            var label: String {
+                [applicationName, buildVersion].compactMap({$0}).joined(separator: " ")
+            }
+
             init(_ rel: SWRelease) async {
                 self.index = rel.index
                 self.dataHash = rel.dataHash.hexString
+                self.seed = rel.nodeData.releaseType == .seed
+                if let insertTime = rel.nodeData.insertionTime {
+                    self.insertTime = insertTime / 1000
+                } else {
+                    // For entries that don't contain the insertion time yet,
+                    // calculate it from the default 14 days expiry
+                    self.insertTime = rel.nodeData.expiryMs / 1000 - 14 * 24 * 60 * 60
+                }
                 self.expireTime = rel.nodeData.expiryMs / 1000
                 self.rawData = rel.rawData
                 self.parsedDescription = rel.tickets?.debugDescription
@@ -148,15 +170,15 @@ extension CLI {
             func printableString(prefix: String = "") -> String {
                 var builder = ""
 
-                builder += prefix + "Expires: \(dateAsString(expireTime))\n"
-                if let pDate = createTime {
-                    builder += prefix + "Created: \(dateAsString(pDate))\n"
-                } else {
-                    // no metadata available
-                    builder += prefix + "[not published]\n"
+                if seed {
+                    builder += prefix + "Seed build\n"
                 }
+                builder += prefix + "Application: \(applicationName ?? "N/A")\n"
+                builder += prefix + "Build version: \(buildVersion ?? "N/A")\n"
+                builder += prefix + "Inserted: \(dateAsString(insertTime))\n"
+                builder += prefix + "Expires:  \(dateAsString(expireTime))\n"
 
-                builder += prefix + "Tickets\n"
+                builder += prefix + "Tickets:\n"
                 builder += prefix + "      OS: \(tickets.ap)\n"
                 if !tickets.code.isEmpty || !tickets.data.isEmpty {
                     builder += prefix + "    Cryptexes\n"

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,74 +14,21 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
+import CloudBoardCommon
 import Foundation
 
-public protocol CloudBoardJobHelperAPIServerProtocol: CloudBoardJobHelperAPIServerToClientProtocol {
-    func set(delegate: CloudBoardJobHelperAPIServerDelegateProtocol) async
+/// Those parts of the JobHelper API relevant for the server to talk to the client
+package protocol CloudBoardJobHelperAPIServerToClientProtocol: Actor {
+    func sendWorkloadResponse(_ response: JobHelperToCloudBoardDaemonMessage) async
+}
+
+/// The receiving (client, CloudBoardd) parts of the JobHelper API relevant for the server to talk to the client
+package protocol CloudBoardJobHelperAPIServerToClientHandlerProtocol {
+    /// The client-end of the server-to-client communication
+    func handleWorkloadResponse(_ response: JobHelperToCloudBoardDaemonMessage)
+}
+
+package protocol CloudBoardJobHelperAPIServerProtocol: CloudBoardJobHelperAPIServerToClientProtocol {
+    func set(delegate: CloudBoardJobHelperAPIClientToServerProtocol) async
     func connect() async
-}
-
-public enum JobHelperToCloudBoardDaemonMessage: Codable, Sendable {
-    case responseChunk(ResponseChunk) // encapsulates previous `WorkloadResponse` struct
-    case failureReport(FailureReason)
-}
-
-extension JobHelperToCloudBoardDaemonMessage: Equatable {
-    public static func == (
-        lhs: JobHelperToCloudBoardDaemonMessage,
-        rhs: JobHelperToCloudBoardDaemonMessage
-    ) -> Bool {
-        switch lhs {
-        case .responseChunk(let lhsChunk):
-            if case .responseChunk(let rhsChunk) = rhs {
-                return lhsChunk == rhsChunk
-            }
-            return false
-        case .failureReport(let lhsReason):
-            if case .failureReport(let rhsReason) = rhs {
-                return lhsReason == rhsReason
-            }
-            return false
-        }
-    }
-}
-
-/// `FailureReason` describes a reason for a workload invocation failure which should be reported back to CloudBoard.
-public enum FailureReason: Codable, Sendable {
-    case ohttpEncapsulationFailure
-    case ohttpDecapsulationFailure
-    case invalidAEAD
-    case unknownKeyID
-    case expiredKey
-}
-
-public struct ResponseChunk: Codable, Sendable {
-    public var encryptedPayload: Data
-    public var isFinal: Bool
-
-    public init(encryptedPayload: Data, isFinal: Bool) {
-        self.encryptedPayload = encryptedPayload
-        self.isFinal = isFinal
-    }
-}
-
-extension CloudBoardJobHelperAPI.ResponseChunk: Equatable {}
-
-public protocol CloudBoardJobHelperAPIServerToClientProtocol: Actor {
-    func sendWorkloadResponse(_ response: JobHelperToCloudBoardDaemonMessage) async throws
-}
-
-public protocol CloudBoardJobHelperAPIServerDelegateProtocol: AnyObject, Sendable,
-CloudBoardJobHelperAPIClientToServerProtocol {}
-
-extension FailureReason: CustomStringConvertible {
-    public var description: String {
-        return switch self {
-        case .ohttpEncapsulationFailure: "ohttpEncapsulationFailure"
-        case .ohttpDecapsulationFailure: "ohttpDecapsulationFailure"
-        case .invalidAEAD: "invalidAEAD"
-        case .unknownKeyID: "unknownKeyID"
-        case .expiredKey: "expiredKey"
-        }
-    }
 }

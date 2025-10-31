@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -715,7 +715,7 @@ extension DaemonStatus {
     // (e.g. knownServiceCount) which is useful for logging but which should be emitted as a separate
     // metric dimension. metricDescription only returns the StatusMonitor's state, without any associated
     // state.
-    public var metricDescription: String {
+    public var metricDescription: StaticString {
         switch self {
         case .uninitialized:
             return "uninitialized"

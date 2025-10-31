@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,17 +14,17 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+internal import CloudBoardAsyncXPC
 
 internal enum CloudBoardAttestationAPIXPCServerToClientMessages {
-    internal struct KeyRotated: CloudBoardAsyncXPCMessage {
+    internal struct KeyRotated: CloudBoardAsyncXPCCodableMessage {
         internal typealias Success = ExplicitSuccess
         internal typealias Failure = CloudBoardAttestationAPIError
 
         var newKeySet: AttestedKeySet
     }
 
-    internal struct AttestationRotated: CloudBoardAsyncXPCMessage {
+    internal struct AttestationRotated: CloudBoardAsyncXPCCodableMessage {
         internal typealias Success = ExplicitSuccess
         internal typealias Failure = CloudBoardAttestationAPIError
 

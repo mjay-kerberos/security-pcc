@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -57,7 +57,7 @@ package final class NICCertExpiryHandler: Sendable {
                 tlsConfig = nil
             } else {
                 do {
-                    tlsConfig = try loadTLSCerts()
+                    tlsConfig = try .loadTLSCerts()
                 } catch {
                     self.logger.error("Not able to renew the cert error:\(error, privacy: .public)")
                     continue

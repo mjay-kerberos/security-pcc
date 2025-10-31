@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -51,11 +51,15 @@ package actor CloudMetricsAsyncXPCConnection: Identifiable {
 
     private func handleMessage(message: XPCDictionary) {
         guard let type: String = message[kMessageTypeKey] else {
-            self.logger.error("Could not get type for message from \(self.name, privacy: .public) connection")
+            self.logger.error("Could not get type for message. connection_name=\(self.name, privacy: .public)")
             return
         }
 
-        self.logger.trace("Handle \(type, privacy: .public) message from \(self.name, privacy: .public) connection")
+        self.logger.trace("""
+                          Handle message. \
+                          message_type=\(type, privacy: .public) \
+                          connection_name=\(self.name, privacy: .public)
+                          """)
         let logger = self.logger
         if let handler = self.nonPostedMessageHandlers[type] {
             Task.detached(priority: Task.currentPriority) { [weak self, message, logger] in
@@ -77,9 +81,11 @@ package actor CloudMetricsAsyncXPCConnection: Identifiable {
                     }
                 } catch {
                     logger
-                        .error(
-                            "Failed to handle \(type, privacy: .public) message with reply: \(error, privacy: .public)"
-                        )
+                        .error("""
+                            Failed to handle message with reply. \
+                            message_type=\(type, privacy: .public) \
+                            error=\(error, privacy: .public)
+                            """)
                     replyDict[kMessageRemoteProcessErrorKey] = String(describing: error)
                     replyDict.removeValue(forKey: kMessageBodyKey)
                 }
@@ -87,10 +93,11 @@ package actor CloudMetricsAsyncXPCConnection: Identifiable {
                 replyDict.sendReply()
             }
         } else {
-            self.logger
-                .error(
-                    "Unexpected \(type, privacy: .public) message from \(self.name, privacy: .public) connection, canceling connection"
-                )
+            self.logger.error("""
+                Unexpected message from  connection, canceling connection. \
+                connection_name=\(self.name, privacy: .public) \
+                type=\(type, privacy: .public)
+                """)
             self.cancel()
         }
     }
@@ -124,24 +131,27 @@ package actor CloudMetricsAsyncXPCConnection: Identifiable {
             )
             self.handleMessage(message: message)
         } catch CloudMetricsAsyncXPCError.terminationImminent {
-            self.logger.info("\(self.name, privacy: .public) connection termination is imminent")
+            self.logger.log("Connection termination is imminent. connection_name=\(self.name, privacy: .public)")
             await self.onConnectionTerminationImminent?(self)
             self.connection.cancel()
         } catch CloudMetricsAsyncXPCError.connectionInterrupted {
-            self.logger.info("\(self.name, privacy: .public) connection has been interrupted")
+            self.logger.log("Connection has been interrupted. connection_name=\(self.name, privacy: .public)")
             await self.onConnectionInterrupted?(self)
             self.connection.cancel()
         } catch CloudMetricsAsyncXPCError.connectionInvalid(let reason) {
-            self.logger
-                .info(
-                    "\(self.name, privacy: .public) connection has been invalidated: \(reason ?? "", privacy: .public)"
-                )
+            self.logger.log("""
+                Connection has been invalidated. \
+                connection_name=\(self.name, privacy: .public) \
+                reason=\(reason ?? "", privacy: .public)
+                """)
             await self.onConnectionInvalidated?(self)
             return true
         } catch {
-            self.logger.error(
-                "\(self.name, privacy: .public) connection error: (\(error, privacy: .public))"
-            )
+            self.logger.error("""
+                Connection error. \
+                connection_name=\(self.name, privacy: .public) \
+                error=\(error, privacy: .public)
+                """)
             self.connection.cancel()
         }
 
@@ -233,7 +243,7 @@ package actor CloudMetricsAsyncXPCConnection: Identifiable {
                         let result = try self.getReply(object: object, from: Message.self)
                         continuation.resume(returning: result)
                     } else {
-                        self.logger.error("Dropping unexpected reply on \(self.name, privacy: .public) connection")
+                        self.logger.error("Dropping unexpected reply. connection_name=\(self.name, privacy: .public)")
                     }
                 } catch {
                     continuation.resume(throwing: error)

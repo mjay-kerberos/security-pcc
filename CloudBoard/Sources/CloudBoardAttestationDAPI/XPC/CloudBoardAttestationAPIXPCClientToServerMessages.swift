@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,16 +14,82 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+internal import CloudBoardAsyncXPC
+import Foundation
 
 internal enum CloudBoardAttestationAPIXPCClientToServerMessages {
-    internal struct RequestAttestedKeySet: CloudBoardAsyncXPCMessage {
+    internal struct RequestAttestedKeySet: CloudBoardAsyncXPCCodableMessage {
         internal typealias Success = AttestedKeySet
         internal typealias Failure = CloudBoardAttestationAPIError
     }
 
-    internal struct RequestAttestationSet: CloudBoardAsyncXPCMessage {
+    internal struct RequestAttestationSet: CloudBoardAsyncXPCCodableMessage {
         internal typealias Success = AttestationSet
         internal typealias Failure = CloudBoardAttestationAPIError
+    }
+
+    internal struct ForceRevocation: CloudBoardAsyncXPCByteBufferMessage {
+        internal typealias Success = ExplicitSuccess
+        internal typealias Failure = CloudBoardAttestationAPIError
+
+        package var keyIDs: [Data]
+
+        internal init(
+            keyIDs proxyAttestationKeyIDs: [Data]
+        ) {
+            self.keyIDs = proxyAttestationKeyIDs
+        }
+
+        @inlinable
+        public func encode(to buffer: inout ByteBuffer) throws {
+            buffer.writeInteger(self.keyIDs.count)
+            for keyID in self.keyIDs {
+                try keyID.encode(to: &buffer)
+            }
+        }
+
+        @inlinable
+        public init(from buffer: inout ByteBuffer) throws {
+            guard let count: Int = buffer.readInteger() else {
+                throw DecodingError.valueNotFound(
+                    Self.self,
+                    .init(codingPath: [], debugDescription: "no count of keyIDs present")
+                )
+            }
+            var keys: [Data] = []
+            for _ in 0 ..< count {
+                try keys.append(.init(from: &buffer))
+            }
+            self.keyIDs = keys
+        }
+    }
+
+    /// The inputs needed to validate the attestation for a worker against a specific request
+    internal struct RequestValidateWorkerAttestation: CloudBoardAsyncXPCByteBufferMessage {
+        internal typealias Success = ValidatedWorker
+        internal typealias Failure = CloudBoardAttestationAPIError
+
+        package var proxyAttestationKeyID: Data
+        package var rawWorkerAttestationBundle: Data
+
+        internal init(
+            proxyAttestationKeyID: Data,
+            rawWorkerAttestationBundle: Data
+        ) {
+            self.proxyAttestationKeyID = proxyAttestationKeyID
+            self.rawWorkerAttestationBundle = rawWorkerAttestationBundle
+        }
+
+        @inlinable
+        public func encode(to buffer: inout ByteBuffer) throws {
+            try self.proxyAttestationKeyID.encode(to: &buffer)
+            try self.rawWorkerAttestationBundle.encode(to: &buffer)
+        }
+
+        @inlinable
+        public init(from buffer: inout ByteBuffer) throws {
+            self.proxyAttestationKeyID = try .init(from: &buffer)
+            self.rawWorkerAttestationBundle = try .init(from: &buffer)
+        }
     }
 }

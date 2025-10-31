@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -87,37 +87,37 @@ enum Metrics {
             }
         }
 
-        // Deprecated, to be removed as part of: rdar://132983785
+        // Deprecated
         struct LegacyStatusInitializing: Gauge {
             static let label: MetricLabel = "\(prefix)_status_initializing"
             var value: Int
         }
 
-        // Deprecated, to be removed as part of: rdar://132983785
+        // Deprecated
         struct LegacyStatusWaitingForFirstAttestationFetch: Gauge {
             static let label: MetricLabel = "\(prefix)_status_waiting_for_first_attestation_fetch"
             var value: Int
         }
 
-        // Deprecated, to be removed as part of: rdar://132983785
+        // Deprecated
         struct LegacyStatusWaitingForFirstKeyFetch: Gauge {
             static let label: MetricLabel = "\(prefix)_status_waiting_for_first_key_fetch"
             var value: Int
         }
 
-        // Deprecated, to be removed as part of: rdar://132983785
+        // Deprecated
         struct LegacyStatusWaitingForFirstHotPropertyUpdate: Gauge {
             static let label: MetricLabel = "\(prefix)_status_waiting_for_first_hot_property_update"
             var value: Int
         }
 
-        // Deprecated, to be removed as part of: rdar://132983785
+        // Deprecated
         struct LegacyStatusWaitingForWorkloadRegistration: Gauge {
             static let label: MetricLabel = "\(prefix)_status_waiting_for_workload_registration"
             var value: Int
         }
 
-        // Deprecated, to be removed as part of: rdar://132983785
+        // Deprecated
         struct LegacyStatusComponentsFailedToRun: Gauge {
             static let label: MetricLabel = "\(prefix)_status_components_failed_to_run"
             var value: Int
@@ -136,7 +136,7 @@ enum Metrics {
             }
         }
 
-        // Deprecated, to be removed as part of: rdar://132983785
+        // Deprecated
         struct LegacyStatusServiceDiscoveryUpdateSuccess: Gauge {
             static let label: MetricLabel = "\(prefix)_status_service_discovery_update_success"
             var value: Int
@@ -155,7 +155,7 @@ enum Metrics {
             }
         }
 
-        // Deprecated, to be removed as part of: rdar://132983785
+        // Deprecated
         struct LegacyStatusServiceDiscoveryUpdateFailure: Gauge {
             static let label: MetricLabel = "\(prefix)_status_service_discovery_update_failure"
             var value: Int
@@ -174,19 +174,19 @@ enum Metrics {
             }
         }
 
-        // Deprecated, to be removed as part of: rdar://132983785
+        // Deprecated
         struct LegacyStatusServiceDiscoveryPublisherDraining: Gauge {
             static let label: MetricLabel = "\(prefix)_status_service_discovery_publisher_draining"
             var value: Int
         }
 
-        // Deprecated, to be removed as part of: rdar://132983785
+        // Deprecated
         struct LegacyStatusDaemonDrained: Gauge {
             static let label: MetricLabel = "\(prefix)_status_daemon_drained"
             var value: Int
         }
 
-        // Deprecated, to be removed as part of: rdar://132983785
+        // Deprecated
         struct LegacyStatusDaemonExitingOnError: Gauge {
             static let label: MetricLabel = "\(prefix)_status_daemon_exiting_on_error"
             var value: Int

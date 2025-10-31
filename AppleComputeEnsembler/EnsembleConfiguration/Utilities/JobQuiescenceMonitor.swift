@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -20,6 +20,7 @@
 //
 
 import Foundation
+
 import JobQuiescence
 import os
 
@@ -28,7 +29,7 @@ public class JobQuiescenceMonitor {
 	private let jqSubscriptionQ: DispatchSerialQueue
 	private let quiesceQ: DispatchSerialQueue
 	private var quiesceCount = 0
-	var ensembler: Ensembler?
+	var ensembler: EnsemblerInterface?
 
 	public init() {
 		self.jqSubscriptionQ = DispatchSerialQueue(
@@ -43,7 +44,7 @@ public class JobQuiescenceMonitor {
 	private func quiesce() {
 		self.quiesceCount += 1
 		if self.quiesceCount == 1 {
-			Self.logger.log("Received quiesce notification #\(self.quiesceCount): Quiescing")
+			Self.logger.log("Received quiesce notification #\(self.quiesceCount, privacy: .public): Quiescing")
 
 			guard let ensembler else {
 				Self.logger.error("Oops: no ensembler to quiesce. This should never happen!")
@@ -59,7 +60,7 @@ public class JobQuiescenceMonitor {
 			do {
 				try task.begin()
 			} catch {
-				Self.logger.error("Failed to start JQTask: \(error)")
+				Self.logger.error("Failed to start JQTask: \(error, privacy: .public)")
 				doTaskEnd = false
 			}
 			defer {
@@ -70,11 +71,11 @@ public class JobQuiescenceMonitor {
 
 			ensembler.drain()
 		} else {
-			Self.logger.log("Received quiesce notification #\(self.quiesceCount): Ignoring")
+			Self.logger.log("Received quiesce notification #\(self.quiesceCount, privacy: .public): Ignoring")
 		}
 	}
 
-	public func start(ensembler: Ensembler) throws {
+	public func start(ensembler: EnsemblerInterface) throws {
 		Self.logger.log("Starting quiescence monitor")
 		self.ensembler = ensembler
 		let subscription = JQLaunchEventSubscription(

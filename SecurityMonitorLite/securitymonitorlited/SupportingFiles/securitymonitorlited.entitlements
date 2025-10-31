@@ -1,4 +1,4 @@
-<!-- Copyright © 2024 Apple Inc. All Rights Reserved. -->
+<!-- Copyright © 2025 Apple Inc. All Rights Reserved. -->
 
 <!-- APPLE INC. -->
 <!-- PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT -->
@@ -47,5 +47,12 @@
 		<string>/private/var/db/securitymonitorlited/</string>
 		<string>/private/var/preferences/com.apple.networkextension.uuidcache.plist</string>
 	</array>
+    <key>com.apple.private.logging.diagnostic</key>
+    <true/>
+    <key>com.apple.security.exception.files.absolute-path.read-only</key>
+    <array>
+        <string>/private/var/db/diagnostics/</string>
+        <string>/private/var/db/uuidtext/</string>
+    </array>
 </dict>
 </plist>

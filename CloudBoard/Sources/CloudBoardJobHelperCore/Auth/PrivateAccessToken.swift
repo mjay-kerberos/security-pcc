@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -13,10 +13,11 @@
 // 10/02/2024
 
 // Copyright © 2024 Apple. All rights reserved.
+import CloudBoardLogging
 import Foundation
 import Security
 
-enum PrivateAccessTokenError: Error {
+enum PrivateAccessTokenError: ReportableError {
     case failedToValidateSignature(Error?)
     case insufficientBytesForTokenType
     case insufficientBytesForNonce
@@ -25,6 +26,20 @@ enum PrivateAccessTokenError: Error {
     case insufficientBytesForAuthenticator
     case signatureValidationNotImplemented(PrivateAccessToken.TokenType)
     case unknownTokenType(UInt16)
+
+    var publicDescription: String {
+        let errorType = switch self {
+        case .failedToValidateSignature: "failedToValidateSignature"
+        case .insufficientBytesForTokenType: "insufficientBytesForTokenType"
+        case .insufficientBytesForNonce: "insufficientBytesForNonce"
+        case .insufficientBytesForChallengeDigest: "insufficientBytesForChallengeDigest"
+        case .insufficientBytesForTokenKeyID: "insufficientBytesForTokenKeyID"
+        case .insufficientBytesForAuthenticator: "insufficientBytesForAuthenticator"
+        case .signatureValidationNotImplemented(let tokenType): "signatureValidationNotImplemented(\(tokenType)"
+        case .unknownTokenType: "unknownTokenType"
+        }
+        return "privateAccessToken.\(errorType)"
+    }
 }
 
 /// Represents a Private Access Token/Privacy Pass Token as defined at

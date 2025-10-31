@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -101,7 +101,7 @@ package final class OTLPGRPCClient: Sendable {
         let tlsConfig: GRPCTLSConfiguration?
         switch configuration.keySource {
         case .keychain:
-            tlsConfig = try? loadTLSCerts()
+            tlsConfig = try? .loadTLSCerts()
         case .localCerts(let certs):
             tlsConfig = .makeClientConfigurationBackedByNIOSSL(
                 certificateChain: certs.mtlsCertificateChain.map { .certificate($0) },
@@ -287,7 +287,7 @@ package final class OTLPGRPCClient: Sendable {
                 let retryable = status.code.isOTLPRetryable
                 logger.error("""
                     gRPC error. \
-                    grpc_error_code=\(status.code) \
+                    grpc_error_code=\(status.code, privacy: .public) \
                     grpc_status_message=\(status.message ?? "<none>") \
                     error_retryable=\(retryable, privacy: .public) \
                     publish_count=\(publishCount, privacy: .public) \
@@ -311,7 +311,7 @@ package final class OTLPGRPCClient: Sendable {
                 }
                 logger.log("""
                     Waiting before reattempting request \
-                    backoff = \(backoff) \
+                    backoff=\(backoff) \
                     publish_count=\(publishCount, privacy: .public) \
                     request_id=\(requestID, privacy: .public)
                     """)
@@ -332,7 +332,7 @@ package final class OTLPGRPCClient: Sendable {
                     Publish failed. \
                     publish_count=\(publishCount, privacy: .public)
                     error=\(String(reportable: error), privacy: .public) \
-                    request_id=\(requestID)
+                    request_id=\(requestID, privacy: .public)
                     """)
                 throw error
             }

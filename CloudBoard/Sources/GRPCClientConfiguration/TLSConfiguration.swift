@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -58,7 +58,7 @@ extension GRPCTLSConfiguration {
         category: "TLSValidator"
     )
 
-    public typealias IdentityCallback = () -> IdentityManager.ResolvedIdentity?
+    public typealias IdentityCallback = @Sendable () -> IdentityManager.ResolvedIdentity?
 
     public static func grpcTLSConfiguration(
         hostnameOverride: String?,
@@ -160,16 +160,17 @@ extension NWProtocolTLS.Options {
     }
 }
 
-public enum ClientTLSConfiguration: CustomStringConvertible {
+public enum ClientTLSConfiguration: CustomStringConvertible, Sendable {
     case plaintext
     case simpleTLS(SimpleTLS)
 
-    public struct SimpleTLS: CustomStringConvertible {
+    public struct SimpleTLS: CustomStringConvertible, Sendable {
         public var sniOverride: String?
         public var localIdentityCallback: GRPCTLSConfiguration.IdentityCallback?
 
-        // Override for setting a custom root cert, used only in testing.
-        public var customRoot: SecCertificate?
+        // Override for setting a custom root cert, used only in testing. We do not mutate its state
+        // therefore opt out isolation checking.
+        public nonisolated(unsafe) var customRoot: SecCertificate?
 
         public var description: String {
             "SimpleTLSConfig(sniOverride: \(String(describing: self.sniOverride)))"

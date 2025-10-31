@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -40,19 +40,18 @@ extension CLI.InstanceCmd.InstanceConfigureCmd.DarwinInitCmd {
             let vreName = configureOptions.instanceName
             CLI.logger.log("set darwin-init for \(vreName, privacy: .public)")
 
-            guard VRE.exists(configureOptions.instanceName) else {
-                throw CLIError("VRE '\(vreName)' not found")
-            }
+            // ensure exists
+            let vre = try VRE.Instance(name: vreName)
 
             var darwinInit: DarwinInitHelper
             do {
-                darwinInit = try DarwinInitHelper(fromFile: inputFile)
+                darwinInit = try DarwinInitHelper(configFile: inputFile, pccvreHelper: vre.pccvreHelper())
             } catch {
                 throw CLIError("Unable to load new darwin-init: \(error)")
             }
 
             do {
-                try darwinInit.save(toFile: VRE.darwinInitFile(vreName).path)
+                try darwinInit.save(toFile: VRE.Instance.darwinInitFile(vreName).path)
             } catch {
                 throw CLIError("Unable to update darwin-init for instance: \(error)")
             }

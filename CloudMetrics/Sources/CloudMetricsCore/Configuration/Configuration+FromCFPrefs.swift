@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -27,9 +27,33 @@ internal import os
 extension Configuration {
 
     private static func destinationsFromMetricDestinationsCFPrefs() throws -> [String: Configuration.Destination]? {
-        guard let metricDestinationsPref = try preferencesDictOfDict("MetricDestinations") else {
+        var metricDestinationsPref: [String : NSDictionary] = [:]
+
+        /// Check for metric destinations in the cloudmetrics main CFPref domain
+        if let metricDestinations = try preferencesDictOfDict("MetricDestinations") {
+            metricDestinationsPref = metricDestinations
+            logger.log("Loaded MetricDestinations from CloudMetrics domain. Destinations=\(metricDestinations, privacy: .public)")
+        } else {
             return nil
         }
+
+        /// Get metric destinations from its own CFPrefs domain, these take priority.
+        if let metricDestinations = try allDictPreferencesIn(
+            domain: kCloudMetricsPreferenceDomain + ".MetricDestinations"
+        ) {
+            for (workspace, destination) in metricDestinations {
+                metricDestinationsPref[workspace] = destination
+            }
+            logger.log("Loaded MetricDestinations from its own domain. Destinations=\(metricDestinations, privacy: .public)")
+        }
+
+        guard metricDestinationsPref.count > 0 else {
+            logger.error("Unable to get MetricDestinations from CFPrefs")
+            return nil
+        }
+
+        logger.log("Merged MetricDestinations. Destinations=\(metricDestinationsPref, privacy: .public)")
+
         var destinations = [String: Configuration.Destination]()
         for (workspace, dest) in metricDestinationsPref {
             guard let publishInterval = dest["PublishInterval"] as? Int,
@@ -192,7 +216,11 @@ extension Configuration {
             if let value = dict[key] as? T {
                 return value
             } else {
-                Self.logger.error("Can't convert value \(String(describing: dict[key]), privacy: .public) as \(T.self, privacy: .public)")
+                Self.logger.error("""
+                    Can't convert value. \
+                    value=\(String(describing: dict[key]), privacy: .public) \
+                    type=\(T.self, privacy: .public)
+                    """)
             }
             return defaultValue
         }

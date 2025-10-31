@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -26,7 +26,6 @@ extension CLI.InstanceCmd {
         )
 
         @OptionGroup var globalOptions: CLI.globalOptions
-        @OptionGroup var instanceOptions: CLI.InstanceCmd.options
 
         @Flag(name: [.customLong("noprompt"), .customShort("f")], help: "Do not ask confirmation.")
         var noPrompt: Bool = false
@@ -36,19 +35,10 @@ extension CLI.InstanceCmd {
         var vreName: String
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
             CLI.logger.log("remove VRE \(vreName, privacy: .public)")
 
-            guard VRE.exists(vreName) else {
-                throw CLIError("VRE '\(vreName)' not found")
-            }
-
-            let vre = try VRE(
-                name: vreName,
-                vrevmPath: instanceOptions.vrevmPath
-            )
-
-            if vre.vm.isRunning {
+            let vre = try VRE.Instance(name: vreName)
+            if vre.isRunning {
                 throw CLIError("VRE '\(vreName)' is running")
             }
 

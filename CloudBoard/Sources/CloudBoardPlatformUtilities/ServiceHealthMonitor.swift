@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -30,7 +30,8 @@ public final class ServiceHealthMonitor: Sendable {
             watchers: [],
             lastUpdate: .initializing,
             currentBatchSizeOverride: nil,
-            draining: false
+            draining: false,
+            attestationExpired: false
         ))
     }
 
@@ -47,8 +48,8 @@ public final class ServiceHealthMonitor: Sendable {
             let status = status.withCurrentBatchCountOverride(state.currentBatchSizeOverride)
             state.lastUpdate = status
 
-            // do not update watchers during drain
-            if state.draining {
+            // do not update watchers during drain or when attestations are expired
+            if state.draining || state.attestationExpired {
                 return ([], status)
             }
             return (state.watchers, status)
@@ -63,7 +64,7 @@ public final class ServiceHealthMonitor: Sendable {
         let watchers: [Watcher] = self.currentState.withLock { state in
             state.draining = true
 
-            if state.lastUpdate == .unhealthy {
+            if state.lastUpdate == .unhealthy || state.attestationExpired {
                 return []
             }
             return state.watchers
@@ -71,6 +72,43 @@ public final class ServiceHealthMonitor: Sendable {
 
         for watcher in watchers {
             watcher.continuation.yield(.unhealthy)
+        }
+    }
+
+    public func setAttestationExpired() {
+        let watchers: [Watcher] = self.currentState.withLock { state in
+            if state.attestationExpired {
+                return []
+            }
+            state.attestationExpired = true
+
+            if state.draining || state.lastUpdate == .unhealthy {
+                return []
+            }
+            return state.watchers
+        }
+
+        for watcher in watchers {
+            watcher.continuation.yield(.unhealthy)
+        }
+    }
+
+    public func setAttestationValid() {
+        let (watchers, status): ([Watcher], Status) = self.currentState.withLock { state in
+            if !state.attestationExpired {
+                return ([], state.lastUpdate)
+            }
+
+            // do not update watchers during drain
+            if state.draining {
+                return ([], state.lastUpdate)
+            }
+            state.attestationExpired = false
+            return (state.watchers, state.lastUpdate)
+        }
+
+        for watcher in watchers {
+            watcher.continuation.yield(status)
         }
     }
 
@@ -131,6 +169,8 @@ extension ServiceHealthMonitor {
         var currentBatchSizeOverride: Int?
 
         var draining: Bool
+
+        var attestationExpired: Bool
 
         mutating func generateID() -> Int {
             defer { self.nextID &+= 1 }

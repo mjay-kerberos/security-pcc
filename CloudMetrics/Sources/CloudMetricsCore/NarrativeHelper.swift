@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -22,13 +22,13 @@
 internal import CloudMetricsConstants
 internal import GRPC
 // libnarrartivecert doesn't exist on macOS. By weak linking here we can still run on macOS and not use this functionality.
-@_weakLinked package import libnarrativecert
+@_weakLinked internal import libnarrativecert
 private import MobileGestaltPrivate
 internal import NIOCore
 internal import NIOSSL
 private import notify
 internal import os
-@preconcurrency package import Security
+@preconcurrency internal import Security
 
 // swiftlint:disable file_length
 private let logger = Logger(subsystem: kCloudMetricsLoggingSubsystem, category: "NarrativeHelper")
@@ -67,98 +67,17 @@ internal enum NarrativeSignError: LocalizedError {
     }
 }
 
-internal func getCertificateName(_ certificate: SecCertificate) -> String {
-    var commonName: CFString? = nil
-    SecCertificateCopyCommonName(certificate, &commonName)
+extension SecCertificate {
+    /// The common name of the certificate.
+    internal var name: String {
+        var commonName: CFString? = nil
+        SecCertificateCopyCommonName(self, &commonName)
 
-    if let name = commonName {
-        return name as String
-    }
-    return "<missing common name>"
-}
-
-//TODO: Remove this
-package func getFullCertChain(narrativeCert: NarrativeCert)  -> [SecCertificate]? {
-    let narrativeRef = narrativeCert.fetchSecRefsFromKeychain()
-    guard let narrativeRef = narrativeRef else {
-        return nil
-    }
-    
-    var certChain = [narrativeRef.certRef]
-    let rootChain = narrativeCert.getCertChain()
-    for crt in rootChain {
-        guard let crtData = Data(base64Encoded: crt) else {
-            logger.error("unable to decode certificate obtained from rootchain.")
-            return nil
+        if let name = commonName {
+            return name as String
         }
-        guard let cert = SecCertificateCreateWithData(kCFAllocatorDefault,  crtData as CFData) else {
-            logger.error("unable to create certificate from data.")
-            return nil
-        }
-        certChain.append(cert)
+        return "<missing common name>"
     }
-    
-    return certChain
-}
-
-
-/// gets the Configuration.Certificates from NarrativeIdentity
-internal func getCertificatesFromNarrativeIdentity(narrativeCert: NarrativeCert) throws -> GRPCTLSConfiguration {
-    let narrativeRef = narrativeCert.fetchSecRefsFromKeychain()
-    
-    logger.debug("Getting sec references")
-    guard let narrativeRef = narrativeRef else {
-        throw NarrativeHelperError.unableToGetCertificate("Unable to get Sec references")
-    }
-    
-    logger.debug("creating NIOSSLPrivatekey")
-    let customKey =  NarrativeKey(key: narrativeRef.keyRef)
-    let mtlsPrivateKey = NIOSSLPrivateKey(customPrivateKey: customKey)
-
-    logger.debug("getting cert chain")
-    // TODO: To uncomment this when on latest SDK
-    // let certChain = narrativeCert.getFullCertChain()
-    let fullCertChain = getFullCertChain(narrativeCert: narrativeCert)
-    guard let certChain = fullCertChain else {
-        let errorMessage = "Unable to obtain certChain from narrative Identity"
-        throw NarrativeHelperError.unableToGetCertChain(errorMessage)
-    }
-
-    logger.debug("mapping cert chain")
-    let mtlsCertificateChain = try certChain.map {
-        try NIOSSLCertificate(bytes: [UInt8](SecCertificateCopyData($0) as NSData as Data), format: .der)
-    }
-
-    let cryptexMountPoint = ProcessInfo.processInfo.environment["CRYPTEX_MOUNT_PATH"] ?? ""
-
-    var trustRootsRelativePath = "/usr/share/cloudmetricsd/mosaic_trustroot.pem"
-#if os(iOS)
-		if MobileGestalt.current.isComputeController {
-			trustRootsRelativePath = "/usr/share/cloudmetricsd_bmc/mosaic_trustroot.pem"
-		}
-#endif
-    let trustRootsFilePath = "\(cryptexMountPoint)\(trustRootsRelativePath)"
-    let mtlsTrustRoots = NIOSSLTrustRoots.certificates([
-        try NIOSSLCertificate(file: trustRootsFilePath, format: .pem),
-    ])
-
-    let hostCert = NarrativeCert(domain: .adb, identityType: .host)
-    guard let hostCertRefs = hostCert.fetchSecRefsFromKeychain() else {
-        throw NarrativeHelperError.unableToGetCertificate("Error getting SecRefs for adb host certificate")
-    }
-    
-    let certName  = getCertificateName(hostCertRefs.certRef)
-    logger.log("""
-                Narrative host cert details
-                Identifier=\(hostCert.keychainLabel), \
-                CommonName=\(certName)
-                """)
-
-    return .makeClientConfigurationBackedByNIOSSL(
-        certificateChain: mtlsCertificateChain.map { .certificate($0) },
-        privateKey: .privateKey(mtlsPrivateKey),
-        trustRoots: mtlsTrustRoots
-    )
 }
 
 internal struct NarrativeKey: NIOSSLCustomPrivateKey, Hashable {
@@ -220,14 +139,9 @@ internal struct NarrativeKey: NIOSSLCustomPrivateKey, Hashable {
     }
 }
 
-internal enum NarrativeIdentityError: Error {
-    case identityNotFound(String)
-    case instantiationError(String)
-    case certChainMissing(String)
-    case privateKeyMissing(String)
-}
+extension GRPCTLSConfiguration {
 
-internal func loadTLSCerts() throws -> GRPCTLSConfiguration {
+    internal static func loadTLSCerts() throws -> Self {
         logger.log("Getting Narrative ACDC cert to establish mTLS")
 
         let acdcActorCert = NarrativeCert(domain: .acdc, identityType: .actor)
@@ -235,12 +149,51 @@ internal func loadTLSCerts() throws -> GRPCTLSConfiguration {
             throw NarrativeHelperError.unableToGetCertificate("Error getting SecRefs for acdc actor certificate")
         }
 
-        let certName  = getCertificateName(acdcActorCertRefs.certRef)
         logger.log("""
                    ACDC actor cert details \
-                   Identifier=\(acdcActorCert.keychainLabel), \
-                   CommonName=\(certName)
+                   Identifier=\(acdcActorCert.keychainLabel, privacy: .public), \
+                   CommonName=\(acdcActorCertRefs.certRef.name, privacy: .public)
                    """)
 
-        return try getCertificatesFromNarrativeIdentity(narrativeCert: acdcActorCert)
+        let narrativeRef = acdcActorCert.fetchSecRefsFromKeychain()
+
+        logger.log("Getting sec references")
+        guard let narrativeRef = narrativeRef else {
+            throw NarrativeHelperError.unableToGetCertificate("Unable to get Sec references")
+        }
+
+        logger.log("creating NIOSSLPrivatekey")
+        let customKey =  NarrativeKey(key: narrativeRef.keyRef)
+        let mtlsPrivateKey = NIOSSLPrivateKey(customPrivateKey: customKey)
+
+        logger.log("getting cert chain")
+        guard let certChain = acdcActorCert.getFullCertChain() else {
+            let errorMessage = "Unable to obtain certChain from narrative Identity"
+            throw NarrativeHelperError.unableToGetCertChain(errorMessage)
+        }
+
+        logger.log("mapping cert chain")
+        let mtlsCertificateChain = try certChain.map {
+            try NIOSSLCertificate(bytes: [UInt8](SecCertificateCopyData($0) as Data), format: .der)
+        }
+
+        let cryptexMountPoint = ProcessInfo.processInfo.environment["CRYPTEX_MOUNT_PATH"] ?? ""
+
+        var trustRootsRelativePath = "/usr/share/cloudmetricsd/mosaic_trustroot.pem"
+#if os(iOS)
+        if MobileGestalt.current.isComputeController {
+            trustRootsRelativePath = "/usr/share/cloudmetricsd_bmc/mosaic_trustroot.pem"
+        }
+#endif
+        let trustRootsFilePath = "\(cryptexMountPoint)\(trustRootsRelativePath)"
+        let mtlsTrustRoots = NIOSSLTrustRoots.certificates([
+            try NIOSSLCertificate(file: trustRootsFilePath, format: .pem),
+        ])
+
+        return .makeClientConfigurationBackedByNIOSSL(
+            certificateChain: mtlsCertificateChain.map { .certificate($0) },
+            privateKey: .privateKey(mtlsPrivateKey),
+            trustRoots: mtlsTrustRoots
+        )
+    }
 }

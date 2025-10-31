@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -47,6 +47,8 @@ public final class IdleTimeout<TimeoutClock: Clock>: Sendable where TimeoutClock
 
     @inlinable
     public func run() async throws -> Never {
+        /// Use this when debugging to avoid timeouts triggering
+        let disableAllTimeouts = false
         logger.info(
             "Idle timer armed timeout=\(self.timeout) taskName=\(self.taskName) taskID=\(self.taskID)"
         )
@@ -82,7 +84,15 @@ public final class IdleTimeout<TimeoutClock: Clock>: Sendable where TimeoutClock
                     logger.error(
                         "Idle timer exceeded timeout=\(self.timeout) taskName=\(self.taskName) taskID=\(self.taskID)"
                     )
-                    throw IdleTimeoutError.idleTimeoutExceeded(timeout: self.timeout)
+                    if disableAllTimeouts {
+                        logger.error(
+                            "disableAllTimeouts is set - suppressing the error"
+                        )
+                        // just sleep for a day - we will still respect cancellation
+                        return .seconds(60 * 60 * 24)
+                    } else {
+                        throw IdleTimeoutError.idleTimeoutExceeded(timeout: self.timeout)
+                    }
                 }
 
                 return self.timeout - timeSinceLastActivity

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -25,18 +25,20 @@ extension VM {
     func modify(
         cpuCount: UInt? = nil,
         memorySize: UInt64? = nil,
-        networkConfig: NetworkConfig? = nil,
-        nvramArgs: [String: String]? = nil,
+        networkConfigs: [NetworkConfig]? = nil,
+        nvramArgs: VM.NVRAMmap? = nil,
         romImages: ROMImages? = nil,
-        platformFusing: VM.PlatformFusing? = nil
+        platformFusing: VM.PlatformFusing? = nil,
+        virtMeshPlugin: String? = nil,
+        virtMeshRank: Int? = nil
     ) throws {
         VM.logger.log("modify VM: \(self.name, privacy: .public)")
         var curConfig: Config?
 
         // when creating, bundle/curConfig will be empty
-        if self.exists {
+        if exists {
             do {
-                curConfig = try Config(fromBundle: self.bundle)
+                curConfig = try Config(fromBundle: bundle)
             } catch {
                 throw VMError("could not load existing config")
             }
@@ -53,16 +55,22 @@ extension VM {
             }
         }
 
+        if virtMeshPlugin != nil, virtMeshRank == nil {
+            throw VMError("VirtMesh rank has to be set when plugin is preset, redo the modify with the rank set")
+        }
+
         // new config parameters are those passed in or from previous config (or some other default)
         let vmConfig = Config(
-            bundle: self.bundle,
+            bundle: bundle,
             platformFusing: platformFusing ?? curConfig?.platformFusing,
             machineIDBlob: curConfig?.machineIDBlob,
             cpuCount: cpuCount ?? curConfig?.cpuCount ?? 1,
             memorySize: memorySize ?? curConfig?.memorySize ?? (4 * 1024 * 1024 * 1024),
-            networkConfig: networkConfig ?? curConfig?.networkConfig ?? NetworkConfig(mode: .none),
+            networkConfigs: networkConfigs ?? curConfig?.networkConfigs ?? [NetworkConfig(mode: .none)],
             nvramArgs: nvramArgs ?? curConfig?.nvramArgs,
-            romImages: bundleROMs
+            romImages: bundleROMs,
+            virtMeshPlugin: virtMeshPlugin ?? curConfig?.virtMeshPlugin,
+            virtMeshRank: virtMeshRank ?? curConfig?.virtMeshRank
         )
 
         // validate resulting configuration

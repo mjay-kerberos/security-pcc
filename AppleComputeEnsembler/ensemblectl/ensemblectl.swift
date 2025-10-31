@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -22,9 +22,10 @@
 import ArgumentParserInternal
 import CryptoKit
 import Foundation
+import Network
 
 // Import debug functions like activate and reconfigure
-@_spi(Debug) import Ensemble
+@_spi(Debug) import AppleComputeEnsembler
 
 struct EnsembleCtl: ParsableCommand {
 	static var configuration = CommandConfiguration(
@@ -46,6 +47,12 @@ struct EnsembleCtl: ParsableCommand {
 			GetEnsembleID.self,
 			RunServer.self,
 			RunClient.self,
+			DistributeDataKey.self,
+			GetDataKey.self,
+            DistributeDataKeyV2.self,
+            GetDataKeyV2.self,
+            DistributeDataKeyV3.self,
+            GetDataKeyV3.self
 		]
 	)
 }
@@ -86,6 +93,175 @@ extension EnsembleCtl {
 			print("Received Max seconds per key: \(maxSecsPerKey)")
 		}
 	}
+
+    struct DistributeDataKey: ParsableCommand {
+            static let configuration = CommandConfiguration(abstract: "Distributes the data key.")
+            mutating func run() throws {
+                let ensembler = try EnsemblerSession()
+                let key = SymmetricKey(size: .bits128)
+                let keyData = key.withUnsafeBytes { Data(Array($0)) }
+
+                let token = try ensembler.distributeDataKey(key: key, type: .distributed)
+                print(
+                    "Distributed the data key.: \(keyData.map { String(format: "%02x", $0) }.joined()), token = \(token)"
+                )
+            }
+        }
+
+    struct GetDataKey: ParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Gets the data key.")
+
+        @Argument(help: "The single use key token for the key to retrieve.")
+        var token: String
+
+        mutating func run() throws {
+            let ensembler = try EnsemblerSession()
+            let key: SymmetricKey = try ensembler.getDataKey(token: UUID(uuidString: self.token)!)
+            let keyData = key.withUnsafeBytes { Data(Array($0)) }
+            print(
+                " Key obtained for token \(self.token) is: \(keyData.map { String(format: "%02x", $0) }.joined())"
+            )
+        }
+    }
+
+    
+	struct DistributeDataKeyV2: ParsableCommand {
+		static let configuration = CommandConfiguration(abstract: "Distributes the data key.")
+        
+        @Argument(help: "The paraphrase to generate key encryption key.")
+        var paraPhrase: String
+        
+        func generateSymmetricKey(from string: String) -> SymmetricKey {
+            // Convert string to Data
+            let keyData = Data(string.utf8)
+
+            // Hash the data to ensure a fixed size (use SHA256 for a 256-bit key)
+            let hashedKey = SHA256.hash(data: keyData)
+
+            // Create the SymmetricKey
+            return SymmetricKey(data: Data(hashedKey))
+        }
+        
+		mutating func run() throws {
+			let ensembler = try EnsemblerSession()
+			let key = SymmetricKey(size: .bits128)
+            
+			let keyData = key.withUnsafeBytes { Data(Array($0)) }
+            let kek = generateSymmetricKey(from: paraPhrase)
+            let box = try CryptoKit.AES.GCM.seal(keyData, using: kek)
+            
+			let token = try ensembler.distributeDataKey(key: box, type: .distributed)
+			print(
+				"Distributed the data key.: \(keyData.map { String(format: "%02x", $0) }.joined()), token = \(token)"
+			)
+		}
+	}
+    
+    struct DistributeDataKeyV3: ParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Distributes the data key.")
+        
+        @Argument(help: "The paraphrase to generate key encryption key.")
+        var paraPhrase: String
+        
+        func generateSymmetricKey(from string: String) -> SymmetricKey {
+            // Convert string to Data
+            let keyData = Data(string.utf8)
+
+            // Hash the data to ensure a fixed size (use SHA256 for a 256-bit key)
+            let hashedKey = SHA256.hash(data: keyData)
+
+            // Create the SymmetricKey
+            return SymmetricKey(data: Data(hashedKey))
+        }
+        
+        mutating func run() throws {
+            let ensembler = try EnsemblerSession()
+            let key = SymmetricKey(size: .bits128)
+            
+            let keyData = key.withUnsafeBytes { Data(Array($0)) }
+            let kek = generateSymmetricKey(from: paraPhrase)
+            let box = try CryptoKit.AES.GCM.seal(keyData, using: kek)
+            
+            let uuid = UUID(uuidString: "123e4567-e89b-12d3-a456-426614174000")
+            let spanID = UInt64("1234567")
+            
+            let tracingContext = EnsembleTracingContext(name: nil, requestID: uuid!, spanID: spanID! , parentSpanID: nil)
+            
+            let token = try ensembler.distributeDataKey(key: box, type: .distributed, tracingContext: tracingContext)
+            print(
+                "Distributed the data key.: \(keyData.map { String(format: "%02x", $0) }.joined()), token = \(token)"
+            )
+        }
+    }
+
+	struct GetDataKeyV2: ParsableCommand {
+		static let configuration = CommandConfiguration(abstract: "Gets the data key.")
+
+		@Argument(help: "The single use key token for the key to retrieve.")
+		var token: String
+        
+        @Argument(help: "The paraphrase to generate key encryption key.")
+        var paraPhrase: String
+
+        func generateSymmetricKey(from string: String) -> SymmetricKey {
+            // Convert string to Data
+            let keyData = Data(string.utf8)
+
+            // Hash the data to ensure a fixed size (use SHA256 for a 256-bit key)
+            let hashedKey = SHA256.hash(data: keyData)
+
+            // Create the SymmetricKey
+            return SymmetricKey(data: Data(hashedKey))
+        }
+        
+		mutating func run() throws {
+			let ensembler = try EnsemblerSession()
+            let sealedBox: AES.GCM.SealedBox = try ensembler.getDataKey(token: UUID(uuidString: self.token)!)
+            
+            let kek = generateSymmetricKey(from: paraPhrase)
+            let keyData = try CryptoKit.AES.GCM.open(sealedBox, using: kek)
+			print(
+				" Key obtained for token \(self.token) is: \(keyData.map { String(format: "%02x", $0) }.joined())"
+			)
+		}
+	}
+    
+    struct GetDataKeyV3: ParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Gets the data key.")
+
+        @Argument(help: "The single use key token for the key to retrieve.")
+        var token: String
+        
+        @Argument(help: "The paraphrase to generate key encryption key.")
+        var paraPhrase: String
+
+        func generateSymmetricKey(from string: String) -> SymmetricKey {
+            // Convert string to Data
+            let keyData = Data(string.utf8)
+
+            // Hash the data to ensure a fixed size (use SHA256 for a 256-bit key)
+            let hashedKey = SHA256.hash(data: keyData)
+
+            // Create the SymmetricKey
+            return SymmetricKey(data: Data(hashedKey))
+        }
+        
+        mutating func run() throws {
+            let uuid = UUID(uuidString: "123e4567-e89b-12d3-a456-426614174000")
+            let spanID = UInt64("1234567")
+            
+            let tracingContext = EnsembleTracingContext(name: nil, requestID: uuid!, spanID: spanID! , parentSpanID: nil)
+            
+            let ensembler = try EnsemblerSession()
+            let sealedBox: AES.GCM.SealedBox = try ensembler.getDataKey(token: UUID(uuidString: self.token)!, tracingContext: tracingContext)
+            
+            let kek = generateSymmetricKey(from: paraPhrase)
+            let keyData = try CryptoKit.AES.GCM.open(sealedBox, using: kek)
+            print(
+                " Key obtained for token \(self.token) is: \(keyData.map { String(format: "%02x", $0) }.joined())"
+            )
+        }
+    }
 
 	struct GetNodeInfo: ParsableCommand {
 		static let configuration = CommandConfiguration(
@@ -193,9 +369,39 @@ extension EnsembleCtl {
 		@Argument(help: "The port to stand the server.")
 		var port: UInt16
 
+		@Argument(help: "Whether to use cloudattestation or not.")
+		var useAttestation: Bool = false
+
+		@Option(name: .shortAndLong, help: "List of UDIDs that should be allowed to mTLS")
+		var udidList: [String]
+
 		mutating func run() throws {
 			let ensembler = try EnsemblerSession()
-			let options = try ensembler.getTlsOptions()
+            
+            var options: NWProtocolTLS.Options
+            
+            if useAttestation {
+                let allowedList = udidList
+                try ensembler.createAttestation()
+                options = try ensembler.getTlsOptionsBackedByCloudAttestation(filter: { udid in
+                    print("CloudAttestation callback called")
+                    if allowedList.contains(udid) {
+                        print("UDID found in the allowedList, allowing the UDID \(udid)")
+                        return true
+                    }
+                    else {
+                        print("UDID not found in the allowedList, rejecting the UDID \(udid)")
+                        return false
+                    }
+                })
+                
+                print("calling refreshattestation")
+                try ensembler.refreshAttestation()
+
+            }
+            else {
+                options = try ensembler.getTlsOptions()
+            }
 
 			print("Obtained TLS options \(options.securityProtocolOptions.hash)")
 
@@ -223,9 +429,39 @@ extension EnsembleCtl {
 		@Argument(help: "The server to connect to.")
 		var server: String
 
+		@Argument(help: "Whether to use cloudattestation or not.")
+		var useAttestation: Bool
+
+		@Option(name: .shortAndLong, help: "List of UDIDs that should be allowed to mTLS")
+		var udidList: [String]
+
 		mutating func run() throws {
 			let ensembler = try EnsemblerSession()
-			let options = try ensembler.getTlsOptions()
+            
+            var options: NWProtocolTLS.Options
+            
+            if useAttestation {
+                let allowedList = udidList
+                
+                try ensembler.createAttestation()
+                options = try ensembler.getTlsOptionsBackedByCloudAttestation(filter: { udid in
+                    print("CloudAttestation callback called")
+                    if allowedList.contains(udid) {
+                        print("UDID found in the allowedList, allowing the UDID \(udid)")
+                        return true
+                    }
+                    else {
+                        print("UDID not found in the allowedList, rejecting the UDID \(udid)")
+                        return false
+                    }
+                })
+                
+                print("calling refreshattestation")
+                try ensembler.refreshAttestation()
+            }
+            else {
+                options = try ensembler.getTlsOptions()
+            }
 
 			print("Obtained TLS options \(options.securityProtocolOptions.hash)")
 

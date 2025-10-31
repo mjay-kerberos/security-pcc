@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -72,6 +72,11 @@ public struct PolicyBuilder {
         BooleanPolicy(result: expression)
     }
 
+    @inlinable
+    public static func buildExpression(_ predicate: EmptyPredicate) -> PredicatePolicy {
+        PredicatePolicy(predicate: predicate)
+    }
+
     /// Provides support for limited availability policies.
     @inlinable
     public static func buildLimitedAvailability(_ policy: some AttestationPolicy) -> some AttestationPolicy {
@@ -135,6 +140,25 @@ extension PolicyBuilder {
             }
         }
     }
+    // swift-format-ignore
+    public typealias EmptyPredicate = Predicate< >
+
+    /// Provides an ``AttestationPolicy`` that throws ``PolicyBuilder/Error/booleanExpressionFailure`` if the provided predicate evaluates to `false`
+    public struct PredicatePolicy: AttestationPolicy {
+        @usableFromInline
+        let predicate: EmptyPredicate
+
+        public init(predicate: EmptyPredicate) {
+            self.predicate = predicate
+        }
+
+        @inlinable
+        public func evaluate(bundle: AttestationBundle, context: inout AttestationPolicyContext) async throws {
+            guard (try? predicate.evaluate()) == true else {
+                throw Error.predicateExpressionFailure(predicate.description)
+            }
+        }
+    }
 
     /// Provides an ``AttestationPolicy`` that evaluates an optional underlying ``AttestationPolicy`` if it is present.
     public struct OptionalPolicy<Policy>: AttestationPolicy where Policy: AttestationPolicy {
@@ -174,7 +198,8 @@ extension PolicyBuilder {
 }
 
 extension PolicyBuilder {
-    public enum Error: Swift.Error {
+    public enum Error: Swift.Error, Equatable {
         case booleanExpressionFailure
+        case predicateExpressionFailure(String)
     }
 }

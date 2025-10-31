@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,7 +14,7 @@
 
 //  Copyright © 2024 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+package import CloudBoardAsyncXPC
 
 public protocol CloudBoardHealthAPIServerToClientProtocol: Actor {
     func healthStateChanged(to healthState: CloudBoardHealthState) async throws
@@ -23,8 +23,7 @@ public protocol CloudBoardHealthAPIServerToClientProtocol: Actor {
 public protocol CloudBoardHealthAPIServerDelegateProtocol:
 AnyObject, Sendable, CloudBoardHealthAPIClientToServerProtocol {}
 
-public protocol CloudBoardHealthAPIServerProtocol:
-CloudBoardHealthAPIServerToClientProtocol {
+package protocol CloudBoardHealthAPIServerProtocol: CloudBoardHealthAPIServerToClientProtocol {
     func connect(
         listenerDelegate: CloudBoardAsyncXPCListenerDelegate,
         serverDelegate: CloudBoardHealthAPIServerDelegateProtocol

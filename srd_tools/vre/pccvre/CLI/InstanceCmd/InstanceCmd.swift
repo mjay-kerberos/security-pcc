@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -12,7 +12,7 @@
 // EA1937
 // 10/02/2024
 
-//  Copyright © 2024 Apple, Inc. All rights reserved.
+//  Copyright © 2024-2025 Apple, Inc. All rights reserved.
 //
 
 import ArgumentParserInternal
@@ -29,16 +29,10 @@ extension CLI {
                 InstanceRemoveCmd.self,
                 InstanceStartCmd.self,
                 InstanceConfigureCmd.self,
+                InstanceInvokeCmd.self,
                 InstanceInferenceRequestCmd.self,
                 InstanceDiagnosticCmd.self,
             ]
         )
-
-        struct options: ParsableArguments {
-            @Option(name: [.customLong("vrevm-path")],
-                    help: ArgumentHelp("Alternate path to 'vrevm' command.",
-                                       visibility: .hidden))
-            var vrevmPath: String?
-        }
     }
 }

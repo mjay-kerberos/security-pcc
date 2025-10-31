@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -21,7 +21,7 @@
 
 extension SEP {
     /// Collates the various bits from a SEP Attestation that represent Chip Identity.
-    public struct Identity: Equatable, Sendable {
+    public struct Identity: Hashable, Sendable {
         /// The Chip ID.
         public let chipID: UInt32
         /// The ECID
@@ -32,7 +32,7 @@ extension SEP {
         public let swSeed: UInt32
 
         /// A bitfield representing the Chip's Architecture Bits.
-        public struct ArchBits: Equatable, Sendable, RawRepresentable {
+        public struct ArchBits: Hashable, Sendable, RawRepresentable {
             /// The production status fuse.
             public let productionStatus: Bool
             /// The security mode fuse.

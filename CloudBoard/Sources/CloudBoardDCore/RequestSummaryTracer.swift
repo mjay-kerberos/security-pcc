@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -13,6 +13,7 @@
 // 10/02/2024
 
 import Atomics
+import CloudBoardCommon
 import CloudBoardLogging
 import CloudBoardMetrics
 import Foundation
@@ -22,11 +23,16 @@ import ServiceContextModule
 import Tracing
 
 enum OperationNames {
+    static let nackRequest = "nack.request"
     static let invokeWorkload = "workload.invocation"
     static let invokeWorkloadRequest = "workload.invocation.request"
     static let invokeWorkloadResponse = "workload.invocation.response"
     static let waitForWarmupComplete = "workload.waitForWarmupComplete"
     static let clientInvokeWorkloadRequest = "workload.client.invocation.request"
+    static let invokeProxyDialBack = "proxyDialBack.invocation"
+    static let invokeWorkloadRequestFinalToResponseEnd = "workload.invocation.request_final_to_response_end"
+    static let invokeWorkloadParametersToResponseEnd = "workload.invocation.parameters_to_response_end"
+    static let cloudboardConvergence = "cloudboard.convergence"
 }
 
 /// Tracer to collect and emit "Request Summary" information.
@@ -48,8 +54,7 @@ public final class RequestSummaryTracer: Tracing.Tracer, RequestIDInstrument, Se
         init() {}
     }
 
-    private let spanIDGenerator = ManagedAtomic<UInt64>(0)
-    private let requestSpans: OSAllocatedUnfairLock<[String: ActiveTrace]> = .init(initialState: [:])
+    private let requestSpans: OSAllocatedUnfairLock<[UUID: ActiveTrace]> = .init(initialState: [:])
 
     public init(metrics: any MetricsSystem) {
         self.metrics = metrics
@@ -65,10 +70,9 @@ public final class RequestSummaryTracer: Tracing.Tracer, RequestIDInstrument, Se
         line: UInt
     ) -> Span {
         let context = context()
-        let newSpanID = self.spanIDGenerator.loadThenWrappingIncrement(ordering: .relaxed)
-
+        let newSpanID = TraceContextCache.singletonCache.generateNewSpanID()
         let parentID = context.spanID
-        let rpcID = context.rpcID ?? "rpcID not passed through context"
+        let rpcID = context.rpcID
         var nextContext = context
         nextContext.spanID = newSpanID
 
@@ -108,7 +112,8 @@ public final class RequestSummaryTracer: Tracing.Tracer, RequestIDInstrument, Se
         let isRoot = span.parentID == nil
 
         if isRoot {
-            assert(OperationNames.invokeWorkload == span.operationName, "Unexpected span name: \(span.operationName)")
+            // In theory any root span should be OperationNames.invokeWorkload
+            // However in tests we might create things 'part way down the stack so it's not something we can assert
             let trace: ActiveTrace? = self.requestSpans.withLock { requestSpans in
                 if var trace = requestSpans.removeValue(forKey: rpcID) {
                     trace.invokeWorkloadSpan = span
@@ -136,6 +141,10 @@ public final class RequestSummaryTracer: Tracing.Tracer, RequestIDInstrument, Se
                 $0[rpcID]?.invokeWorkloadResponseSpans.append(span)
             }
         } else if span.operationName == OperationNames.clientInvokeWorkloadRequest {
+            self.requestSpans.withLock {
+                $0[rpcID]?.clientInvokeWorkloadRequestSpans.append(span)
+            }
+        } else if span.operationName == OperationNames.invokeProxyDialBack {
             self.requestSpans.withLock {
                 $0[rpcID]?.clientInvokeWorkloadRequestSpans.append(span)
             }
@@ -169,10 +178,14 @@ extension RequestSummaryTracer {
         let startTimeNanos: UInt64
         let kind: Tracing.SpanKind
 
-        let rpcID: String
+        let rpcID: UUID
         let requestID: String?
-        let spanID: UInt64
-        let parentID: UInt64?
+        var spanID: String
+        var endTimeManual: UInt64?
+        // This is only relevant for the CloudboardDRequestSummary
+        var durationMicrosIncludingJobHelperExit: Int64?
+
+        var parentID: String?
 
         let function: String
         let fileID: String
@@ -194,10 +207,10 @@ extension RequestSummaryTracer {
             startTimeNanos: UInt64,
             operationName: String,
             kind: Tracing.SpanKind,
-            rpcID: String,
+            rpcID: UUID,
             requestID: String?,
-            parentID: UInt64?,
-            spanID: UInt64,
+            parentID: String?,
+            spanID: String,
             context: ServiceContext,
             tracer: RequestSummaryTracer,
             function: String,
@@ -238,10 +251,10 @@ extension RequestSummaryTracer {
                 case .closed:
                     break
                 case .open:
-                    let rpcID = storage.context.rpcID ?? ""
+                    let rpcID = storage.context.rpcID
                     self.logger?
                         .fault(
-                            "[rpcID: \(rpcID, privacy: .public), parentID: \(self.parentID ?? 0, privacy: .public), spanID: \(self.spanID, privacy: .public)] Reference to unended span dropped"
+                            "[rpcID: \(rpcID, privacy: .public), parentID: \(self.parentID ?? "", privacy: .public), spanID: \(self.spanID, privacy: .public)] Reference to unended span dropped"
                         )
                 }
             }
@@ -277,6 +290,10 @@ extension RequestSummaryTracer {
             self.storage.withLock { $0.status = status }
         }
 
+        public func setManualEndTime(_ instant: any TracerInstant) {
+            self.endTimeManual = instant.nanosecondsSinceEpoch
+        }
+
         public func addEvent(_ event: Tracing.SpanEvent) {
             self.storage.withLock { $0.events.append(event) }
         }
@@ -297,13 +314,14 @@ extension RequestSummaryTracer {
             let tracer = self.storage.withLock { storage -> RequestSummaryTracer? in
                 switch storage.recordingState {
                 case .open(let tracer):
-                    storage.recordingState = .closed(endTimeNanos: instant().nanosecondsSinceEpoch)
+                    storage
+                        .recordingState = .closed(endTimeNanos: self.endTimeManual ?? instant().nanosecondsSinceEpoch)
                     return tracer
                 case .closed:
-                    let rpcID = storage.context.rpcID ?? ""
+                    let rpcID = storage.context.rpcID
                     self.logger?
                         .fault(
-                            "[rpcID: \(rpcID, privacy: .public), parentID: \(self.parentID ?? 0, privacy: .public), spanID: \(self.spanID, privacy: .public)] Span already closed"
+                            "[rpcID: \(rpcID, privacy: .public), parentID: \(self.parentID ?? "", privacy: .public), spanID: \(self.spanID, privacy: .public)] Span already closed"
                         )
                     return nil
                 }
@@ -313,13 +331,13 @@ extension RequestSummaryTracer {
             }
         }
 
-        fileprivate var endTimeNanos: UInt64 {
+        package var endTimeNanos: UInt64 {
             self.storage.withLock { storage in
                 guard case .closed(let stopTimeNanos) = storage.recordingState else {
-                    let rpcID = storage.context.rpcID ?? ""
+                    let rpcID = storage.context.rpcID
                     self.logger?
                         .fault(
-                            "[rpcID: \(rpcID, privacy: .public), parentID: \(self.parentID ?? 0, privacy: .public), spanID: \(self.spanID, privacy: .public)] endTimeNanos queried for closed span"
+                            "[rpcID: \(rpcID, privacy: .public), parentID: \(self.parentID ?? "", privacy: .public), spanID: \(self.spanID, privacy: .public)] endTimeNanos queried for closed span"
                         )
                     return 0
                 }
@@ -330,24 +348,44 @@ extension RequestSummaryTracer {
 }
 
 struct SpanIDKey: ServiceContextKey {
-    typealias Value = UInt64
-
+    typealias Value = String
     static var nameOverride: String? { "spanID" }
 }
 
+struct ParentSpanIDKey: ServiceContextKey {
+    typealias Value = String
+    static var nameOverride: String? { "parentSpanID" }
+}
+
+struct WorkerIDKey: ServiceContextKey {
+    typealias Value = UUID
+    static var nameOverride: String? { "workerID" }
+}
+
 extension ServiceContext {
-    fileprivate var spanID: UInt64? {
+    var spanID: String? {
         get { self[SpanIDKey.self] }
         set { self[SpanIDKey.self] = newValue }
+    }
+
+    var parentSpanID: String? {
+        get { self[ParentSpanIDKey.self] }
+        set { self[ParentSpanIDKey.self] = newValue }
+    }
+
+    var workerID: UUID? {
+        get { self[WorkerIDKey.self] }
+        set { self[WorkerIDKey.self] = newValue }
     }
 }
 
 extension CloudBoardDRequestSummary {
     public init(from trace: RequestSummaryTracer.ActiveTrace) {
         var summary = CloudBoardDRequestSummary()
-        summary.populate(invokeWorkloadSpan: trace.invokeWorkloadSpan)
+        // The order in which we populate the summary matters for NACK handling.
         summary.populate(invokeWorkloadRequestSpans: trace.invokeWorkloadRequestSpans)
         summary.populate(invokeWorkloadResponseSpans: trace.invokeWorkloadResponseSpans)
+        summary.populate(invokeWorkloadSpan: trace.invokeWorkloadSpan)
         summary.populate(clientInvokeWorkloadRequestSpans: trace.clientInvokeWorkloadRequestSpans)
         self = summary
     }
@@ -358,14 +396,17 @@ struct CloudBoardDRequestSummary: RequestSummary {
     var type: String = "RequestSummary"
     var serviceName: String = "cloudboardd"
     var namespace: String = "cloudboard"
-    var rpcID: String?
+    var rpcID: UUID?
     var headers: HPACKHeaders?
     var startTimeNanos: Int64?
     var endTimeNanos: Int64?
     var error: Error?
     var requestID: String?
+    var spanID: String?
+    var parentSpanID: String?
     var automatedDeviceGroup: String?
     var requestChunkCount: Int = 0
+    var isNack: Bool = false
     var requestChunkTotalSize: Int = 0
     var requestFinalChunkSeen: Bool = false
     var requestWorkload: String?
@@ -380,6 +421,7 @@ struct CloudBoardDRequestSummary: RequestSummary {
     var connectionCancelled: Bool = false
     var ropesTerminationCode: Int?
     var ropesTerminationReason: String?
+    var durationMicrosIncludingJobHelperExit: Int64?
 
     private enum CodingKeys: String, CodingKey {
         case spanID
@@ -411,8 +453,15 @@ struct CloudBoardDRequestSummary: RequestSummary {
 
     mutating func populate(invokeWorkloadSpan: RequestSummaryTracer.Span?) {
         if let span = invokeWorkloadSpan {
-            self.operationName = span.operationName
+            if self.isNack {
+                self.operationName = OperationNames.nackRequest
+            } else {
+                self.operationName = span.operationName
+            }
             self.rpcID = span.rpcID
+            self.spanID = span.attributes.requestSummary.invocationAttributes.spanID
+            self.parentSpanID = span.attributes.requestSummary.invocationAttributes.parentSpanID
+            self.durationMicrosIncludingJobHelperExit = span.durationMicrosIncludingJobHelperExit
             if let workloadRequestHeaders = span.attributes.requestSummary.invocationAttributes
                 .invocationRequestHeaders {
                 self.headers = workloadRequestHeaders
@@ -420,7 +469,7 @@ struct CloudBoardDRequestSummary: RequestSummary {
             self.connectionCancelled = span.attributes.requestSummary.invocationAttributes.connectionCancelled ?? false
 
             self.startTimeNanos = Int64(span.startTimeNanos)
-            self.endTimeNanos = Int64(span.endTimeNanos)
+            self.endTimeNanos = Int64(span.endTimeManual ?? span.endTimeNanos)
 
             if let error = span.errors.first {
                 self.populate(error: error)
@@ -435,6 +484,7 @@ struct CloudBoardDRequestSummary: RequestSummary {
         var receivedParameters = false
 
         for span in invokeWorkloadRequestSpans {
+            self.isNack = span.attributes.requestSummary.workloadRequestAttributes.isNack ?? false
             if let requestID = span.requestID, !requestID.isEmpty,
                self.requestID == nil {
                 self.requestID = requestID
@@ -475,6 +525,9 @@ struct CloudBoardDRequestSummary: RequestSummary {
                 .ropesTerminationReason {
                 self.ropesTerminationReason = ropesTerminationReason
             }
+            if let error = span.errors.first {
+                self.populate(error: error)
+            }
         }
         self.requestChunkCount = invokeWorkloadRequestChunkSizes.count
         self.requestFinalChunkSeen = invokeWorkloadRequestFinalChunkSeen
@@ -487,6 +540,9 @@ struct CloudBoardDRequestSummary: RequestSummary {
         let span = invokeWorkloadResponseSpans.first
         self.responseChunkCount = span?.attributes.requestSummary.responseChunkAttributes.chunksCount ?? 0
         self.responseFinalChunkSeen = span?.attributes.requestSummary.responseChunkAttributes.isFinal ?? false
+        if let error = span?.errors.first {
+            self.populate(error: error)
+        }
     }
 
     mutating func populate(clientInvokeWorkloadRequestSpans: [RequestSummaryTracer.Span]) {
@@ -507,15 +563,22 @@ struct CloudBoardDRequestSummary: RequestSummary {
         tracing.name=\(self.operationName, privacy: .public)
         tracing.type=\(self.type, privacy: .public)
         tracing.trace_id=\(self.requestID?.replacingOccurrences(of: "-", with: "").lowercased() ?? "", privacy: .public)
+        tracing.span_id=\(self.spanID ?? "", privacy: .public)
+        tracing.parent_span_id=\(self.parentSpanID ?? "", privacy: .public)
         tracing.start_time_unix_nano=\(self.startTimeNanos ?? 0, privacy: .public)
         tracing.end_time_unix_nano=\(self.endTimeNanos ?? 0, privacy: .public)
         service.name=\(self.serviceName, privacy: .public)
         service.namespace=\(self.namespace, privacy: .public)
         request.duration_ms=\(self.durationMicros.map { String($0 / 1000) } ?? "", privacy: .public)
+        request.duration_including_jobhelper_exit_ms=\(
+            String(self.durationMicrosIncludingJobHelperExit.map { String($0 / 1000) } ?? ""),
+            privacy: .public
+        )
         tracing.status=\(status?.rawValue ?? "", privacy: .public)
+        tracing.clock_skew_alignment=\("left", privacy: .public)
         error.type=\(self.error.map { String(describing: Swift.type(of: $0)) } ?? "", privacy: .public)
         error.description=\(self.error.map { String(reportable: $0) } ?? "", privacy: .public)
-        rpcId=\(self.rpcID ?? "", privacy: .public)
+        rpcId=\(self.rpcID ?? .zero, privacy: .public)
         requestChunkCount=\(self.requestChunkCount, privacy: .public)
         requestChunkTotalSize=\(self.requestChunkTotalSize, privacy: .public)
         requestFinalChunkSeen=\(self.requestFinalChunkSeen, privacy: .public)

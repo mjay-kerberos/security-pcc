@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -34,17 +34,17 @@ extension CLI.TransparencyLogCmd {
                   completion: .file())
         var file: String
 
-        @Option(name: .shortAndLong, help: "Input format. Can be any of [attestation-bundle:json, attestation-bundle:proto, apple-intelligence-report]")
+        @Option(name: .shortAndLong,
+                help: "Input format. Can be any of [attestation-bundle:json, attestation-bundle:proto, apple-intelligence-report]")
         var format: Format = .appleIntelligenceReport
 
-        @Option(name: [.customLong("request-index"), .customShort("r")], help: "Index of the request to use when parsing an apple intelligence report.")
+        @Option(name: [.customLong("request-index"), .customShort("r")],
+                help: "Index of the request to use when parsing an apple intelligence report.")
         var requestIndex: Int?
 
-        @Option(name: [.customLong("attestation-index"), .customShort("a")], help: "Index of the attestation to use when parsing an apple intelligence report. Must be used in combination with --request.")
+        @Option(name: [.customLong("attestation-index"), .customShort("a")],
+                help: "Index of the attestation to use when parsing an apple intelligence report. Must be used in combination with --request.")
         var attestationIndex: Int?
-
-        @Option(name: [.customLong("storage")], help: "Where to load a local copy of the transparency log.")
-        var storage: String = VRE.applicationDir.appending(path: "transparency-log").path(percentEncoded: false)
 
         func run() async throws {
             var fileData: Data
@@ -87,15 +87,17 @@ extension CLI.TransparencyLogCmd {
                 attestationBundle = try AttestationBundle(jsonString: request.nodes[attestationIndex].attestationBundle)
             }
 
-            let storageURL = URL(filePath: storage).appending(path: transparencyLogOptions.environment.rawValue)
+            let storageURL = FileManager.fileURL(transparencyLogOptions.storage)
+                .appending(path: transparencyLogOptions.environment.rawValue)
 
             let decoder = JSONDecoder()
-            var applicationTree = try decoder.decode(MerkleTree<SHA256>.self, from: Data(contentsOf: storageURL.appending(path: "applicationTree.json")))
+            var applicationTree = try decoder.decode(MerkleTree<SHA256>.self,
+                                                     from: Data(contentsOf: storageURL.appending(path: "applicationTree.json")))
 
-            let logProofs = try TxPB_ATLogProofs(serializedBytes: attestationBundle.atLogProofs) // bundle.transparencyProofs.proofs
+            let logProofs = try CloudAttestation.PrivateCloudCompute_TransparencyLog_ATLogProofs(serializedBytes: attestationBundle.atLogProofs) // bundle.transparencyProofs.proofs
             let inclusionProof = logProofs.inclusionProof
             let leafBytes = logProofs.inclusionProof.nodeBytes
-            let logHead = try TxPB_LogHead(serializedBytes: inclusionProof.slh.object)
+            let logHead = try CloudAttestation.LogHead(serializedBytes: inclusionProof.slh.object)
 
             guard applicationTree.count >= Int(logHead.logSize) else {
                 throw TransparencyLogError("Inclusion proof is from a later revision of the transparency log compared to the locally downloaded copy")
@@ -110,7 +112,7 @@ extension CLI.TransparencyLogCmd {
             // now check that the Release actually matches the hash in the ATLeaf node.
             let release = try Release(bundle: attestationBundle)
 
-            let changeLogNode = try TxPB_ChangeLogNodeV2(serializedBytes: leafBytes)
+            let changeLogNode = try CloudAttestation.ChangeLogNodeV2(serializedBytes: leafBytes)
             var transparencyByteBuffer = TransparencyByteBuffer(data: changeLogNode.mutation)
             let atLeaf = try ATLeafData(bytes: &transparencyByteBuffer)
 
@@ -185,7 +187,7 @@ extension AppleIntelligenceReport {
     }
 }
 
-private extension TxPB_LogEntry {
+private extension CloudAttestation.LogEntry {
     func merkleInclusionProof() -> MerkleTree<SHA256>.InclusionProof {
         return .init(index: Int(nodePosition), path: hashesOfPeersInPathToRoot)
     }

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,7 +14,7 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+internal import CloudBoardAsyncXPC
 
 public actor CloudBoardControllerAPIXPCClient {
     private var connection: CloudBoardAsyncXPCConnection?
@@ -24,8 +24,8 @@ public actor CloudBoardControllerAPIXPCClient {
         connection: CloudBoardAsyncXPCConnection
     ) async {
         self.connection = connection
-        await self.connection?.handleConnectionInvalidated { _ in
-            await self.disconnected()
+        await self.connection?.handleConnectionInvalidated { [weak self] _ in
+            await self?.disconnected()
         }
     }
 

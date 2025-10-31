@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,7 +14,7 @@
 
 //  Copyright © 2024 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+internal import CloudBoardAsyncXPC
 import Foundation
 import os
 
@@ -23,8 +23,8 @@ public actor CloudBoardJobAuthAPIXPCClient {
     private weak var delegate: CloudBoardJobAuthAPIServerToClientProtocol?
 
     internal init(connection: CloudBoardAsyncXPCConnection) async {
-        await self.connection = connection.handleConnectionInvalidated { _ in
-            await self.surpriseDisconnect()
+        await self.connection = connection.handleConnectionInvalidated { [weak self] _ in
+            await self?.surpriseDisconnect()
         }
     }
 }

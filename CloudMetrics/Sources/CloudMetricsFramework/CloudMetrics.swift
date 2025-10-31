@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -61,6 +61,9 @@ public final class CloudMetrics: Sendable {
 
     private static let debugMetricPrefixes: OSAllocatedUnfairLock<[String]?> = .init(initialState: nil)
     private static let state: OSAllocatedUnfairLock<State> = .init(initialState: .nonBootstrapped)
+    // If cloudmetricsd isn't correctly configured and listening we can buffer requests in an async stream.
+    // We don't want this to grow unbounded and crash the process linking CloudMetricsFramework.
+    private static let defaultMaxMetricUpdatesToBuffer = 10_000
     private static let logger = Logger(subsystem: kCloudMetricsLoggingSubsystem, category: "CloudMetricsFramework")
 
     @available(*, deprecated, renamed: "CloudMetrics.run()", message: "Prefer calling async method CloudMetrics.run()")
@@ -105,6 +108,13 @@ public final class CloudMetrics: Sendable {
     }
 
     package static func bootstrapForAsync(bootstrapInternal: Bool) throws {
+        var validPreference: DarwinBoolean = true
+        var maxUpdatesToBuffer: Int = CFPreferencesGetAppIntegerValue("maxCloudMetricsUpdatesToBuffer" as CFString,
+                                                                      kCFPreferencesCurrentApplication, &validPreference)
+        if !validPreference.boolValue {
+            maxUpdatesToBuffer = Self.defaultMaxMetricUpdatesToBuffer
+        }
+
         // Setup the factory's dependencies.
         // We need an ``AsyncStream`` from which we will receive updates from the sync world
         // and an XPC client with which we will communicate with the daemon.
@@ -112,7 +122,9 @@ public final class CloudMetrics: Sendable {
         try self.state.withLock { state in
             switch (state, bootstrapInternal) {
             case (.nonBootstrapped, _), (_, true):
-                let (metricUpdateStream, metricUpdateContinuation) = AsyncStream<CloudMetricsServiceMessages>.makeStream()
+                let (metricUpdateStream, metricUpdateContinuation) = AsyncStream<CloudMetricsServiceMessages>.makeStream(
+                    bufferingPolicy: .bufferingOldest(maxUpdatesToBuffer)
+                )
                 let factory = CloudMetricsFactory(metricUpdateContinuation: metricUpdateContinuation)
                 if bootstrapInternal {
                     MetricsSystem.bootstrapInternal(factory)
@@ -159,7 +171,10 @@ public final class CloudMetrics: Sendable {
             }
         }
 
-        Self.logger.log("Initialising CloudMetrics XPC client \(xpcServiceName)")
+        Self.logger.log("""
+            Initialising CloudMetrics XPC client. \
+            xpc_service_name=\(xpcServiceName, privacy: .public)
+            """)
         let xpcClient = CloudMetricsXPCClient(xpcServiceName: xpcServiceName)
 
         // When the factory finishes, adjust our state to reflect we're now shutdown.
@@ -214,11 +229,11 @@ public final class CloudMetrics: Sendable {
                 state = .shuttingDown(promise)
                 future = .init(promise)
             case .shuttingDown(let promise):
-                logger.debug("CloudMetrics.shutdown called whilst already shutting down.")
+                logger.log("CloudMetrics.shutdown called whilst already shutting down.")
                 future = .init(promise)
             case .shutdown:
                 // Might not be an error: some users call `invalidate()` themselves and others rely on the `atExit` hook.
-                logger.debug("CloudMetrics.shutdown called when already shutdown.")
+                logger.log("CloudMetrics.shutdown called when already shutdown.")
                 future = nil
             }
             return future
@@ -239,7 +254,7 @@ public final class CloudMetrics: Sendable {
             case .running(let factory):
                 return factory
             default:
-                logger.debug("CloudMetrics not in bootstrapped state")
+                logger.log("CloudMetrics not in bootstrapped state")
                 return nil
             }
         }

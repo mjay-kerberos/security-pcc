@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -20,12 +20,10 @@
  */
 syntax = "proto3";
 
-import "CloudBoard.proto";
-
 package grpc.health.v1;
 
 option java_multiple_files = true;
-option java_package = "com.apple.cloudboard.health.api.v1";
+option java_package = "com.apple.cloudboard.health.v1";
 
 message HealthCheckRequest {
   string service = 1;
@@ -39,7 +37,6 @@ message HealthCheckResponse {
     SERVICE_UNKNOWN = 3;  // Used only by the Watch method.
   }
   ServingStatus status = 1;
-  com.apple.cloudboard.api.v1.LoadResponse load = 99 [deprecated=true];
 }
 
 service Health {

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,23 +14,46 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+internal import CloudBoardAsyncXPC
+import Foundation
 
 internal enum CloudBoardJobHelperAPIXPCClientToServerMessages {
-    internal struct InvokeWorkload: CloudBoardAsyncXPCMessage {
+    internal struct InvokeWorkload: CloudBoardAsyncXPCByteBufferMessage, Equatable {
         internal typealias Success = ExplicitSuccess
         internal typealias Failure = CloudBoardJobHelperAPIError
 
         internal var message: CloudBoardDaemonToJobHelperMessage
     }
 
-    internal struct Teardown: CloudBoardAsyncXPCMessage {
+    internal struct Teardown: CloudBoardAsyncXPCByteBufferMessage, Equatable {
         internal typealias Success = ExplicitSuccess
         internal typealias Failure = CloudBoardJobHelperAPIError
     }
 
-    internal struct Abandon: CloudBoardAsyncXPCMessage {
+    internal struct Abandon: CloudBoardAsyncXPCByteBufferMessage, Equatable {
         internal typealias Success = ExplicitSuccess
         internal typealias Failure = CloudBoardJobHelperAPIError
+    }
+}
+
+extension CloudBoardJobHelperAPIXPCClientToServerMessages.Teardown: ByteBufferCodable {
+    func encode(to _: inout ByteBuffer) throws {}
+
+    init(from _: inout ByteBuffer) throws {}
+}
+
+extension CloudBoardJobHelperAPIXPCClientToServerMessages.Abandon: ByteBufferCodable {
+    func encode(to _: inout ByteBuffer) throws {}
+
+    init(from _: inout ByteBuffer) throws {}
+}
+
+extension CloudBoardJobHelperAPIXPCClientToServerMessages.InvokeWorkload: ByteBufferCodable {
+    func encode(to buffer: inout ByteBuffer) throws {
+        try message.encode(to: &buffer)
+    }
+
+    init(from buffer: inout ByteBuffer) throws {
+        message = try .init(from: &buffer)
     }
 }

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -22,7 +22,7 @@
 import Foundation
 import InternalSwiftProtobuf
 import CryptoKit
-import Security
+@preconcurrency import Security
 import Security_Private.SecKeyPriv
 @_weakLinked import SecureConfigDB
 import os.log
@@ -36,8 +36,19 @@ public struct NodeAttestor: Attestor {
     /// The key lifetime duration for the attestation.
     public var defaultKeyDuration: Duration = .days(1)
 
+    public internal(set) var assetProvider: any AttestationAssetProvider
+
+    public internal(set) var sepProtocol: any SEP.AttestationProtocol = SEP.PhysicalDevice()
+
     @_spi(Private)
-    public var assetProvider: AttestationAssetProvider
+    public mutating func setAssetProvider(_ assetProvider: any AttestationAssetProvider) {
+        self.assetProvider = assetProvider
+    }
+
+    @_spi(Private)
+    public mutating func setSEPProtocol(_ sepProtocol: any SEP.AttestationProtocol) {
+        self.sepProtocol = sepProtocol
+    }
 
     @_spi(Private)
     public var transparencyProver: any TransparencyProver
@@ -51,10 +62,43 @@ public struct NodeAttestor: Attestor {
     @_spi(Private)
     public var requireCryptex1: Bool
 
+    public var populateSecureConfigMetadata: Bool = false
+
+    public var preserveSecureConfigs: Bool = false
+
     static var logger: Logger = Logger(subsystem: "com.apple.CloudAttestation", category: "NodeAttestor")
 
-    @_spi(MockSEP)
-    public var sepAttestationImpl: any SEP.AttestationProtocol = SEP.PhysicalDevice()
+    static let dcik = SecKeyCopySystemKey(.DCIK, nil)?.takeRetainedValue()
+
+    #if DEBUG
+    var mockAttestingKey: SecKey? = nil
+    public var attestingKey: SecKey {
+        get throws {
+            if let mockAttestingKey {
+                return mockAttestingKey
+            }
+            guard let key = Self.dcik else {
+                throw Error.dcikCreationFailure
+            }
+            guard let copy = SecKeyCreateDuplicate(key)?.takeRetainedValue() else {
+                throw Error.dcikCreationFailure
+            }
+            return copy
+        }
+    }
+    #else
+    public var attestingKey: SecKey {
+        get throws {
+            guard let key = Self.dcik else {
+                throw Error.dcikCreationFailure
+            }
+            guard let copy = SecKeyCreateDuplicate(key)?.takeRetainedValue() else {
+                throw Error.dcikCreationFailure
+            }
+            return copy
+        }
+    }
+    #endif
 
     /// Creates a new ``NodeAttestor``.
     public init() {
@@ -66,7 +110,8 @@ public struct NodeAttestor: Attestor {
     public init(environment: Environment) {
         self = .init(
             transparencyProver: SWTransparencyLog(environment: environment),
-            assetProvider: DefaultAssetProvider()
+            assetProvider: PCC.AssetProvider(),
+            environment: environment
         )
     }
 
@@ -77,7 +122,7 @@ public struct NodeAttestor: Attestor {
     ) {
         self = .init(
             transparencyProver: transparencyProver,
-            assetProvider: DefaultAssetProvider()
+            assetProvider: PCC.AssetProvider()
         )
     }
 
@@ -109,22 +154,17 @@ public struct NodeAttestor: Attestor {
     ///   - key: The key to attest.
     ///   - expiration: The expiration date for the attestation.
     ///   - nonce: The nonce to use for the attestation.
-    public func attest(key: SecKey, expiration: Date, nonce: Data?) async throws -> AttestationBundle {
+    public func attest(key: SecKey, using attestationKey: SecKey, expiration: Date, nonce: Data?) async throws -> AttestationBundle {
         do {
             Self.logger.log("Attesting key in environment \(self.environment, privacy: .public)")
 
-            let parsedAttestation: SEP.Attestation
             if let nonce {
-                guard let dcik = self.sepAttestationImpl.dcik else {
-                    throw Error.dcikCreationFailure
-                }
-                SecKeySetParameter(dcik, kSecKeyParameterSETokenAttestationNonce, nonce as CFPropertyList, nil)
-                parsedAttestation = try self.sepAttestationImpl.attest(key: key, using: dcik)
-            } else {
-                parsedAttestation = try self.sepAttestationImpl.attest(key: key)
+                SecKeySetParameter(attestationKey, kSecKeyParameterSETokenAttestationNonce, nonce as CFPropertyList, nil)
             }
+            let parsedAttestation = try self.sepProtocol.attest(key: key, using: attestationKey)
             let attestation = parsedAttestation.data
 
+            let provisioningCertificateChain = (try? await self.assetProvider.provisioningCertificateChain) ?? []
             let proto = try Proto_AttestationBundle.with { builder in
                 builder.sepAttestation = attestation
                 builder.keyExpiration = Google_Protobuf_Timestamp(date: expiration)
@@ -137,7 +177,6 @@ public struct NodeAttestor: Attestor {
                 }
 
                 do {
-                    let provisioningCertificateChain = try self.assetProvider.provisioningCertificateChain
                     // Only populate if not empty, so we don't have a wasteful empty proto field
                     if !provisioningCertificateChain.isEmpty {
                         builder.provisioningCertificateChain = provisioningCertificateChain
@@ -199,13 +238,11 @@ public struct NodeAttestor: Attestor {
                 throw error
             }
 
-            Self.logger.debug("This device's \(release, privacy: .public):\n\(release.jsonString, privacy: .public)")
-            let proofs = try await self.transparencyProver.proveInclusion(of: release)
+            Self.logger.log("This device's \(release, privacy: .public):\n\(release.jsonString, privacy: .public)")
+            let proofs = try await self.transparencyProver.proveInclusion(of: Data(release.digest()))
             Self.logger.debug("Fetched inclusion proofs for release")
 
-            if let proofsExpiration = proofs.expiration, proofsExpiration < expiration {
-                throw Error.pendingTransparencyExpiry(proofsExpiration: proofsExpiration, keyExpiration: expiration)
-            }
+            try proofs.verify(expiration: expiration)
 
             // only populate non-empty proofs
             if proofs.proofs != ATLogProofs() {
@@ -251,6 +288,9 @@ extension NodeAttestor {
                 return Proto_SealedHash.Entry.with { entry in
                     entry.flags = Int32(sepEntry.flags.rawValue)
                     entry.digest = sepEntry.digest
+                    if let metadata = sepEntry.metadata, populateSecureConfigMetadata {
+                        entry.metadata = metadata
+                    }
 
                     // sets .info = .cryptex(...)
                     if sepEntry.flags.contains(.ratchetLocked) && sepEntry.digest.elementsEqual(cryptexSignatureSealedHashSalt) {
@@ -283,8 +323,14 @@ extension NodeAttestor {
                             guard let config = SecureConfig(from: data) else {
                                 throw Error.malformedSecureConfig
                             }
-                            sconf.entry = config.entry
-                            sconf.metadata = config.metadata
+                            if !preserveSecureConfigs {
+                                // Deprecated field, remains in use for original PCC, use sconf.data instead
+                                sconf.entry = config.entry
+                                // Deprecated field, remains in use for original PCC, use sconf.data instead
+                                sconf.metadata = config.metadata
+                            } else {
+                                sconf.data = config.serializedData
+                            }
                         }
                     }
                 }
@@ -296,14 +342,16 @@ extension NodeAttestor {
 // MARK: - NodeAttestor Error API
 
 extension NodeAttestor {
-    public enum Error: Swift.Error {
+    public enum Error: Swift.Error, Equatable {
         case dcikCreationFailure
         case malformedSecureConfig
         case emptyCertificateChain
         case missingCryptexes
         case missingSecureConfig
         case unexpectedCryptexPDI
+        @available(*, deprecated, message: "TransparencyLogError.pendingExpiration is thrown instead")
         case pendingTransparencyExpiry(proofsExpiration: Date, keyExpiration: Date)
+        case nonceProvided
     }
 }
 

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -38,6 +38,6 @@ internal final class CloudMetricsTimerHandler: Sendable, TimerHandler {
     internal func recordNanoseconds(_ duration: Int64) {
         let timer = self.timer
         let epoch = Date().timeIntervalSince1970
-        metricUpdateContinuation.yield(.recordNanoseconds(.init(timer, duration: duration, epoch: epoch)))
+        metricUpdateContinuation.yieldAndLogOnFailure(.recordNanoseconds(.init(timer, duration: duration, epoch: epoch)))
     }
 }

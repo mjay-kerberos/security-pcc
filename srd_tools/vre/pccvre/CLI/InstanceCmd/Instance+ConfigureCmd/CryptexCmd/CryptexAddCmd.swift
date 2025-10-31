@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -28,7 +28,6 @@ extension CLI.InstanceCmd.InstanceConfigureCmd.CryptexCmd {
 
         @OptionGroup var globalOptions: CLI.globalOptions
         @OptionGroup var configureOptions: CLI.InstanceCmd.InstanceConfigureCmd.options
-        @OptionGroup var instanceOptions: CLI.InstanceCmd.options
 
         @Option(name: [.customLong("cryptex"), .customShort("C")],
                 help: "Cryptex image to stage for loading (<variant>:<path>).",
@@ -36,26 +35,11 @@ extension CLI.InstanceCmd.InstanceConfigureCmd.CryptexCmd {
         var cryptex: CryptexSpec
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
-
             let vreName = configureOptions.instanceName
             CLI.logger.log("add cryptex to \(vreName, privacy: .public)")
 
-            guard VRE.exists(vreName) else {
-                throw CLIError("VRE '\(vreName)' not found")
-            }
-
-            let vre = try VRE(
-                name: vreName,
-                vrevmPath: instanceOptions.vrevmPath
-            )
-
-            var darwinInit: DarwinInitHelper
-            do {
-                darwinInit = try DarwinInitHelper(fromFile: vre.darwinInitFile.path)
-            } catch {
-                throw CLIError("unable to load darwin-init for instance: \(error)")
-            }
+            let vre = try VRE.Instance(name: vreName)
+            var darwinInit = try vre.darwinInitHelper()
 
             let cryptexDest: URL
             do {
@@ -65,8 +49,8 @@ extension CLI.InstanceCmd.InstanceConfigureCmd.CryptexCmd {
             }
 
             CLI.logger.log("adding cryptex: \(cryptex.description, privacy: .public)")
-            darwinInit.addCryptex(DarwinInitHelper.Cryptex(url: cryptexDest.lastPathComponent,
-                                                           variant: cryptex.variant))
+            try darwinInit.addCryptex(.init(variant: cryptex.variant,
+                                            url: cryptexDest.lastPathComponent))
 
             do {
                 try darwinInit.save()

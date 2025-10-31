@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -25,19 +25,17 @@ extension TransparencyLog {
 
         init(
             endpoint: URL, // KTInitBag: at-researcher-public-keys
-            tlsInsecure: Bool = false,
             useIdentity: Bool = false,
             requestUUID: UUID = UUID()
         ) async throws {
             let pubKeysReq = TxPB_PublicKeysRequest.with { builder in
-                builder.version = .v3
+                builder.version = TransparencyLog.protocolVersion
                 builder.application = .privateCloudCompute
                 builder.requestUuid = requestUUID.uuidString
             }
 
             let (respData, _) = try await TransparencyLog.urlPostProtbuf(
                 url: endpoint,
-                tlsInsecure: tlsInsecure,
                 useIdentity: useIdentity,
                 requestBody: pubKeysReq.serializedData(),
                 headers: [TransparencyLog.requestUUIDHeader: requestUUID.uuidString]

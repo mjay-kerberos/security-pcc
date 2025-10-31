@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -114,6 +114,12 @@ public struct CryptexPolicy: AttestationPolicy {
             secureConfigLocked = false
         }
 
+        // This flag should always be present
+        guard cryptexSealedHash.flags.contains(.cryptexMeasurement) else {
+            Self.logger.error("SEP Cryptex Sealed Hash Slot is missing .cryptexMeasurement")
+            throw Error.missingCryptexMeasurementFlag
+        }
+
         let sealedHashLocked = cryptexSealedHash.flags.contains(.ratchetLocked)
 
         Self.logger.log("Observed Cryptex Lockdown State: \(sealedHashLocked)")
@@ -154,13 +160,12 @@ public struct CryptexPolicy: AttestationPolicy {
 extension CryptexPolicy {
     public enum Error: Swift.Error {
         case missingCryptexSealedHash
-        @available(*, deprecated, renamed: "Error.missingCryptexLedger") case missingCryptexLog
         case missingCryptexLedger(uuid: UUID, value: SEP.SealedHash.Value)
         case inconsistentLockState(secureConfigLocked: Bool, sealedHashLocked: Bool)
         case unlocked(secureConfigLocked: Bool, sealedHashLocked: Bool)
-        @available(*, deprecated, renamed: "Error.replayMismatch") case untrusted(replayed: Data, expected: Data)
         case replayMismatch(replayed: SEP.SealedHash.Value, expected: SEP.SealedHash.Value)
         case replayFailure(Swift.Error)
+        case missingCryptexMeasurementFlag
     }
 }
 

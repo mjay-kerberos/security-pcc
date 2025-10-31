@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -34,7 +34,8 @@ enum LocalIPResolution {
     static func preferredLocalGRPCServiceAddress(
         ipAddress: String?,
         port: Int?,
-        serviceDiscoveryHostname: String?
+        serviceDiscoveryHostname: String?,
+        forceIPv6Resolution: Bool = false
     ) async throws -> SocketAddress {
         self.logger
             .log(
@@ -55,10 +56,22 @@ enum LocalIPResolution {
         // one dataplane interface, and that our route to service discovery points to the same interface.
         // Here we make a UDP "connection" to find a local endpoint. As we never send any data, this has
         // no network level effect, and the port doesn't really matter.
+        let networkParams: NWParameters
+        if forceIPv6Resolution {
+            Self.logger.log("Forcing use of IPv6 for local IP resolution.")
+            let ipv6Parameters = NWParameters.udp
+            // IP protocol options are guaranteed to be present for UDP so force-unwrapping/force-casting is okay here
+            let ip = ipv6Parameters.defaultProtocolStack.internetProtocol! as! NWProtocolIP.Options
+            ip.version = .v6
+            networkParams = ipv6Parameters
+        } else {
+            networkParams = .udp
+        }
+
         let connection = NWConnection(
             host: .init(serviceDiscoveryHostname),
             port: 8080,
-            using: .udp
+            using: networkParams
         )
         defer { connection.cancel() }
 
@@ -241,10 +254,17 @@ private struct CancellationStateMachine: Sendable {
 
 extension CloudBoardDConfiguration {
     func resolveLocalServiceAddress() async throws -> SocketAddress {
+        if let forceIPv6ResolutionCFPref = self.grpc?.forceIPv6Resolution {
+            // os_log doesn't support warnings so let's make this an error to make it more visible.
+            LocalIPResolution.logger.error(
+                "Using deprecated GRPC.forceIPv6Resolution CFPref. Use secure-config 'com.apple.cloudboard.grpc.forceIPv6Resolution instead."
+            )
+        }
         return try await LocalIPResolution.preferredLocalGRPCServiceAddress(
             ipAddress: self.grpc?.listeningIP,
             port: self.grpc?.listeningPort,
-            serviceDiscoveryHostname: self.serviceDiscovery?.targetHost
+            serviceDiscoveryHostname: self.serviceDiscovery?.targetHost,
+            forceIPv6Resolution: self.secureConfig.grpcForceIPv6Resolution ?? self.grpc?.forceIPv6Resolution ?? false
         )
     }
 }

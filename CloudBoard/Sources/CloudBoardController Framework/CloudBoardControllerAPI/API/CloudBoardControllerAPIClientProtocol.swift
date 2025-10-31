@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -35,6 +35,11 @@ public struct WorkloadProperties: Codable, CustomStringConvertible, Sendable {
 
 // Message for Ropes/ServiceDiscovery
 public struct WorkloadConfig: Codable, CustomStringConvertible, Sendable {
+    public enum WorkloadType: Codable, Sendable {
+        case worker
+        case proxy
+    }
+
     public enum RoutingTagValue: Codable, CustomStringConvertible, Sendable, Equatable, Hashable {
         case string(String)
         case stringList([String])
@@ -49,6 +54,7 @@ public struct WorkloadConfig: Codable, CustomStringConvertible, Sendable {
         }
     }
 
+    public var workloadType: WorkloadType
     public var maxBatchSize: Int
     public var optimalBatchSize: Int
     public var currentBatchSize: Int
@@ -88,6 +94,7 @@ public struct WorkloadConfig: Codable, CustomStringConvertible, Sendable {
         currentBatchSize: Int,
         routingTags: [String: [String]]
     ) {
+        self.workloadType = .worker
         self._tags = routingTags.mapValues { .stringList($0) }
         self.maxBatchSize = maxBatchSize
         self.optimalBatchSize = optimalBatchSize
@@ -100,10 +107,25 @@ public struct WorkloadConfig: Codable, CustomStringConvertible, Sendable {
         currentBatchSize: Int,
         workloadTags: [String: RoutingTagValue]
     ) {
+        self.workloadType = .worker
         self._tags = workloadTags
         self.maxBatchSize = maxBatchSize
         self.optimalBatchSize = optimalBatchSize
         self.currentBatchSize = currentBatchSize
+    }
+
+    public init(
+        maxBatchSize: Int,
+        optimalBatchSize: Int,
+        currentBatchSize: Int,
+        workloadTags: [String: RoutingTagValue],
+        workloadType: WorkloadType
+    ) {
+        self._tags = workloadTags
+        self.maxBatchSize = maxBatchSize
+        self.optimalBatchSize = optimalBatchSize
+        self.currentBatchSize = currentBatchSize
+        self.workloadType = workloadType
     }
 
     public var description: String {
@@ -112,12 +134,20 @@ public struct WorkloadConfig: Codable, CustomStringConvertible, Sendable {
         maxBatchSize: \(self.maxBatchSize), \
         optimalBatchSize: \(self.optimalBatchSize), \
         currentBatchSize: \(self.currentBatchSize), \
+        workloadType: \(self.workloadType), \
         workloadTags: \(self._tags))
         """
     }
 }
 
 public enum WorkloadControllerState: Codable, CustomStringConvertible, Sendable {
+    case initializing
+    case ready
+    case busy
+    /// Allows for providing a reason for the busy state. Must be a low-cardinality value.
+    case busyWithReason(String)
+    case error(message: String?)
+
     public var description: String {
         switch self {
         case .initializing:
@@ -126,6 +156,8 @@ public enum WorkloadControllerState: Codable, CustomStringConvertible, Sendable 
             return "Ready"
         case .busy:
             return "Busy"
+        case .busyWithReason(let reason):
+            return "Busy (\(reason))"
         case .error(let message):
             if let message {
                 return "Error: \(message)"
@@ -134,11 +166,6 @@ public enum WorkloadControllerState: Codable, CustomStringConvertible, Sendable 
             }
         }
     }
-
-    case initializing
-    case ready
-    case busy
-    case error(message: String?)
 }
 
 extension WorkloadControllerState: Equatable {}

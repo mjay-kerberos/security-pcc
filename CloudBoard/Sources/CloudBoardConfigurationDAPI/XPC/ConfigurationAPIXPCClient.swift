@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,7 +14,7 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+package import CloudBoardAsyncXPC
 
 public protocol ConfigurationAPIXPCClientProtocol: ConfigurationAPIClientToServerProtocol {
     func set(delegate: ConfigurationAPIClientDelegateProtocol) async
@@ -26,9 +26,9 @@ public actor ConfigurationAPIXPCClient {
     private var connection: CloudBoardAsyncXPCConnection?
     private weak var delegate: ConfigurationAPIClientDelegateProtocol?
 
-    public init(connection: CloudBoardAsyncXPCConnection) async {
-        await self.connection = connection.handleConnectionInvalidated { _ in
-            await self.surpriseDisconnect()
+    package init(connection: CloudBoardAsyncXPCConnection) async {
+        await self.connection = connection.handleConnectionInvalidated { [weak self] _ in
+            await self?.surpriseDisconnect()
         }
     }
 

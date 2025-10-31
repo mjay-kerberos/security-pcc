@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -60,6 +60,9 @@ public struct TransparencyPolicy: AttestationPolicy {
             } catch {
                 throw Error.malformedRelease(error: error)
             }
+            let releaseDigest = Data(release.digest())
+            context[Self.releaseDigestKey] = releaseDigest
+
             Self.logger.log("Attested device is running \(release, privacy: .public):\n\(release.jsonString, privacy: .public)")
 
             Self.logger.log("Verifying inclusion of \(release, privacy: .public) in transparency log")
@@ -69,13 +72,13 @@ public struct TransparencyPolicy: AttestationPolicy {
             }
 
             do {
-                let expiry = try await self.verifier.verifyExpiringInclusion(of: release, proofs: proofs)
+                let expiry = try await self.verifier.verifyExpiringInclusion(of: releaseDigest, proofs: proofs)
                 context[Self.proofExpirationKey] = expiry
             } catch TransparencyLogError.invalidProof {
                 Self.logger.error("Software \(release, privacy: .public) is not included in transparency log, this is likely indicative of using the wrong transparency log")
                 throw Error.notIncluded
             } catch TransparencyLogError.expired {
-                Self.logger.error("Software \(release, privacy: .public) has expired in the transparency log")
+                Self.logger.error("Software \(release, privacy: .public) has expired in transparency log")
                 throw Error.expired
             } catch TransparencyLogError.unknown(error: let error) {
                 // Unwrap the unknown error
@@ -103,6 +106,11 @@ extension TransparencyPolicy {
     static var proofExpirationKey: AttestationPolicyContext.Key {
         .init(domain: Self.self, key: "proofExpiration")
     }
+
+    @usableFromInline
+    static var releaseDigestKey: AttestationPolicyContext.Key {
+        .init(domain: Self.self, key: "releaseDigest")
+    }
 }
 
 extension AttestationPolicyContext {
@@ -110,16 +118,51 @@ extension AttestationPolicyContext {
     var proofExpiration: Date? {
         self[TransparencyPolicy.proofExpirationKey] as? Date
     }
+
+    @usableFromInline
+    var releaseDigest: Data? {
+        self[TransparencyPolicy.releaseDigestKey] as? Data
+    }
 }
 
 // MARK: - TransparencyPolicy Errors
 
 extension TransparencyPolicy {
-    public enum Error: Swift.Error {
+    public enum Error: Swift.Error, CustomNSError {
         case malformedRelease(error: any Swift.Error)
         case missingProofs
         case notIncluded
         case expired
         case unknown(error: any Swift.Error)
+
+        public static var errorDomain = "com.apple.CloudAttestation.TransparencyPolicy"
+
+        public var errorCode: Int {
+            get {
+                switch self {
+                case .malformedRelease(error: _):
+                    return 0
+                case .missingProofs:
+                    return 1
+                case .notIncluded:
+                    return 2
+                case .expired:
+                    return 3
+                case .unknown(error: _):
+                    return 4
+                }
+            }
+        }
+
+        public var errorUserInfo: [String: Any] {
+            get {
+                switch self {
+                case .malformedRelease(error: let error), .unknown(error: let error):
+                    return [NSUnderlyingErrorKey: error]
+                default:
+                    return [:]
+                }
+            }
+        }
     }
 }

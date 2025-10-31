@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -17,23 +17,9 @@ syntax = "proto3";
 import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
+import "AttestationBundle.proto";
+
 package PrivateCloudCompute;
-
-enum Environment {
-    UNSPECIFIED = 0;
-    PRODUCTION = 1;
-    CARRY = 2;
-    STAGING = 3;
-    QA = 4;
-    PERF = 5;
-    EPHEMERAL = 6;
-    DEV = 7;
-
-    QA1_PRIMARY = 96;
-    QA1_INTERNAL = 97;
-    QA2_PRIMARY = 98;
-    QA2_INTERNAL = 99;
-}
 
 message ReleaseMetadata {
     enum SchemaVersion {
@@ -77,6 +63,15 @@ message ReleaseMetadata {
         FileType file_type = 6;
     }
 
+    message ToolRequirement {
+        string feature = 1;
+        string availability = 2;
+    }
+
+    message Application {
+        string name = 1;
+    }
+
     SchemaVersion schema_version = 1;
 
     google.protobuf.Timestamp release_creation = 2;
@@ -86,4 +81,17 @@ message ReleaseMetadata {
     repeated Asset assets = 4;
 
     google.protobuf.Struct darwin_init = 5;
+
+    repeated ToolRequirement requirements = 6;
+
+    Application application = 7;
+}
+
+message ProxyNodeMetadata {
+    message ProxiedRelease {
+        bytes digest = 1;
+        proto.TransparencyProofs transparency_proofs = 2;
+    }
+
+    repeated ProxiedRelease proxied_release = 1;
 }

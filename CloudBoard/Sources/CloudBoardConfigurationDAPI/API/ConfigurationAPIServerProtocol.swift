@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,7 +14,7 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 
-import CloudBoardAsyncXPC
+package import CloudBoardAsyncXPC
 import Foundation
 import Security
 
@@ -75,7 +75,7 @@ public struct ConnectionID: Hashable, Sendable, CustomStringConvertible, Express
     private let kind: Kind
 
     /// Creates a new identifier with the provided XPC connection identifier.
-    public init(xpcConnection: CloudBoardAsyncXPCConnection) {
+    package init(xpcConnection: CloudBoardAsyncXPCConnection) {
         self.kind = .xpcConnectionID(xpcConnection.id, name: xpcConnection.name)
     }
 

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -17,8 +17,18 @@
 /// A helper type that allows the cloud app to interact with the environment around it.
 public struct CloudAppEnvironment: Sendable {
     public var metrics: CloudAppMetrics
-
     public var plaintextMetadata: PlaintextMetadata
+    // Client to make outbound requests to other PCC nodes. Can only be used when run in a proxy
+    // configuration
+    public var pccClient: PCCClient
+    // Helper to derive keys from client-provided key material. Does not directly expose keys but allows the cloud app
+    // to instruct cb_jobhelper to derive and distribute keys.
+    public var keyDerivation: KeyDerivationHelper
+    /// If this is true then the request stream from the client will not be presented to the cloud app
+    /// This should only be relevant to proxy app implementations
+    public var requestBypassed: Bool
+
+    public var traceContext: TraceContext
 }
 
 extension CloudAppEnvironment {
@@ -51,6 +61,16 @@ extension CloudAppEnvironment {
             self.workloadParameters = workloadParameters
             self.requestID = requestID
             self.automatedDeviceGroup = automatedDeviceGroup
+        }
+    }
+
+    public struct TraceContext: Sendable, Hashable {
+        public var traceID: String
+        public var spanID: String
+
+        internal init(traceID: String, spanID: String) {
+            self.spanID = spanID
+            self.traceID = traceID
         }
     }
 }

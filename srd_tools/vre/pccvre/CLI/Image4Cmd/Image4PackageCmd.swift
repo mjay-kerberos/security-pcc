@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -16,6 +16,7 @@
 //
 
 import ArgumentParserInternal
+import MachO_Swift
 import Foundation
 
 extension CLI.Image4Cmd {
@@ -64,18 +65,24 @@ extension CLI.Image4Cmd {
         @OptionGroup var fileOptions: CLI.Image4Cmd.options
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
-
             let fileData = try fileOptions.readInputData()
-            let machO = try MachO64(fileName: fileOptions.inputFile, fileData: fileData)
-
             var payloadProperties: Unmanaged<CFData>?
-            var amRet = try AMAuthInstallApImg4GetPayloadPropertiesData(
-                nil,
-                &payloadProperties,
-                "PAYP" as CFString,
-                machO.payloadProperties as CFDictionary
-            )
+
+            var amRet = try fileData.withUnsafeBytes {
+                let machO = try MachO(withUnsafeData: $0)
+
+                guard machO.slices.count == 1 else {
+                    throw MachO.Error.numSlices
+                }
+                let slice = machO.slices[0]
+
+                return AMAuthInstallApImg4GetPayloadPropertiesData(
+                    nil,
+                    &payloadProperties,
+                    "PAYP" as CFString,
+                    try slice.payloadProperties as CFDictionary
+                )
+            }
             guard amRet == kAMAuthInstallErrorNone else {
                 throw CLIError("\(fileOptions.inputFile) | Unable to create payload properties: \(amRet)")
             }
@@ -84,7 +91,7 @@ extension CLI.Image4Cmd {
             amRet = try AMAuthInstallApImg4CreatePayloadWithProperties(
                 getType4CC().cString(using: String.Encoding.utf8),
                 "0".cString(using: String.Encoding.utf8),
-                machO.fileData as CFData,
+                fileData as CFData,
                 nil, nil,
                 payloadProperties!.takeRetainedValue(),
                 &img4Payload

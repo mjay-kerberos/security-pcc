@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -20,6 +20,8 @@ import Virtualization
 import Virtualization_Private
 
 extension VM {
+    typealias NVRAMmap = [String: Data]
+
     // VM.NVRAM provides low-level interface for manipulating nvram settings within the VZ
     //  "auxiliary storage" bundle file referenced by the guest
     struct NVRAM {
@@ -36,9 +38,9 @@ extension VM {
 
         // value returns value of nvram parameter as a String; nil if parameter not found or
         //  empty string ("") if set without a value.
-        func value(_ arg: String) throws -> String? {
+        func value(_ arg: String) throws -> Data? {
             do {
-                return try auxStorage._value(forNVRAMVariableNamed: arg)
+                return try auxStorage._dataValue(forNVRAMVariableNamed: arg)
             } catch {
                 var reason = "\(error)"
                 if let vzerr = error as? VZError {
@@ -59,15 +61,58 @@ extension VM {
 
         // set adds, replaces, or remove parameter from nvram;
         //  - set value to empty string ("") to add an assertion (e.g. "-v", value: "")
-        //  - prefix arg with "!" to remove named parameter
-        //  - existing parmater is overwritten
-        func set(_ arg: String, value: String?) throws {
-            if arg.hasPrefix("!") {
+        //  - prefix arg with "!" or value to nil to remove named parameter
+        //  - existing paramater is overwritten
+        func set(_ arg: String, value: Data?) throws {
+            let valStr: String
+            if let value {
+                valStr = String(data: value, encoding: .utf8) ?? "<\(value.count) bytes>"
+            } else {
+                valStr = "<nil>"
+            }
+
+            VM.logger.log("nvram: set key '\(arg, privacy: .public)=\(valStr.prefix(100), privacy: .public)'")
+            try _set(arg, value: value)
+        }
+
+        // set applies nvram paramaters from a map (any errors are ignored, but logged)
+        func set(_ nvramMap: NVRAMmap) {
+            for (k, v) in nvramMap {
+                try? _set(k, value: v)
+            }
+        }
+
+        // remove deletes named parameter from nvram (do not prefix with "!")
+        func remove(_ arg: String) throws {
+            VM.logger.log("nvram: remove key '\(arg, privacy: .public)'")
+            try auxStorage._removeNVRAMVariableNamed(arg)
+        }
+
+        // allValues returns all nvram values stored in auxStorage
+        func allValues() throws -> NVRAMmap {
+            do {
+                return try auxStorage._allNVRAMDataVariables()
+            } catch {
+                var reason: String
+                if let vzerr = error as? VZError,
+                   vzerr.errorCode == _VZErrorInvalidAuxiliaryStorage
+                {
+                    reason = "invalid Auxiliary Storage"
+                } else {
+                    reason = "\(error)"
+                }
+
+                throw VMError("failed to retrieve NVRAM values: \(reason)")
+            }
+        }
+
+        // _set provides implementation for setting nvram variables
+        private func _set(_ arg: String, value: Data?) throws {
+            if arg.hasPrefix("!") || value == nil {
                 try remove(arg.trimPrefix("!"))
             } else {
                 do {
-                    VM.logger.log("nvram: set key '\(arg, privacy: .public)'")
-                    try auxStorage._setValue(value ?? "", forNVRAMVariableNamed: arg)
+                    try auxStorage._setDataValue(value!, forNVRAMVariableNamed: arg)
                 } catch {
                     var reason: String
                     if let vzerr = error as? VZError,
@@ -80,30 +125,6 @@ extension VM {
 
                     throw VMError("failed to update NVRAM value: \(reason)")
                 }
-            }
-        }
-
-        // remove deletes named parameter from nvram (do not prefix with "!")
-        func remove(_ arg: String) throws {
-            VM.logger.log("nvram: remove key '\(arg, privacy: .public)'")
-            try auxStorage._removeNVRAMVariableNamed(arg)
-        }
-
-        // allValues returns all nvram values stored in auxStorage
-        func allValues() throws -> [String: String] {
-            do {
-                return try auxStorage._allNVRAMVariables()
-            } catch {
-                var reason: String
-                if let vzerr = error as? VZError,
-                   vzerr.errorCode == _VZErrorInvalidAuxiliaryStorage
-                {
-                    reason = "invalid Auxiliary Storage"
-                } else {
-                    reason = "\(error)"
-                }
-
-                throw VMError("failed to retrieve NVRAM values: \(reason)")
             }
         }
     }

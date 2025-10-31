@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -12,8 +12,7 @@
 // EA1937
 // 10/02/2024
 
-import AppServerSupport.OSLaunchdJob
-import CloudBoardAsyncXPC
+internal import CloudBoardAsyncXPC
 import CloudBoardAttestationDAPI
 import CloudBoardCommon
 import CloudBoardJobAPI
@@ -24,73 +23,92 @@ import CloudBoardPreferences
 import Foundation
 import os
 
-struct LaunchdWorkloadProvider: CloudBoardJobHelperWorkloadProvider {
+// This is used by the cloudboard-cli to launch cloudapps in tests
+// This means it has quite strict dependency requirements for builds
+// which might be surprising.
+package struct LaunchdWorkloadProvider: CloudBoardJobHelperWorkloadProvider {
+    let launchdJobFinder: any LaunchdJobFinderProtocol
     let metrics: any MetricsSystem
+    let cloudAppClientFactory: any CloudAppXPCClientFactoryProtocol
 
-    public init(metrics: any MetricsSystem) {
-        self.metrics = metrics
+    public init(
+        launchdJobFinder: any LaunchdJobFinderProtocol,
+        metrics: any MetricsSystem
+    ) {
+        self.init(
+            launchdJobFinder: launchdJobFinder,
+            cloudAppClientFactory: CloudAppXPCClientFactory(),
+            metrics: metrics
+        )
     }
 
-    func getCloudAppWorkload(
+    internal init(
+        launchdJobFinder: any LaunchdJobFinderProtocol,
+        cloudAppClientFactory: any CloudAppXPCClientFactoryProtocol,
+        metrics: any MetricsSystem
+    ) {
+        self.launchdJobFinder = launchdJobFinder
+        self.metrics = metrics
+        self.cloudAppClientFactory = cloudAppClientFactory
+    }
+
+    @available(*, deprecated, message: "use getCloudAppWorkload and provide requestSecrets and ensembleKeyDistributor")
+    package func getCloudAppWorkload(
         cloudAppNameOverride: String?,
         jobUUID: UUID,
         cbJobHelperLogMetadata: CloudBoardJobHelperLogMetadata
-    ) throws
-    -> CloudAppWorkloadProtocol {
-        var job: ManagedLaunchdJob?
-        let managedJobs = LaunchdJobHelper.fetchManagedLaunchdJobs(
-            type: CloudBoardJobType.cloudBoardApp,
-            skippingInstances: true,
-            logger: CloudBoardJobHelper.logger
+    ) throws -> CloudAppWorkloadProtocol {
+        try self.getCloudAppWorkload(
+            cloudAppNameOverride: cloudAppNameOverride,
+            requestSecrets: RequestSecrets(),
+            ensembleKeyDistributor: EnsembleKeyDistributor(),
+            jobUUID: jobUUID,
+            cbJobHelperLogMetadata: cbJobHelperLogMetadata
         )
+    }
 
-        guard managedJobs.count >= 1 else {
-            CloudboardJobHelperCheckpoint(
-                logMetadata: cbJobHelperLogMetadata,
-                message: "Failed to discover any managed CloudApps"
-            ).log(to: CloudBoardJobHelper.logger, level: .error)
-            fatalError("Failed to discover any managed CloudApps")
-        }
-
-        let apps = if let cloudAppNameOverride {
-            [cloudAppNameOverride]
-        } else {
-            ["TIECloudApp", "NullCloudApp"]
-        }
-
-        for app in apps {
-            let managedJobsFiltered = managedJobs.filter { job in
-                job.jobAttributes.cloudBoardJobName == app
-            }
-            if managedJobsFiltered.count == 0 {
-                continue
-            }
-            guard managedJobsFiltered.count == 1 else {
+    package func getCloudAppWorkload(
+        cloudAppNameOverride: String?,
+        requestSecrets: RequestSecrets,
+        ensembleKeyDistributor: EnsembleKeyDistributorProtocol,
+        jobUUID: UUID,
+        cbJobHelperLogMetadata: CloudBoardJobHelperLogMetadata
+    ) throws -> CloudAppWorkloadProtocol {
+        do {
+            let (definition, appName) = try self.launchdJobFinder.getCloudAppJobDefinition(
+                cloudAppNameOverride: cloudAppNameOverride
+            )
+            CloudBoardJobHelper.logger.log("Using app \(appName, privacy: .public)")
+            return try CloudAppWorkload(
+                definition: definition,
+                xpcClientFactory: self.cloudAppClientFactory,
+                requestSecrets: requestSecrets,
+                ensembleKeyDistributor: ensembleKeyDistributor,
+                log: CloudBoardJobHelper.logger,
+                metrics: self.metrics,
+                jobUUID: jobUUID,
+                spanID: cbJobHelperLogMetadata.spanID
+            )
+        } catch let error as LaunchdJobFinderError {
+            switch error {
+            case .noCloudAppFound:
+                CloudboardJobHelperCheckpoint(
+                    logMetadata: cbJobHelperLogMetadata,
+                    message: "Failed to discover any managed CloudApps"
+                ).log(to: CloudBoardJobHelper.logger, level: .error)
+                fatalError("Failed to discover any managed CloudApps")
+            case .noApplicableCloudApp:
+                CloudboardJobHelperCheckpoint(
+                    logMetadata: cbJobHelperLogMetadata,
+                    message: "No cloud app found"
+                ).log(to: CloudBoardJobHelper.logger, level: .error)
+                fatalError("No cloud app found")
+            case .tooManyManagedJobs(app: let app, count: let count):
                 CloudBoardJobHelper.logger.error(
-                    "Found \(managedJobsFiltered.count, privacy: .public) instances of \(app, privacy: .public)"
+                    "Found \(count, privacy: .public) instances of \(app, privacy: .public)"
                 )
-                fatalError()
+                fatalError("Found too many instance of a cloud app")
             }
-            CloudBoardJobHelper.logger.log("Using app \(app, privacy: .public)")
-            job = managedJobsFiltered[0]
-            break
         }
-
-        guard let job else {
-            CloudboardJobHelperCheckpoint(
-                logMetadata: cbJobHelperLogMetadata,
-                message: "No cloud app found"
-            ).log(to: CloudBoardJobHelper.logger, level: .error)
-            fatalError("No cloud app found")
-        }
-
-        let workload = try CloudAppWorkload(
-            managedJob: job,
-            machServiceName: job.jobAttributes.initMachServiceName,
-            log: CloudBoardJobHelper.logger,
-            metrics: self.metrics,
-            jobUUID: jobUUID
-        )
-        return workload
     }
 }

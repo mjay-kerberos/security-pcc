@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -22,7 +22,7 @@ import InternalGRPC
 import os
 
 extension CFPreferences {
-    static var cloudboardPreferencesDomain: String {
+    public static var cloudboardPreferencesDomain: String {
         "com.apple.cloudos.cloudboardd"
     }
 }
@@ -38,45 +38,101 @@ public struct CloudBoardDConfiguration: Codable, Hashable, Sendable {
         case grpc = "GRPC"
         case heartbeat = "Heartbeat"
         case lifecycleManager = "LifecycleManager"
-        case prewarming = "Prewarming"
+        case _prewarming = "Prewarming"
         case _load = "Load"
-        case _blockHealthinessOnAuthSigningKeysPresence = "BlockHealthinessOnAuthSigningKeysPresence"
+        // deliberately *not* serialising _secureConfig
     }
 
     public var serviceDiscovery: ServiceDiscovery?
     public var heartbeat: Heartbeat?
     public var grpc: GRPCConfiguration?
     public var lifecycleManager: LifecycleManager?
-    public var prewarming: PrewarmingConfiguration?
     private var _load: LoadConfiguration?
-    private var _blockHealthinessOnAuthSigningKeysPresence: Bool?
+    private var _prewarming: PrewarmingConfiguration?
+    private var _secureConfig: SecureConfig? = nil
 
-    init(
+    public var secureConfig: SecureConfig {
+        /// Attempting to do this in a real run means we didn't apply security checks,
+        /// this should be instantly terminal
+        precondition(self._secureConfig != nil, "Attempt to access secureconfig when it has not been hooked up")
+        return self._secureConfig!
+    }
+
+    /// This is not for direct use  _always_ go through construction/decoding then call ``applySecureConfig``
+    /// before letting anything else interact with this instance
+    private init(
         serviceDiscovery: ServiceDiscovery? = nil,
         heartbeat: Heartbeat? = nil,
         grpc: GRPCConfiguration? = nil,
         lifecycleManager: LifecycleManager? = nil,
         load: LoadConfiguration? = nil,
-        prewarming: PrewarmingConfiguration? = nil,
-        blockHealthinessOnAuthSigningKeysPresence: Bool? = nil
+        prewarming: PrewarmingConfiguration? = nil
     ) {
         self.serviceDiscovery = serviceDiscovery
         self.heartbeat = heartbeat
         self.grpc = grpc
         self.lifecycleManager = lifecycleManager
         self._load = load
-        self.prewarming = prewarming
-        self._blockHealthinessOnAuthSigningKeysPresence = blockHealthinessOnAuthSigningKeysPresence
+        self._prewarming = prewarming
+    }
+
+    /// This is not for direct use except in tests
+    /// It *does not validate* `secureconfig`
+    internal init(
+        secureConfig: SecureConfig,
+        serviceDiscovery: ServiceDiscovery? = nil,
+        heartbeat: Heartbeat? = nil,
+        grpc: GRPCConfiguration? = nil,
+        lifecycleManager: LifecycleManager? = nil,
+        load: LoadConfiguration? = nil,
+        prewarming: PrewarmingConfiguration? = nil
+    ) {
+        self._secureConfig = secureConfig
+        self.serviceDiscovery = serviceDiscovery
+        self.heartbeat = heartbeat
+        self.grpc = grpc
+        self.lifecycleManager = lifecycleManager
+        self._load = load
+        self._prewarming = prewarming
+    }
+
+    private mutating func applySecureConfig(_ secureConfig: SecureConfig) throws {
+        self._secureConfig = secureConfig
+        // after setting up everything else validate
+        if secureConfig.shouldEnforceAppleInfrastructureSecurityConfig {
+            try self.enforceAppleInfrastructureSecurityConfig()
+        }
+    }
+
+    /// Create an instance of the config which has been validated against the `secureConfig`
+    /// throws if validation fails
+    public static func createAndValidate(
+        secureConfig: SecureConfig,
+        serviceDiscovery: ServiceDiscovery? = nil,
+        heartbeat: Heartbeat? = nil,
+        grpc: GRPCConfiguration? = nil,
+        lifecycleManager: LifecycleManager? = nil,
+        load: LoadConfiguration? = nil,
+        prewarming: PrewarmingConfiguration? = nil
+    ) throws -> CloudBoardDConfiguration {
+        var config = CloudBoardDConfiguration(
+            serviceDiscovery: serviceDiscovery,
+            heartbeat: heartbeat,
+            grpc: grpc,
+            lifecycleManager: lifecycleManager,
+            load: load,
+            prewarming: prewarming
+        )
+        try config.applySecureConfig(secureConfig)
+        return config
     }
 
     public var load: LoadConfiguration {
         self._load ?? .init()
     }
 
-    /// If true, cloudboardd waits until auth token signing keys, required by cb_jobhelper to perform token validation,
-    /// are available via cb_jobauthd before reporting as healthy.
-    public var blockHealthinessOnAuthSigningKeysPresence: Bool {
-        self._blockHealthinessOnAuthSigningKeysPresence ?? false
+    public var prewarming: PrewarmingConfiguration {
+        return self._prewarming ?? .init()
     }
 
     public enum CloudBoardDConfigurationError: Error {
@@ -85,6 +141,9 @@ public struct CloudBoardDConfiguration: Codable, Hashable, Sendable {
         case missingGRPCPeerAPRN
     }
 
+    /// Load the cloudboard daemon specific config,
+    /// Also load the ``SecureConfig`` and apply any validation rules specified in it  to the parameters
+    /// Any errors in validation will reult in throwing an error
     public static func fromFile(
         path: String,
         secureConfigLoader: SecureConfigLoader
@@ -108,10 +167,7 @@ public struct CloudBoardDConfiguration: Codable, Hashable, Sendable {
             logger.error("Error loading secure config: \(String(unredacted: error), privacy: .public)")
             throw error
         }
-
-        if secureConfig.shouldEnforceAppleInfrastructureSecurityConfig {
-            try config.enforceAppleInfrastructureSecurityConfig()
-        }
+        try config.applySecureConfig(secureConfig)
         return config
     }
 
@@ -131,7 +187,7 @@ public struct CloudBoardDConfiguration: Codable, Hashable, Sendable {
 
     /// Enforces security configuration if running on Apple infrastructure (as opposed to e.g. the VRE) with a
     /// 'customer' security policy
-    mutating func enforceAppleInfrastructureSecurityConfig() throws {
+    private mutating func enforceAppleInfrastructureSecurityConfig() throws {
         logger.info("Enforcing Apple infrastructure security config")
 
         // service discovery
@@ -175,18 +231,20 @@ public struct CloudBoardDConfiguration: Codable, Hashable, Sendable {
         }
 
         // gRPC
-        if self.grpc != nil {
-            guard let expectedPeerAPRNs = self.grpc?.expectedPeerAPRNs, !expectedPeerAPRNs.isEmpty else {
-                logger.error("Missing GRPC peer APRN")
-                throw CloudBoardDConfigurationError.missingGRPCPeerAPRN
-            }
+        guard var grpcConfig = self.grpc else {
+            logger.error("No GRPC configuration present. GRPC peer APRN must be configured.")
+            throw CloudBoardDConfigurationError.missingGRPCPeerAPRN
+        }
+        let expectedPeerAPRNs = grpcConfig.expectedPeerAPRNs ?? grpcConfig.expectedPeerAPRN.map { [$0] } ?? []
+        guard !expectedPeerAPRNs.isEmpty else {
+            logger.error("Missing GRPC peer APRN")
+            throw CloudBoardDConfigurationError.missingGRPCPeerAPRN
+        }
 
-            if self.grpc!.useSelfSignedCertificate {
-                logger.error("Overriding GRPC configuration with new value UseSelfSignedCertificate=false")
-                self.grpc!.useSelfSignedCertificate = false
-            }
-        } else {
-            logger.warning("No GRPC configuration present")
+        if grpcConfig.useSelfSignedCertificate {
+            logger.error("Overriding GRPC configuration with new value UseSelfSignedCertificate=false")
+            grpcConfig.useSelfSignedCertificate = false
+            self.grpc = grpcConfig
         }
     }
 
@@ -196,7 +254,6 @@ public struct CloudBoardDConfiguration: Codable, Hashable, Sendable {
     ) throws -> CloudBoardDConfiguration {
         let decoder = CFPreferenceDecoder()
         var configuration = try decoder.decode(CloudBoardDConfiguration.self, from: preferences)
-
         configuration.logWarningForMissingConfigurations()
 
         let secureConfig: SecureConfig
@@ -206,10 +263,7 @@ public struct CloudBoardDConfiguration: Codable, Hashable, Sendable {
             logger.error("Error loading secure config: \(String(unredacted: error), privacy: .public)")
             throw error
         }
-
-        if secureConfig.shouldEnforceAppleInfrastructureSecurityConfig {
-            try configuration.enforceAppleInfrastructureSecurityConfig()
-        }
+        try configuration.applySecureConfig(secureConfig)
 
         return configuration
     }
@@ -290,14 +344,20 @@ extension CloudBoardDConfiguration {
 
 extension CloudBoardDConfiguration {
     public struct LifecycleManager: Codable, Hashable, Sendable {
+        // enforceAllStateChecks deliberately not coded,
+        // it is for unit testing only
         enum CodingKeys: String, CodingKey {
             case _drainTimeoutSecs = "DrainTimeoutSeconds"
         }
 
         public init() {}
 
-        init(_drainTimeoutSecs: Int64? = nil) {
+        init(
+            _drainTimeoutSecs: Int64? = nil,
+            enforceAllStateChecks: Bool = true
+        ) {
             self._drainTimeoutSecs = _drainTimeoutSecs
+            self.enforceAllStateChecks = enforceAllStateChecks
         }
 
         var _drainTimeoutSecs: Int64?
@@ -306,6 +366,8 @@ extension CloudBoardDConfiguration {
         public var drainTimeout: ContinuousClock.Duration {
             self._drainTimeoutSecs.map { Duration.seconds($0) } ?? .seconds(60 * 15) // 15 minute default
         }
+
+        public var enforceAllStateChecks: Bool = true
     }
 }
 
@@ -374,6 +436,7 @@ extension CloudBoardDConfiguration {
         enum CodingKeys: String, CodingKey {
             case listeningIP = "ListeningIP"
             case listeningPort = "ListeningPort"
+            case forceIPv6Resolution = "ForceIPv6Resolution"
             case expectedPeerAPRN = "ExpectedPeerAPRN"
             case expectedPeerAPRNs = "ExpectedPeerAPRNs"
             case keepalive = "Keepalive"
@@ -386,6 +449,11 @@ extension CloudBoardDConfiguration {
         public var listeningIP: String?
         /// GRPC server port. Defaults to 4442.
         public var listeningPort: Int?
+
+        /// Forces the use of IPv6 only when determining which IP address to bind to. This has no effect if
+        /// ``listeningIP`` is provided.
+        public var forceIPv6Resolution: Bool?
+
         /// The APRN of the peer that the server should expect. If not provided, the server will not validate the
         /// client's identity
         ///
@@ -405,12 +473,14 @@ extension CloudBoardDConfiguration {
         public init(
             listeningIP: String? = nil,
             listeningPort: Int? = nil,
+            forceIPv6Resolution: Bool? = nil,
             useSelfSignedCertificate: Bool? = nil,
             expectedPeerAPRNs: [String]? = nil,
             keepAlive: Keepalive? = nil
         ) {
             self.listeningIP = listeningIP
             self.listeningPort = listeningPort
+            self.forceIPv6Resolution = forceIPv6Resolution
             self._useSelfSignedCertificate = useSelfSignedCertificate
             self.expectedPeerAPRNs = expectedPeerAPRNs
             self.keepalive = keepAlive
@@ -428,6 +498,7 @@ extension CloudBoardDConfiguration {
             GRPCConfiguration(\
             listeningIP: \(String(describing: self.listeningIP)), \
             listeningPort: \(String(describing: self.listeningPort)), \
+            forceIPv6Resolution: \(self.forceIPv6Resolution.map { "\($0)" } ?? "nil"), \
             useSelfSignedCertificate: \(self.useSelfSignedCertificate), \
             expectedPeerAPRNs: \(self.expectedPeerAPRNs.map { $0.joined(separator: ", ") } ?? "nil")
             keepalive: \(String(describing: self.keepalive))
@@ -583,36 +654,28 @@ extension CloudBoardDConfiguration {
 extension CloudBoardDConfiguration {
     public struct PrewarmingConfiguration: Codable, Hashable, Sendable, CustomStringConvertible {
         enum CodingKeys: String, CodingKey {
-            case _prewarmedPoolSize = "PrewarmedPoolSize"
-            case _maxProcessCount = "MaxProcessCount"
+            case prewarmedPoolSize = "PrewarmedPoolSize"
+            case maxProcessCount = "MaxProcessCount"
         }
-
-        private var _prewarmedPoolSize: Int?
-        private var _maxProcessCount: Int?
 
         /// Number of cb_jobhelper and cloud app process pairs to keep pre-warmed. The number of processes in the pool
         /// can be lower if maxProcessCount minus the number of request-handling processes is smaller then the value
         /// configured here.
-        public var prewarmedPoolSize: Int {
-            self._prewarmedPoolSize ?? 3
-        }
-
+        public var prewarmedPoolSize: Int?
         /// Total limit of cb_jobhelper and cloud app process pairs including both inactive pre-warmed pairs as well as
         /// active request-handling pairs.
-        public var maxProcessCount: Int {
-            self._maxProcessCount ?? 3
-        }
+        public var maxProcessCount: Int?
 
         init(prewarmedPoolSize: Int? = nil, maxProcessCount: Int? = nil) {
-            self._prewarmedPoolSize = prewarmedPoolSize
-            self._maxProcessCount = maxProcessCount
+            self.prewarmedPoolSize = prewarmedPoolSize
+            self.maxProcessCount = maxProcessCount
         }
 
         public var description: String {
             """
             PrewarmingConfiguration(\
-            prewarmedPoolSize: \(self.prewarmedPoolSize) \
-            maxProcessCount: \(self.maxProcessCount) \
+            prewarmedPoolSize: \(self.prewarmedPoolSize.map { "\($0)" } ?? "nil") \
+            maxProcessCount: \(self.maxProcessCount.map { "\($0)" } ?? "nil") \
             )
             """
         }
@@ -642,15 +705,5 @@ extension ServerConnectionKeepalive {
             maximumPingsWithoutData: UInt(resolved.maxPingsWithoutData),
             minimumSentPingIntervalWithoutData: .init(resolved.interval)
         )
-    }
-}
-
-extension Duration {
-    static func minutes(_ minutes: Int) -> Duration {
-        return .seconds(minutes * 60)
-    }
-
-    static func hours(_ hours: Int) -> Duration {
-        return .minutes(hours * 60)
     }
 }

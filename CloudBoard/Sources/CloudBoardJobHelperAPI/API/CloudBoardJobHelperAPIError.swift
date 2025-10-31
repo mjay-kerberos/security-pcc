@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -14,10 +14,42 @@
 
 //  Copyright © 2023 Apple Inc. All rights reserved.
 import CloudBoardLogging
+package import CloudBoardAsyncXPC
 
-public enum CloudBoardJobHelperAPIError: Error, Codable, Sendable, Hashable {
+package enum CloudBoardJobHelperAPIError: Error, ByteBufferCodable, Sendable, Hashable {
     case noDelegateSet
     case unexpectedReportableError(String)
+
+    @inlinable
+    public func encode(to buffer: inout ByteBuffer) throws {
+        switch self {
+        case .noDelegateSet: buffer.writeInteger(0)
+        case .unexpectedReportableError(let value):
+            buffer.writeInteger(1)
+            try value.encode(to: &buffer)
+        }
+    }
+
+    public init(from buffer: inout ByteBuffer) throws {
+        guard let enumCase: Int = buffer.readInteger() else {
+            throw DecodingError.valueNotFound(
+                Self.self,
+                .init(codingPath: [], debugDescription: "no expected enum case")
+            )
+        }
+        switch enumCase {
+        case 0:
+            self = .noDelegateSet
+        case 1:
+            let value = try String(from: &buffer)
+            self = .unexpectedReportableError(value)
+        case let value:
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: [ByteBufferCodingKey(Self.self)],
+                debugDescription: "bad result enum case \(value)"
+            ))
+        }
+    }
 }
 
 extension CloudBoardJobHelperAPIError: CustomStringConvertible {

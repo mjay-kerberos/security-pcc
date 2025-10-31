@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -36,8 +36,12 @@
 
 import Foundation
 import OSLog
-import cloudOSInfo
-import CloudBoardPreferences
+#if canImport(cloudOSInfo)
+@_weakLinked import cloudOSInfo
+#endif
+#if canImport(CloudConfigurationPreferences)
+@_weakLinked import CloudConfigurationPreferences
+#endif
 
 internal let kDomain = "com.apple.prcos.splunkloggingd"
 
@@ -59,20 +63,48 @@ class SplunkloggingdConfigWriter {
 
     static func run() async throws {
         // First command line argument is the path to the output configuration file
-        if CommandLine.argc != 2 {
+        if CommandLine.argc < 2 {
             logger.error("Usage: SplunkloggingdConfigWriter <output file>")
             exit(1)
         }
+
+        if CommandLine.argc == 3 {
+            let prismOutputFile = CommandLine.arguments[2]
+            logger.info("Will write a Prism config file at \(CommandLine.arguments[2])")
+
+            // If a second argument is provided, read the Prism config
+            if let prismConfig = readPrismConfig() {
+                writeOutputFile(config: prismConfig, prismOutputFile)
+                logger.info("Prism configuration written to \(prismOutputFile, privacy: .public)")
+            }
+            else {
+                // missing prism configuration is not a fatal error.
+                logger.error("Failed to read Prism configuration. No files will be written.")
+            }
+        }
+
         let outputFile = CommandLine.arguments[1]
         // Get the static configuration from CFPrefs.
-        let config = readConfig()
-        guard let config = config else {
+        guard let config = readConfig() else {
             logger.error("Failed to read configuration. No files will be written.")
             exit(1)
         }
         // Create config file using CFPrefs.
         if (!FileManager.default.fileExists(atPath: outputFile)) {
             writeOutputFile(config: config, outputFile)
+        }
+
+        try await Self.listenToHotProperties(config: config, outputFile: outputFile)
+    }
+
+    // Check that CloudConfigurationPreferences is in the SDK (will pass for macOS and fail for BMC)
+    #if canImport(CloudConfigurationPreferences)
+    private static func listenToHotProperties(config: SplunkloggingdConfiguration, outputFile: String) async throws {
+        // Ensure that we can load CloudOSInfoProvider.
+        // If we can't we might be running on macOS.
+        guard #_hasSymbol(CloudOSInfoProvider.self), #_hasSymbol(PreferencesVersionInfo.self) else {
+            logger.fault("CloudOSInfoProvider/CloudBoard not available")
+            return
         }
         let cloudOSInfoProvider = CloudOSInfoProvider()
         do {
@@ -82,10 +114,15 @@ class SplunkloggingdConfigWriter {
             }
         } catch {
             logger.error("Failed to get release type: \(error)")
-            return
+            throw error
         }
 
         logger.log("Release type is Private cloudOS. Attempting to listen to hot properties.")
+
+        guard #_hasSymbol(CloudConfigurationPreferences.PreferencesVersionInfo.self) else {
+            logger.fault("CloudConfigurationPreferences not available")
+            exit(1)
+        }
 
         // Store predicates from CFPrefs as fallback
         let staticPredicates = config.predicates
@@ -103,10 +140,16 @@ class SplunkloggingdConfigWriter {
                 for try await update in preferencesUpdates {
                     await update.applyingPreferences { newPreference in
                         if let newPredicates = newPreference.predicates {
-                            logger.log("Received predicates from hot properties: \(newPredicates)")
+                            logger.log("""
+                                Received predicates from hot properties. \
+                                \(newPredicates, privacy: .public)
+                                """)
                             config.predicates = newPredicates
                         } else {
-                            logger.log("No hot properties set. Reverting to CFPrefs predicates: \(staticPredicates)")
+                            logger.log("""
+                                No hot properties set. Reverting to CFPrefs predicates. \
+                                static_predicates=\(staticPredicates, privacy: .public)
+                                """)
                             config.predicates = staticPredicates
                         }
                         writeOutputFile(config: config, outputFile)
@@ -114,8 +157,8 @@ class SplunkloggingdConfigWriter {
                 }
             } catch {
                 logger.error("""
-                    Preferences framework closed stream with error: \
-                    \(error.localizedDescription).
+                    Preferences framework closed stream. \
+                    error=\(String(reportable: error)).
                     """)
                 if attemptCount < 10 {
                     logger.log("Will retry listening FastConfig updates in 60 seconds")
@@ -128,6 +171,11 @@ class SplunkloggingdConfigWriter {
             }
         }
     }
+    #else
+    private static func listenToHotProperties(config: SplunkloggingdConfiguration, outputFile: String) async throws {
+        logger.log("Not built for Private cloudOS. Skipping listening to hot properties.")
+    }
+    #endif
 }
 
 private func writeOutputFile(config: SplunkloggingdConfiguration, _ path: String) {
@@ -137,7 +185,11 @@ private func writeOutputFile(config: SplunkloggingdConfiguration, _ path: String
     do {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
     } catch {
-        logger.error("Failed to create directory \(directory.path). \(error)")
+        logger.error("""
+            Failed to create directory. \
+            directory_path=\(directory.path) \
+            error=\(String(reportable: error), privacy: .public)
+            """)
         exit(1)
     }
 
@@ -147,10 +199,13 @@ private func writeOutputFile(config: SplunkloggingdConfiguration, _ path: String
         let data = try encoder.encode(config)
         try data.write(to: url)
     } catch {
-        logger.error("Failed to write configuration to file. \(error)")
+        logger.error("""
+            Failed to write configuration to file. \
+            error=\(String(reportable: error), privacy: .public)
+            """)
         exit(1)
     }
-    logger.log("Configuration written to \(url.path)")
+    logger.log("Configuration written. path=\(url.path, privacy: .public)")
 }
 
 private func readConfig() -> SplunkloggingdConfiguration? {
@@ -219,12 +274,92 @@ private func readConfig() -> SplunkloggingdConfiguration? {
     result.predicates = predicates as! [String]
 
     // Read observability labels
+    #if canImport(cloudOSInfo)
+    guard #_hasSymbol(CloudOSInfoProvider.self) else {
+        logger.error("CloudOSInfoProvider not available. Proceeding without any labels.")
+        return result
+    }
+
     let cloudOSInfoProvider = CloudOSInfoProvider()
     do {
         result.observabilityLabels = try cloudOSInfoProvider.observabilityLabels()
     } catch {
         logger.warning("Failed to read observability labels. Proceeding without any labels.")
     }
+    #endif
+    return result
+}
+
+private func readPrismConfig() -> SplunkloggingdConfiguration? {
+    let result = SplunkloggingdConfiguration()
+    // Read the server name
+    let server = CFPreferencesCopyValue("PrismServer" as CFString, kDomain as CFString, kCFPreferencesAnyUser, kCFPreferencesAnyHost)
+    guard server != nil else {
+        logger.error("Failed to read Prism server from configuration. server is nil.")
+        return nil
+    }
+
+    guard let server = server as? String else {
+        logger.error("Failed to read Prism server from configuration. server is not a string.")
+        return nil
+    }
+    result.server = server
+    // Read the index name
+    let indexName = CFPreferencesCopyValue("PrismIndex" as CFString, kDomain as CFString, kCFPreferencesAnyUser,
+                                           kCFPreferencesAnyHost)
+    guard indexName != nil else {
+        logger.error("Failed to read Prism index from configuration. index is nil.")
+        return nil
+    }
+    guard let indexName = indexName as? String else {
+        logger.error("Failed to read Prism index from configuration. index is not a string.")
+        return nil
+    }
+    result.indexName = indexName
+    // Read buffer size
+    let bufferSize = CFPreferencesCopyValue("PrismBufferSize" as CFString, kDomain as CFString, kCFPreferencesAnyUser,
+                                            kCFPreferencesAnyHost)
+    if bufferSize != nil {
+        guard let bufferSize = bufferSize as? NSNumber else {
+            logger.error("Failed to read Prism buffer size from configuration. bufferSize is not a number.")
+            return nil
+        }
+        result.bufferSize = Int64(truncating: bufferSize)
+    }
+    // Read the predicates array
+    let predicates = CFPreferencesCopyValue("PrismPredicates" as CFString, kDomain as CFString, kCFPreferencesAnyUser,
+                                            kCFPreferencesAnyHost)
+    guard predicates != nil else {
+        logger.error("Failed to read Prism predicates from configuration. predicates is nil.")
+        return nil
+    }
+    guard let predicates = predicates as? [Any] else {
+        logger.error("Failed to read Prism predicates from configuration. predicates is not an array.")
+        return nil
+    }
+    // Check that all elements in the array are strings
+    for predicate in predicates {
+        guard predicate is String else {
+            logger.error("Failed to read Prism predicates from configuration. One of the elements is not a string.")
+            return nil
+        }
+    }
+    result.predicates = predicates as! [String]
+
+    // Read observability labels
+    #if canImport(cloudOSInfo)
+    guard #_hasSymbol(CloudOSInfoProvider.self) else {
+        logger.error("CloudOSInfoProvider not available for Prism configuration. Proceeding without any labels.")
+        return result
+    }
+
+    let cloudOSInfoProvider = CloudOSInfoProvider()
+    do {
+        result.observabilityLabels = try cloudOSInfoProvider.observabilityLabels()
+    } catch {
+        logger.warning("Failed to read observability labels. Proceeding without any labels.")
+    }
+    #endif
     return result
 }
 
@@ -244,5 +379,24 @@ internal class SplunkloggingdConfiguration: Encodable {
         case bufferSize = "BufferSize"
         case token = "Token"
         case observabilityLabels = "GlobalLabels"
+    }
+}
+
+fileprivate protocol ReportableError {
+    /// Description of the error that can safely be logged or emitted as a metric dimension in
+    /// production and is guaranteed to not contain privacy-sensitive information
+    var publicDescription: String { get }
+}
+
+fileprivate extension String {
+    /// Converts an error to a string that is suitable to be included in privacy-preserving logging.
+    /// If the type conforms to ``ReportableError`` the ``ReportableError/publicDescription`` is used.
+    /// Otherwise the name of error type is used.
+    init(reportable error: Error) {
+        if let reportableError = error as? ReportableError {
+            self = reportableError.publicDescription
+        } else {
+            self = String(describing: type(of: error))
+        }
     }
 }

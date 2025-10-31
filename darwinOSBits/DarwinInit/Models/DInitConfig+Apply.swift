@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -255,9 +255,16 @@ extension DInitConfig {
         if let enableSSH = enableSSH {
 #if os(macOS)
             let sshPlist = "/System/Library/LaunchDaemons/ssh.plist"
-            result.enableSSH = enableSSH
+            let disabledSSH = enableSSH
             ? Subprocess.run(shell: nil, command: "/bin/launchctl load -F -w \(sshPlist)")
                 : false
+
+            let managementSSHPlist = "/System/Library/LaunchDaemons/com.apple.ssh.management.plist"
+            let disabledManagedmentSSH = enableSSH
+            ? Subprocess.run(shell: nil, command: "/bin/launchctl load -F -w \(managementSSHPlist)")
+                : false
+
+            result.enableSSH = disabledSSH && disabledManagedmentSSH
 #else
             let sshPlist = "/AppleInternal/Library/LaunchDaemons/com.apple.internal.darwin.ssh.plist"
             // launchctl is mastered out of customer embedded darwinOS
@@ -394,6 +401,12 @@ extension DInitConfig {
             result.bandwidthLimit = Network.unsetUplinkBandwidthLimit() ? bandwidthLimit : nil
         }
 
+        if let featureFlagsConfig = featureFlagsConfig {
+            result.featureFlagsConfig = featureFlagsConfig.compactMap {
+                $0.apply(configSecurityPolicy: configSecurityPolicy) ? $0 : nil
+            }
+        }
+
         if bootingIntoREM || lockCryptexes ?? false {
             do {
                 try Computer.lockCryptexes()
@@ -448,7 +461,9 @@ extension DInitCryptexConfig {
             return DownloadedCryptex(config: self, path: encrypted)
         }
 
-        guard let compressed = await Network.downloadItem(at: url, to: destinationDirectory, attempts: 5) else {
+        let attempts = if let networkRetryCount { Int(networkRetryCount) } else { 5 }
+        // TODO: plumb a chunk size key into downloadItem
+        guard let compressed = await Network.downloadItem(at: url, to: destinationDirectory, attempts: attempts, background: backgroundTrafficClass, maxActiveTasks: maxActiveTasks, chunkSize: chunkSize) else {
             return nil
         }
 

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -16,6 +16,7 @@
 
 import CloudBoardCommon
 import CloudBoardJobAuthDAPI
+import CloudBoardLogging
 import CloudBoardMetrics
 import CryptoKit
 import Foundation
@@ -29,7 +30,7 @@ import NIOTransportServices
 import os
 import SwiftASN1
 
-enum KeyRotationServiceClientError: Swift.Error {
+enum KeyRotationServiceClientError: ReportableError {
     enum AssetType: String, RawRepresentable {
         case keyPair
         case transparencyEntry
@@ -42,6 +43,18 @@ enum KeyRotationServiceClientError: Swift.Error {
     case unexpectedResponse
     case spkiParsingFailedBadFormat
     case spkiExpiredKey
+
+    public var publicDescription: String {
+        let errorType = switch self {
+        case .grpc(let status): "grpc(status: \(status.code))"
+        case .unexpectedAssetType(let assetType): "unexpectedAssetType(\(assetType))"
+        case .applicationError(let error): "applicationError(code: \(error.errorCode))"
+        case .unexpectedResponse: "unexpectedResponse"
+        case .spkiParsingFailedBadFormat: "spkiParsingFailedBadFormat"
+        case .spkiExpiredKey: "spkiExpiredKey"
+        }
+        return "keyRotationService.\(errorType)"
+    }
 }
 
 extension SigningKey {

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -22,7 +22,7 @@ import RemoteServiceDiscovery
 import System
 
 enum DInitRemoteService {
-	static func fetchConfig(from device: remote_device_t) throws -> Data {
+	static func fetchConfig(from device: remote_device_t, service: String) throws -> Data {
 		var configData: Data = Data()
 		
 		if remote_device_get_state(device) != REMOTE_DEVICE_STATE_CONNECTED {
@@ -30,14 +30,14 @@ enum DInitRemoteService {
 			throw DInitRemoteService.Error.remoteDeviceNotConnected
 		}
 
-		guard let remoteService = remote_device_copy_service(device, kDInitRemoteServiceName) else {
-			logger.error("remote device doesn't have service \(kDInitRemoteServiceName)")
+		guard let remoteService = remote_device_copy_service(device, service) else {
+			logger.error("remote device doesn't have service \(service)")
 			throw DInitRemoteService.Error.noDInitRemoteService
 		}
 
 		let socket = remote_service_create_connected_socket(remoteService)
 		guard socket != -1 else {
-			logger.error("failed to connect to \(kDInitRemoteServiceName)")
+			logger.error("failed to connect to \(service)")
 			throw DInitRemoteService.Error.connectionFailed
 		}
 		

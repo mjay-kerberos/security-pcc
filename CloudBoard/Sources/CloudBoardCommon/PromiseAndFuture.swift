@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -246,6 +246,14 @@ extension Promise {
 extension Promise where Value == Void {
     public func succeed() {
         self.fulfil(with: .success(()))
+    }
+}
+
+extension Promise where Value == Void {
+    public static func successful<Err>() -> Promise<Value, Err> {
+        let promise = Promise<Void, Err>()
+        promise.succeed()
+        return promise
     }
 }
 

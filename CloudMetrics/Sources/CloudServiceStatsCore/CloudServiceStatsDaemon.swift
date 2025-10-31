@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -34,9 +34,9 @@ class CloudServiceStatsDaemon {
     static let processName = "cloudservicestatsd"
     static let minIntervalSec = 1
     static let maxIntervalSec = 10
-    
+
     private let watchdogService: CloudServiceStatsWatchdogService
-    
+
     public init() {
         CloudMetrics.bootstrap()
         watchdogService = CloudServiceStatsWatchdogService(processName: Self.processName, logger: Self.logger)
@@ -46,68 +46,18 @@ class CloudServiceStatsDaemon {
         // activate the monitor id with launchd stats SPI
         let error = LaunchServiceStats.activateMonitor(Self.monitorId)
         if error != 0 {
-            Self.logger.error("Unable to activate monitor id \(Self.monitorId, privacy: .public)")
+            Self.logger.error("Unable to activate. monitor_id=\(Self.monitorId, privacy: .public)")
             throw CloudServiceStatsDaemonError.unableToActivateMontiorId
         }
 
         await watchdogService.activate()
 
-        // start polling for service exit information
-        let clock = ContinuousClock()
+        // Register for OSAnalytics events
+        let analyticsMonitor = OSAnalyticsMonitor()
+        analyticsMonitor.registerForOSAnalyticsReports()
         
-        var nextPollInterval: Int = Self.maxIntervalSec
-        while true {
-            let (stats, error) = await LaunchServiceStats.pollStats(withMonitorId: Self.monitorId)
-            if error != 0 {
-                Self.logger.error("ErrorCode=\(error, privacy: .public) fetching launchd stats")
-                throw CloudServiceStatsDaemonError.unableToFetchLaunchdStats
-            }
-
-            guard let stats else {
-                throw CloudServiceStatsDaemonError.invalidLaunchServiceStatsResponse
-            }
-
-            for record in stats.records {
-                Self.logger.log("Received launchd stats for \(record.structured, privacy: .public)")
-                self.emitExitReasonMetric(record: record)
-            }
-
-            if stats.dropped_count != 0 {
-                nextPollInterval = max(Self.minIntervalSec, nextPollInterval / 2)
-                Self.logger.log("\(stats.dropped_count, privacy: .public) service exit events dropped")
-            } else {
-                nextPollInterval = min(Self.maxIntervalSec, nextPollInterval * 2)
-            }
-
-            Self.logger.info("Will poll for new stats in \(nextPollInterval) seconds")
-            try await clock.sleep(for: .seconds(nextPollInterval))
-        }
-    }
-
-    private func emitExitReasonMetric(record: LaunchServiceStatsRecord) {
-        let exitReasonNameSpace = Int32(record.exit_reason_namespace)
-        let exitReasonCode = Int32(record.exit_reason_code)
-        let exitReason = CategorizedExitReason(namespace: exitReasonNameSpace, exitCode: exitReasonCode)
-
-        Counter(
-            label: exitReason.metricLabel,
-            dimensions: [("process", record.label)]
-        ).increment()
-
-    }
-}
-
-extension LaunchServiceStatsRecord {
-    var structured : String {
-        return """
-        process_name=\(self.label)
-        spawn_timestamp_ms=\(self.spawn_timestamp)
-        exit_timestamp_ms=\(self.exit_timestamp)
-        last_time_to_relaunch_ms=\(self.last_ttr)
-        exit_reason_namespace=\(self.exit_reason_namespace)
-        exit_reason_code=\(self.exit_reason_code)
-        lifetime_max_phys_footprint_kb=\(self.lifetime_max_phys_footprint_kb)
-        interval_max_phys_footprint_kb=\(self.interval_max_phys_footprint_kb)
-        """
+        // Register for LaunchServiceStats events
+        let launchServiceStatsMonitor = LaunchServiceStatsMonitor()
+        try await launchServiceStatsMonitor.run()
     }
 }

@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -17,6 +17,19 @@
 
 import CryptoKit
 import Foundation
+
+// Terminal gleans the size (in characters) of the controlling terminal
+enum Terminal {
+    static var size: (columns: UInt16, rows: UInt16) {
+        var winSize = winsize()
+
+        guard ioctl(STDOUT_FILENO, TIOCGWINSZ, &winSize) == 0 else {
+            return (0, 0)
+        }
+
+        return (columns: winSize.ws_col, rows: winSize.ws_row)
+    }
+}
 
 // dateFormat is normalized form used in tool when displaying dates [YYYY-MM-DDTHH:mm:SS] in local TZ
 private let dateFormat = Date.ISO8601FormatStyle(timeZone: TimeZone.current)
@@ -58,103 +71,6 @@ func asJSONString(_ data: (any Encodable)?, pretty: Bool = false) -> String {
     return "{}"
 }
 
-// ExecCommand provides means to synchronously execution an external command with different means of capturing output
-struct ExecCommand {
-    private let process: Process
-
-    init(_ command: [String], envvars: [String: String]? = nil) {
-        var command = command
-        self.process = Process()
-        process.qualityOfService = .userInteractive
-        process.executableURL = URL(fileURLWithPath: command.removeFirst())
-        process.arguments = command
-        if let envvars {
-            process.environment = envvars
-        }
-    }
-
-    enum OutputMode {
-        case none // no output captured
-        case terminal // output set to original stdout/err of caller
-        case capture // stdout captured in return arg (stderr suppressed)
-        case tee // capture + write to stdout
-    }
-
-    @discardableResult
-    func run(
-        outputMode: OutputMode = .none,
-        queue: DispatchQueue? = nil
-    ) throws -> (Int32, String, String) {
-        let stdoutData = NSMutableData()
-        let stderrData = NSMutableData()
-
-        switch outputMode {
-        case .none:
-            process.standardInput = nil
-            process.standardOutput = nil
-            process.standardError = nil
-
-        case .capture, .tee:
-            process.standardInput = nil
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
-
-            stdoutPipe.fileHandleForReading.readabilityHandler = {
-                let data = $0.availableData
-
-                guard !data.isEmpty else {
-                    $0.readabilityHandler = nil
-                    return
-                }
-
-                stdoutData.append(data)
-                if outputMode == .tee {
-                    fputs(String(decoding: data, as: UTF8.self), stdout)
-                }
-            }
-
-            stderrPipe.fileHandleForReading.readabilityHandler = {
-                let data = $0.availableData
-
-                guard !data.isEmpty else {
-                    $0.readabilityHandler = nil
-                    return
-                }
-
-                stderrData.append(data)
-                if outputMode == .tee {
-                    fputs(String(decoding: data, as: UTF8.self), stderr)
-                }
-            }
-
-        case .terminal:
-            // standard stdin/out/err configuration - leave them be
-            break
-        }
-
-        // signal handling: ensure sub process terminated upon interrupt
-        var sigSource: [Int32: DispatchSourceSignal] = [:] // handlers must remain in scope
-        if let queue {
-            for sigVal in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
-                signal(sigVal, SIG_IGN)
-                sigSource[sigVal] = DispatchSource.makeSignalSource(signal: sigVal, queue: queue)
-                sigSource[sigVal]!.setEventHandler { process.terminate() }
-                sigSource[sigVal]!.resume()
-            }
-        }
-
-        try process.run()
-        process.waitUntilExit()
-        return (process.terminationStatus,
-                String(decoding: stdoutData as Data, as: UTF8.self)
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                String(decoding: stderrData as Data, as: UTF8.self)
-                    .trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-}
-
 // computeDigest calculates hash of atPath (file) with hash function (using) returning digest;
 //  file is processed in (1 MiB) chunks
 func computeDigest(at: URL, using hashFunction: any HashFunction.Type) throws -> any Digest {
@@ -172,14 +88,7 @@ func computeDigest(at: URL, using hashFunction: any HashFunction.Type) throws ->
     return hasher.finalize()
 }
 
-struct Terminal {
-    static var size: (columns: UInt16, rows: UInt16) {
-        var winSize = winsize()
-
-        guard ioctl(STDOUT_FILENO, TIOCGWINSZ, &winSize) == 0 else {
-            return (0, 0)
-        }
-
-        return (columns: winSize.ws_col, rows: winSize.ws_row)
-    }
+// Needs to pass the rules of _SC_stringIsValidDNSName()
+func randomHostname() -> String {
+    return String(UUID().uuidString.prefix(8))
 }

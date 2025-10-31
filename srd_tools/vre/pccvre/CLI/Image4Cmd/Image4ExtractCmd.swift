@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -47,8 +47,6 @@ extension CLI.Image4Cmd {
         @OptionGroup var fileOptions: CLI.Image4Cmd.options
 
         func run() async throws {
-            CLI.setupDebugStderr(debugEnable: globalOptions.debugEnable)
-
             let fileData = try fileOptions.readInputData()
 
             let img4Obj = parseImg4Data(fileData)

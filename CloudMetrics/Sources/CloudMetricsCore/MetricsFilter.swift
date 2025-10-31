@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -99,7 +99,7 @@ package final class MetricsFilter: Sendable {
     private let disabled: Bool
     private let frequencyTracker: FrequencyTracker
 
-    package init(configuration: Configuration, forceEnable: Bool = false) {
+    package init(configuration: Configuration) {
         self.allowList = configuration.auditLists?.allowedMetrics.reduce(
             into: [ClientName: [MetricName: Configuration.FilterRule]]()) { result, rule in
             if result[rule.client] != nil {
@@ -130,11 +130,11 @@ package final class MetricsFilter: Sendable {
                 if let filteringEnforced = try SecureConfigParameters.loadContents().metricsFilteringEnforced {
                     enableFiltering = filteringEnforced
                 } else {
-                    enableFiltering = forceEnable
+                    enableFiltering = configuration.requireAllowList
                 }
             } else {
                 // if metricsFilteringEnforced is not available in secure config, disable the metrics filtering
-                enableFiltering = forceEnable
+                enableFiltering = configuration.requireAllowList
             }
         } catch {
             logger.error("Can't access `metricsFilteringEnforced` in SecureConfigParameters: \(error, privacy: .public)")
@@ -144,7 +144,7 @@ package final class MetricsFilter: Sendable {
                 // in order to support development/testing
                 enableFiltering = !self.allowList.isEmpty
             #else
-                enableFiltering = forceEnable
+                enableFiltering = configuration.requireAllowList
             #endif
         }
 

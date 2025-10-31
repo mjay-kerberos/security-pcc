@@ -1,4 +1,4 @@
-// Copyright © 2024 Apple Inc. All Rights Reserved.
+// Copyright © 2025 Apple Inc. All Rights Reserved.
 
 // APPLE INC.
 // PRIVATE CLOUD COMPUTE SOURCE CODE INTERNAL USE LICENSE AGREEMENT
@@ -18,6 +18,9 @@ import Security
 
 // rdar://137137722 (SecKey should be Sendable)
 extension SecKey: @unchecked @retroactive Sendable {}
+// rdar://128187452 (Make SecCertificate thread safe and then sendable)
+extension SecCertificate: @unchecked @retroactive Sendable {}
+extension SecIdentity: @unchecked @retroactive Sendable {}
 
 // The interactions with SecKeychain in our code are thread-safe, so we bypass the compiler enforcement
 extension SecKeychain: @unchecked @retroactive Sendable {}
